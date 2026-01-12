@@ -1,0 +1,16 @@
+# --- AI & Vertex (The "Brain" - Minimal) ---
+# We use vertexai instead of the full aiplatform to save space/memory
+google-cloud-aiplatform>=1.38.0
+
+# --- Core App Dependencies ---
+Flask==3.1.2
+gunicorn==23.0.0
+psycopg2-binary==2.9.11
+python-dotenv==1.2.1
+requests==2.32.5
+
+# --- Other Services ---
+firebase-admin==6.5.0
+redis==5.0.1
+h3==4.3.1
+anthropic==0.75.0
