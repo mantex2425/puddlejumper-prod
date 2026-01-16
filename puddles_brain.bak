@@ -1,0 +1,112 @@
+import os
+import psycopg2
+import traceback
+from flask import Blueprint, request, jsonify
+
+from google import genai
+from google.genai.types import (
+    Tool,
+    GoogleSearch,
+    GenerateContentConfig,
+    EmbedContentConfig,
+)
+
+puddles_bp = Blueprint('puddles', __name__)
+
+# Constants
+PROJECT_ID = "puddle-jumper-477316"
+LOCATION = "us-central1"
+DB_HOST = "10.128.0.2"
+
+@puddles_bp.route('/ask_puddles', methods=['POST'])
+def ask_puddles():
+    # 1. Capture User Location from Google Cloud Headers
+    # Google Cloud Run injects these based on the user's IP
+    city = request.headers.get('X-AppEngine-City', 'unknown')
+    region = request.headers.get('X-AppEngine-Region', 'unknown')
+    country = request.headers.get('X-AppEngine-Country', 'unknown')
+    
+    user_location = f"{city}, {region}, {country}".replace("unknown, ", "").replace(", unknown", "")
+    if city == 'unknown':
+        user_location = "the user's current local area"
+
+    data = request.get_json()
+    question = data.get('question', '')
+
+    if not question:
+        return jsonify({"error": "Puddles didn't hear a question!"}), 400
+
+    client = genai.Client(
+        vertexai=True,
+        project=PROJECT_ID,
+        location=LOCATION
+    )
+    search_tool = Tool(google_search=GoogleSearch())
+
+    conn = None
+    try:
+        # A. Get context from Postgres (RAG)
+        embedding_response = client.models.embed_content(
+            model="text-embedding-004", 
+            contents=question,
+            config=EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+        )
+        question_vector = embedding_response.embeddings[0].values
+
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            database="puddlejumper",
+            user="atjb",
+            password=os.environ.get("DB_PASSWORD"),
+            connect_timeout=5
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT content 
+                FROM knowledge_base 
+                ORDER BY embedding <=> %s::vector 
+                LIMIT 3
+            """, (question_vector,))
+            results = cur.fetchall()
+        
+        context = "\n\n".join([row[0] for row in results])
+
+        # B. Gemini generation with Location Awareness
+        # We inject the location into the system instruction so the model
+        # knows where it is when it performs a Google Search.
+        system_instruction = f"""You are Puddles, a helpful mentor for drivers. 
+You are currently helping a driver in {user_location}.
+You ARE equipped with a Google Search tool. 
+If a user asks about sports, weather, or news, you MUST use your search tool. 
+ALWAYS prioritize information relevant to {user_location}."""
+
+        prompt = f"""USER LOCATION: {user_location}
+CONTEXT FROM DATABASE: {context}
+DRIVER QUESTION: {question}
+
+Remember: 1-2 sentences, peer tone. Use search for real-time/local info."""
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-001",
+            contents=prompt,
+            config=GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7,
+                max_output_tokens=180,
+                tools=[search_tool],
+            ),
+        )
+
+        return jsonify({
+            "answer": response.text.strip(),
+            "location_used": user_location # Good for your testing!
+        })
+
+    except Exception as e:
+        print("PUDDLES ERROR:\n" + traceback.format_exc())
+        return jsonify({"error": "Puddles is having a bit of trouble thinking. Try again!"}), 500
+    
+    finally:
+        if conn:
+            conn.close()

@@ -1,16 +1,23 @@
-# --- AI & Vertex (The "Brain" - Minimal) ---
-# We use vertexai instead of the full aiplatform to save space/memory
-google-cloud-aiplatform>=1.38.0
+# --- LangGraph & Orchestration (Loosened for compatibility) ---
+langgraph
+langchain-google-vertexai
+langchain-core
+langgraph-checkpoint-postgres
+langchain-google-genai>=4.2.0  # Added for updated embeddings support
 
-# --- Core App Dependencies ---
+# --- Database & Performance (These are fine to keep pinned) ---
+psycopg-pool==3.3.0
+psycopg[binary]==3.2.4
+
+# --- Keep your existing dependencies below ---
+google-genai>=1.57.0
 Flask==3.1.2
 gunicorn==23.0.0
 psycopg2-binary==2.9.11
 python-dotenv==1.2.1
 requests==2.32.5
-
-# --- Other Services ---
 firebase-admin==6.5.0
 redis==5.0.1
 h3==4.3.1
 anthropic==0.75.0
+geopy==2.4.1
