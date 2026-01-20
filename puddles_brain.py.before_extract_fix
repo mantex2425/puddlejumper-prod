@@ -7,26 +7,21 @@ from psycopg.rows import dict_row
 from typing import Annotated, TypedDict, List
 from flask import Blueprint, request, jsonify
 
-# Remove unused import: from langgraph.types import Overwrite
-
 # LangGraph & Logic Imports
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.prebuilt import ToolNode
 from langchain_google_vertexai import ChatVertexAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage
 from psycopg_pool import ConnectionPool
 
 # Import all tools from our modular tools package
 from tools import (
-    get_weather,
     get_live_traffic,
     get_directions,
     send_to_navigation,
     find_nearby_places,
-    get_place_details,
     trigger_app_action,
     check_internal_knowledge,
     web_search
@@ -47,13 +42,11 @@ DB_URI = f"postgresql://atjb:{DB_PASSWORD}@{DB_HOST}:5432/puddlejumper"
 
 # --- All Tools List ---
 ALL_TOOLS = [
-    get_weather,
     check_internal_knowledge,
     get_live_traffic,
     get_directions,
     send_to_navigation,
     find_nearby_places,
-    get_place_details,
     trigger_app_action,
     web_search
 ]
@@ -64,9 +57,6 @@ class PuddlesState(TypedDict):
     messages: Annotated[List[AnyMessage], add_messages]
     current_gps: str
     current_addr: str
-
-    navigation_url: str  # Plain str defaults to overwrite
-    app_action: str  # Plain str defaults to overwrite
 
 llm = ChatVertexAI(
     model_name="gemini-2.0-flash-001", 
@@ -131,56 +121,26 @@ app_brain = workflow.compile(checkpointer=checkpointer)
 
 def extract_action_from_messages(messages: List[AnyMessage]) -> dict:
     """
-    Extract navigation_url or app_action from tool responses,
-    ensuring we only return actions from the CURRENT turn.
+    Extract navigation_url or app_action from tool responses.
+    Returns a dict with action data for Android to handle.
     """
     action_response = {}
     
     # Search messages in reverse order (most recent first)
     for msg in reversed(messages):
-        # Log what we're examining
-        logging.info(f"   Examining message type: {type(msg).__name__}")
-        
-        # 🛑 STOP: If we hit the latest HumanMessage, we have passed the current turn's tools
-        if isinstance(msg, HumanMessage):
-            logging.info("   Found HumanMessage boundary. Stopping search to avoid sticky data.")
-            break
-        
-        # Check ToolMessage (this is where fresh tool results are stored)
-        if hasattr(msg, '__class__') and msg.__class__.__name__ == 'ToolMessage':
-            logging.info(f"   Found ToolMessage with content type: {type(msg.content)}")
+        # Check if message has content that's a dict or list
+        if hasattr(msg, "content"):
             content = msg.content
             
-            # ToolMessage content is usually a JSON string
+            # Handle string content (shouldn't happen with tool responses, but be safe)
             if isinstance(content, str):
-                try:
-                    import json
-                    parsed = json.loads(content)
-                    
-                    if "navigation_url" in parsed:
-                        action_response["navigation"] = {
-                            "url": parsed["navigation_url"],
-                            "place_name": parsed.get("place_name", "destination")
-                        }
-                        logging.info(f"   ✅ Found FRESH navigation_url: {parsed['navigation_url']}")
-                        return action_response
-                    
-                    if "app_action" in parsed:
-                        action_response["app_action"] = parsed["app_action"]
-                        logging.info(f"   ✅ Found FRESH app_action: {parsed['app_action']}")
-                        return action_response
-                except json.JSONDecodeError:
-                    logging.warning(f"   Failed to parse ToolMessage content as JSON")
-                    pass
-        
-        # Fallback: Check AIMessage for tool outputs if not using a ToolNode
-        if hasattr(msg, "content") and not isinstance(msg, HumanMessage):
-            content = msg.content
+                continue
             
-            # Check for structured dictionaries in content list
+            # Handle list content (typical for tool responses)
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict):
+                        # Check for navigation_url
                         if "navigation_url" in item:
                             action_response["navigation"] = {
                                 "url": item["navigation_url"],
@@ -188,13 +148,25 @@ def extract_action_from_messages(messages: List[AnyMessage]) -> dict:
                             }
                             return action_response
                         
+                        # Check for app_action
                         if "app_action" in item:
                             action_response["app_action"] = item["app_action"]
                             return action_response
+            
+            # Handle dict content directly
+            if isinstance(content, dict):
+                if "navigation_url" in content:
+                    action_response["navigation"] = {
+                        "url": content["navigation_url"],
+                        "place_name": content.get("place_name", "destination")
+                    }
+                    return action_response
+                
+                if "app_action" in content:
+                    action_response["app_action"] = content["app_action"]
+                    return action_response
     
-    logging.info(f"   ⚠️ No FRESH action data found for this turn.")
     return action_response
-
 
 # --- Flask Route ---
 
@@ -235,28 +207,18 @@ def ask_puddles():
         }
         
         logging.info(f"🧠 INVOKING BRAIN with thread_id={thread_id}")
-        
-        # 1. Capture how many messages were in the thread BEFORE we started this turn
-        # This allows us to isolate only the messages generated in THIS call
-        previous_state = app_brain.get_state(config)
-        pre_count = len(previous_state.values.get("messages", []))
-        
         final_state = app_brain.invoke(inputs, config=config)
         logging.info(f"🧠 BRAIN COMPLETED")
         
         logging.info(f"📤 Extracting final message...")
-        all_messages = final_state["messages"]
-        final_message = all_messages[-1]
+        final_message = final_state["messages"][-1]
+        logging.info(f"   Final message type: {type(final_message)}")
         
         # Extract reply text
         reply_text = final_message.content if hasattr(final_message, 'content') else "I'm having trouble responding right now."
         
-        # 2. Extract actions ONLY from the messages added in THIS turn
-        # We skip everything before the pre_count
-        new_messages = all_messages[pre_count:]
-        action_data = extract_action_from_messages(new_messages)
-        
-        logging.info(f"   Turn messages being examined: {len(new_messages)}")
+        # Extract actions (navigation_url or app_action)
+        action_data = extract_action_from_messages(final_state["messages"])
         
         logging.info(f"📦 Building response...")
         response = {
@@ -264,9 +226,14 @@ def ask_puddles():
             "context_hash": thread_id
         }
         
-        # Add action data if present (explicitly set to None if not found)
-        response["navigation_url"] = action_data.get("navigation", {}).get("url", None)
-        response["app_action"] = action_data.get("app_action", None)
+        # Add action data if present
+        if "navigation" in action_data:
+            response["navigation_url"] = action_data["navigation"]["url"]
+            logging.info(f"   📍 Navigation URL: {action_data['navigation']['url']}")
+        
+        if "app_action" in action_data:
+            response["app_action"] = action_data["app_action"]
+            logging.info(f"   📱 App Action: {action_data['app_action']}")
         
         logging.info(f"✅ Returning response with reply length: {len(response.get('reply', ''))}")
         return jsonify(response)

@@ -46,6 +46,9 @@ app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
 app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(puddles_bp, url_prefix="/api/v1")
+# Force puddles_brain to fully initialize at startup
+from puddles_brain import app_brain
+_ = app_brain  # Reference to trigger full module load
 
 # --------------------------------------------------------------
 # 3. Global Auth Middleware (Optimized)
