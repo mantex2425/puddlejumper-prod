@@ -213,52 +213,118 @@ def score_google_results(
 
 
 def geocode_single(
-      query,
-      metro_lat,
-      metro_lng,
-      metro_name,
-      uid,
-      trip_miles,
-      is_dropoff,
-      pickup_lat=None,
-      pickup_lng=None
-  ):
-      if not query or not query.strip():
-          return {"status": "no_match"}
+    query,
+    metro_lat,
+    metro_lng,
+    metro_name,
+    uid,
+    trip_miles,
+    is_dropoff,
+    pickup_lat=None,
+    pickup_lng=None
+):
+    if not query or not query.strip():
+        return {"status": "no_match"}
 
-      cleaned = query.strip().replace("fm ", "Farm to Market Road ")
+    cleaned = query.strip().replace("fm ", "Farm to Market Road ")
+    
+    # Use driver location as center for bounds
+    radius_meters = 50000  # ~30 miles
 
-      # Use driver location as center for bounds
-      radius_meters = 50000  # ~30 miles - plenty of room
+    # --- PASS 1: STANDARD GEOCODE ---
+    results, err = call_google_geocode(
+        cleaned, metro_lat, metro_lng, metro_name, radius_meters
+    )
 
-      results, err = call_google_geocode(
-          cleaned, metro_lat, metro_lng, metro_name, radius_meters
-      )
+    if err or not results:
+        print(f"[GEOCODE] No results for '{cleaned}': err={err}", flush=True)
+        return {"status": "no_match"}
 
-      if err or not results:
-          print(f"[GEOCODE] No results for '{cleaned}': err={err}", flush=True)
-          return {"status": "no_match"}
+    # --- PASS 2: VALIDATION & SCORING ---
+    # Only run deep validation if this is a Dropoff AND we have trip distance
+    if is_dropoff and pickup_lat and pickup_lng and trip_miles > 0:
+        
+        # Score candidates against the trip distance
+        scored = score_google_results(
+            results,
+            cleaned.lower(),
+            pickup_lat,
+            pickup_lng,
+            metro_lat,
+            metro_lng,
+            trip_miles,
+            is_dropoff=True
+        )
 
-      # Trust Google's top result - it knows what it's doing
-      top = results[0]
-      lat = top.get("lat")
-      lng = top.get("lng")
+        # If NO candidates matched the distance...
+        if not scored:
+            print(f"[GEOCODE] No distance match for '{cleaned}' (Trip: {trip_miles}mi).", flush=True)
+            
+            # --- PASS 3: AIRPORT FALLBACK ---
+            # If the trip is long (>15 miles), maybe they meant "The Airport"?
+            if trip_miles > 15:
+                print(f"[GEOCODE] Trying Airport Fallback for {metro_name}...", flush=True)
+                airport_results, _ = call_google_geocode(
+                    f"Airport {metro_name}", 
+                    metro_lat, metro_lng, metro_name, radius_meters
+                )
+                
+                if airport_results:
+                    # Score the generic airports against the specific trip distance
+                    scored = score_google_results(
+                        airport_results,
+                        "airport", # generic query
+                        pickup_lat,
+                        pickup_lng,
+                        metro_lat,
+                        metro_lng,
+                        trip_miles,
+                        is_dropoff=True
+                    )
 
-      if lat is None or lng is None:
-          return {"status": "no_match"}
+        # If we STILL have no matches after fallback, fail safely
+        if not scored:
+             print(f"[GEOCODE] FAILED: '{cleaned}' - no candidates match trip distance {trip_miles} mi", flush=True)
+             return {"status": "no_match", "reason": "distance_mismatch"}
 
-      print(f"[GEOCODE] '{cleaned}' -> {top.get('formatted_address')} ({lat}, {lng})", flush=True)
+        # We have a winner!
+        winner = scored[0]
+        print(f"[GEOCODE] WINNER: '{cleaned}' -> {winner['name']} "
+              f"(Dist: {winner['distance_miles']:.1f}mi vs Trip: {trip_miles}mi)", flush=True)
+        
+        return {
+            "status": "success",
+            "winner_name": winner["name"],
+            "lat": winner["lat"],
+            "lng": winner["lng"],
+            "h3_index": h3.latlng_to_cell(winner["lat"], winner["lng"], 8),
+            "score": winner["final_score"],
+            "distance_miles": winner["distance_miles"],
+            "audit_trail": scored[:3],
+            "source": "google_scored"
+        }
 
-      return {
-          "status": "success",
-          "winner_name": top.get("formatted_address"),
-          "lat": lat,
-          "lng": lng,
-          "h3_index": h3.latlng_to_cell(lat, lng, 8),
-          "score": 1000,  # Dummy score for compatibility
-          "audit_trail": results[:3],
-          "source": "google"
-      }
+    # --- FALLBACK: PICKUP OR NO TRIP DATA ---
+    # If it's a pickup, or we don't know the trip length, trust Google's #1 result
+    top = results[0]
+    lat = top.get("lat")
+    lng = top.get("lng")
+
+    if lat is None or lng is None:
+        return {"status": "no_match"}
+
+    print(f"[GEOCODE] PICKUP/SIMPLE: '{cleaned}' -> {top.get('formatted_address')}", flush=True)
+
+    return {
+        "status": "success",
+        "winner_name": top.get("formatted_address"),
+        "lat": lat,
+        "lng": lng,
+        "h3_index": h3.latlng_to_cell(lat, lng, 8),
+        "score": 1000,
+        "audit_trail": results[:3],
+        "source": "google_simple"
+    }
 
 
 

@@ -11,20 +11,13 @@ def trigger_app_action(action_type: str, parameters: dict = None):
     """
     Trigger Android app UI actions and features.
     
-    Use when driver wants to control the app itself:
-    
-    Navigation modes:
-    - "towards red zone", "towards green zone" → action_type="navigate_towards", parameters={"zone_color": "red"}
-    - "go home", "head home" → action_type="navigate_towards", parameters={"destination": "home"}
-    - "towards downtown" → action_type="navigate_towards", parameters={"destination": "downtown"}
-    
-    Trip controls:
-    - "puddlejump", "end trip", "start trip" → action_type="puddlejump", parameters={}
-    - "accept ride", "decline ride" → action_type="ride_decision", parameters={"accept": true/false}
+    Use for NON-RIDE-MODE app controls:
     
     App features:
     - "show my stats", "show logs", "show history" → action_type="show_logs", parameters={}
-    - "toggle auto accept", "turn on auto mode" → action_type="toggle_feature", parameters={"feature": "auto_accept"}
+    - "center map", "zoom in" → action_type="map_control", parameters={"action": "center"}
+    
+    ⚠️ DO NOT use for ride modes (puddle jump, towards, freestyle) - use set_ride_mode instead!
     
     Args:
         action_type: The action category (see examples above)

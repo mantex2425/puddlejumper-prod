@@ -1,5 +1,5 @@
 # backend/decisions.py
-# VERSION: 8.0 - Added ocr_confidence storage
+# VERSION: 7.0 - RESTORED ORIGINAL IMPORT STRUCTURE + LOCAL MATH
 import os
 import random
 import json
@@ -190,9 +190,6 @@ def make_decision():
     if towards_target_lat is not None: towards_target_lat = float(towards_target_lat)
     if towards_target_lng is not None: towards_target_lng = float(towards_target_lng)
 
-    # OCR confidence scores from YOLO pipeline (per-field)
-    ocr_confidence = p.get("ocrConfidence")
-
     # DEBUG LOGGING
     logging.info(f"🔍 Decision Request - currentLat: {current_lat}, currentLng: {current_lng}")
 
@@ -237,9 +234,32 @@ def make_decision():
             # --- Determine mode and market name logic ---
             if towards_active:
                 mode_name = "TOWARDS"
-                # Always use the active market name for logging
-                market_name = p.get("marketName")
                 
+                # 1. Check for explicit target name from Android (Best for Points & Search)
+                explicit_target = p.get("towardsTargetName")
+                
+                if explicit_target:
+                    market_name = explicit_target
+                
+                # 2. If no explicit name, try looking up the Market ID
+                elif towards_market_id:
+                    try:
+                        cur.execute("""
+                            SELECT elem->>'name' as market_name
+                            FROM app_private.driver_settings_new,
+                                 jsonb_array_elements(settings->'markets') elem
+                            WHERE driver_id = %s AND elem->>'id' = %s
+                        """, (uid, towards_market_id))
+                        market_row = cur.fetchone()
+                        market_name = market_row['market_name'] if market_row else p.get("marketName")
+                    except Exception as e:
+                        logging.warning(f"Failed to fetch target market name: {e}")
+                        market_name = p.get("marketName")
+                
+                # 3. Fallback: Use current market name (e.g. "Money")
+                else:
+                    market_name = p.get("marketName")
+
             elif is_puddle_jump:
                 mode_name = "PUDDLE_JUMP"
                 market_name = p.get("marketName")
@@ -252,18 +272,16 @@ def make_decision():
                 INSERT INTO app_private.decision_log (
                     driver_id, market_id, fare, pickup_minutes, trip_minutes,
                     pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-                    decision_result, mode_at_decision, market_name,
-                    ocr_confidence, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    decision_result, mode_at_decision, market_name, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             """, (
                 uid, market_id, fare, pickup_min, trip_min, 
                 p_lat, p_lng, d_lat, d_lng, json.dumps(result),
-                mode_name, market_name,
-                json.dumps(ocr_confidence) if ocr_confidence else None
+                mode_name, market_name
             ))
             
             conn.commit()
-            logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
+            logging.info(f"✅ Decision logged - verdict: {result['verdict']}")
 
         except Exception as db_e:
             logging.error(f"❌ Logging failed: {db_e}")
@@ -320,6 +338,18 @@ def validate_offer(fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes,
         is_valid = False
     
     return is_valid, flags
+
+
+def compute_h3_bigint(lat, lng, resolution=8):
+    """Convert lat/lng to H3 index as BIGINT"""
+    if lat is None or lng is None:
+        return None
+    try:
+        hex_str = h3.geo_to_h3(lat, lng, resolution)
+        return int(hex_str, 16)
+    except:
+        return None
+
 
 @require_firebase_auth
 @decisions_bp.route("/harvest", methods=["POST"])
@@ -454,91 +484,3 @@ def harvest_offer():
     finally:
         cur.close()
         conn.close()
-        
-@require_firebase_auth
-@decisions_bp.route("/optimize", methods=["GET"])
-def get_optimization_recommendations():
-    """
-    Returns threshold optimization recommendations based on historical decision data.
-    
-    Query params:
-        market_id (optional): UUID of specific market to analyze
-        days (optional): Number of days to analyze (default: 7)
-        mode (optional): PUDDLE_JUMP, TOWARDS, or FREESTYLE (default: all)
-        time_period (optional): morning_commute, midday, evening_commute, evening, night_shift, weekend_party, sunday
-    
-    Returns JSON with optimization matrix showing acceptance rates and revenue
-    at different threshold combinations.
-    """
-    try:
-        uid = verify_and_get_user_id(request)
-    except:
-        return jsonify({"status": "auth_failed"}), 403
-    
-    try:
-        market_id = request.args.get('market_id', None)
-        days_back = request.args.get('days', 7, type=int)
-        mode_filter = request.args.get('mode', None)
-        time_period = request.args.get('time_period', None)
-        
-        # Validate mode if provided
-        if mode_filter and mode_filter not in ('PUDDLE_JUMP', 'TOWARDS', 'FREESTYLE'):
-            return jsonify({"error": "Invalid mode. Must be PUDDLE_JUMP, TOWARDS, or FREESTYLE"}), 400
-        
-        # Validate time_period if provided
-        valid_periods = ('morning_commute', 'midday', 'evening_commute', 'evening', 'night_shift', 'weekend_party', 'sunday')
-        if time_period and time_period not in valid_periods:
-            return jsonify({"error": f"Invalid time_period. Must be one of: {', '.join(valid_periods)}"}), 400
-        
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cur.execute("""
-            SELECT 
-                test_hourly as "testHourly",
-                test_mileage as "testMileage",
-                test_efficiency as "testEfficiency",
-                would_accept as "wouldAccept",
-                total_offers as "totalOffers",
-                accept_pct as "acceptPct",
-                total_revenue as "totalRevenue",
-                avg_hourly as "avgHourly",
-                avg_dpm as "avgDpm",
-                total_progress as "totalProgress",
-                avg_progress_per_ride as "avgProgressPerRide",
-                mode_analyzed as "modeAnalyzed",
-                market_analyzed as "marketAnalyzed",
-                time_period_analyzed as "timePeriodAnalyzed"
-            FROM app_private.optimize_market_settings(%s, %s, %s, %s, %s)
-        """, (uid, market_id, days_back, mode_filter, time_period))
-        
-        rows = cur.fetchall()
-        
-        # Convert Decimal types to float for JSON serialization
-        results = []
-        for row in rows:
-            clean_row = {}
-            for key, value in row.items():
-                if value is None:
-                    clean_row[key] = None
-                elif hasattr(value, 'is_finite'):  # Decimal type
-                    clean_row[key] = float(value)
-                else:
-                    clean_row[key] = value
-            results.append(clean_row)
-        
-        return jsonify({
-            "status": "success",
-            "driverId": uid,
-            "marketId": market_id,
-            "daysAnalyzed": days_back,
-            "modeFilter": mode_filter,
-            "timePeriod": time_period,
-            "recommendations": results
-        }), 200
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if 'conn' in locals(): conn.close()

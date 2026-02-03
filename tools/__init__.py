@@ -28,6 +28,8 @@ from .weather import get_weather  # 👈 This line is required!
 # Helper functions (not tools, but useful for direct imports)
 from .helpers import geocode_destination, nice_place_name
 
+from .ride_mode import set_ride_mode, get_current_ride_mode
+
 __all__ = [
     # Navigation
     'get_live_traffic',
@@ -45,5 +47,8 @@ __all__ = [
     'geocode_destination',
     'nice_place_name',
     # Weather
-    'get_weather'  # 👈 Now this reference is valid
+    'get_weather',  # 👈 Now this reference is valid
+    # Ride Mode
+    'set_ride_mode',
+    'get_current_ride_mode'
 ]

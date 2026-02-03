@@ -29,7 +29,9 @@ from tools import (
     get_place_details,
     trigger_app_action,
     check_internal_knowledge,
-    web_search
+    web_search,
+    set_ride_mode,        # ADD THIS
+    get_current_ride_mode 
 )
 from tools.system_prompt import PUDDLES_SYSTEM_PROMPT
 
@@ -55,7 +57,9 @@ ALL_TOOLS = [
     find_nearby_places,
     get_place_details,
     trigger_app_action,
-    web_search
+    web_search,
+    set_ride_mode,
+    get_current_ride_mode
 ]
 
 # --- State & Graph Setup ---
