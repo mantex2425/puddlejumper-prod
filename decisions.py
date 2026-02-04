@@ -441,6 +441,26 @@ def harvest_offer():
         ))
         
         conn.commit()
+
+                # --- Referral offer count increment ---
+        try:
+            cur2 = conn.cursor()
+            cur2.execute("""
+                UPDATE referrals 
+                SET offer_count = offer_count + 1,
+                    updated_at = NOW(),
+                    status = CASE 
+                        WHEN offer_count + 1 >= 100 THEN 'PENDING_PAYMENT'::referral_status
+                        ELSE status 
+                    END
+                WHERE referee_id = %s AND status = 'PENDING_WORK'
+            """, (uid,))
+            conn.commit()
+            cur2.close()
+        except Exception as ref_err:
+            logging.error(f"Referral count update failed (non-blocking): {ref_err}")
+        # --- End referral increment ---
+        
         logging.info(f"📊 Offer harvested - validated: {is_validated}, flags: {validation_flags}")
         
         return jsonify({"status": "harvested", "validated": is_validated}), 200

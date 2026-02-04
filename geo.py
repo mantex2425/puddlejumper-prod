@@ -336,3 +336,57 @@ def get_my_metros():
     finally:
         if conn:
             conn.close()
+
+# ---------------------------------------------------------
+# Endpoint: Create/Upsert Metroplex from Google Places
+# ---------------------------------------------------------
+@require_firebase_auth
+@bp.route("/metro", methods=["POST"])
+def create_metro():
+    try:
+        verify_and_get_user_id(request)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 401
+
+    data = request.json
+    place_id = data.get("placeId")
+    name = data.get("name")
+    lat = data.get("lat")
+    lng = data.get("lng")
+
+    if not all([place_id, name, lat, lng]):
+        return jsonify({"error": "Missing required fields: placeId, name, lat, lng"}), 400
+
+    conn = None
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Upsert metroplexes
+        state_names = data.get("stateNames", []) or ["Unknown"]
+        cur.execute("""
+            INSERT INTO metroplexes (id, name, metropolitan, state_names)
+            VALUES (%s, %s, true, %s::text[])
+            ON CONFLICT (id) DO NOTHING
+        """, (place_id, name, state_names))
+
+        # Upsert metroplex_centers
+        cur.execute("""
+            INSERT INTO metroplex_centers (metro_id, name, intptlat, intptlong)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (metro_id) DO NOTHING
+        """, (place_id, name, float(lat), float(lng)))
+
+        conn.commit()
+
+        return jsonify({"status": "success", "metro_id": place_id}), 201
+
+    except Exception as e:
+        print(f"CREATE METRO ERROR: {e}")
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if conn:
+            conn.close()            

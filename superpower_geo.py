@@ -178,7 +178,7 @@ def score_google_results(
         distance_to_report = 0.0
 
         if is_dropoff:
-            # STRICT: Dropoff must match the Trip Miles from the Pickup point
+            # 1. STRICT DISTANCE VALIDATION (Too Far Check)
             is_valid, penalty, actual_miles = validate_trip_distance(
                 pickup_lat, pickup_lng, cand_lat, cand_lng, trip_miles
             )
@@ -186,6 +186,15 @@ def score_google_results(
                 continue
             score += penalty
             distance_to_report = actual_miles
+
+            # 2. CIRCUITY CHECK (The "Too Close" Fix)
+            # If trip is 27 miles but destination is 5 miles away, ratio is 5.4. Suspicious.
+            circuity = trip_miles / max(actual_miles, 0.1)
+
+            if circuity > 4.0:
+                score -= 6000  # Massive penalty (United Neighborhood Scenario)
+            elif circuity > 2.5:
+                score -= 2000  # Moderate penalty (River Crossing / Winding Road)
         else:
             # RELAXED: Pickup just needs to be near the Driver (e.g., < 30 miles)
             dist_from_driver = haversine_miles(metro_lat, metro_lng, cand_lat, cand_lng)
@@ -205,7 +214,8 @@ def score_google_results(
             "final_score": score,
             "categories": categories,
             "distance_miles": distance_to_report,
-            "location_type": location_type
+            "location_type": location_type,
+            "circuity": round(trip_miles / max(distance_to_report, 0.1), 2) if is_dropoff else 0
         })
 
     scored_candidates.sort(key=lambda x: x["final_score"], reverse=True)
@@ -256,33 +266,29 @@ def geocode_single(
             is_dropoff=True
         )
 
-        # If NO candidates matched the distance...
-        if not scored:
-            print(f"[GEOCODE] No distance match for '{cleaned}' (Trip: {trip_miles}mi).", flush=True)
+        # --- PASS 3: AIRPORT FALLBACK (always compete on long trips) ---
+        if trip_miles > 15:
+            print(f"[GEOCODE] Long trip ({trip_miles}mi) - running airport competition for {metro_name}...", flush=True)
+            airport_results, _ = call_google_geocode(
+                f"Airport {metro_name}", 
+                metro_lat, metro_lng, metro_name, radius_meters
+            )
             
-            # --- PASS 3: AIRPORT FALLBACK ---
-            # If the trip is long (>15 miles), maybe they meant "The Airport"?
-            if trip_miles > 15:
-                print(f"[GEOCODE] Trying Airport Fallback for {metro_name}...", flush=True)
-                airport_results, _ = call_google_geocode(
-                    f"Airport {metro_name}", 
-                    metro_lat, metro_lng, metro_name, radius_meters
+            if airport_results:
+                airport_scored = score_google_results(
+                    airport_results,
+                    "airport",
+                    pickup_lat,
+                    pickup_lng,
+                    metro_lat,
+                    metro_lng,
+                    trip_miles,
+                    is_dropoff=True
                 )
-                
-                if airport_results:
-                    # Score the generic airports against the specific trip distance
-                    scored = score_google_results(
-                        airport_results,
-                        "airport", # generic query
-                        pickup_lat,
-                        pickup_lng,
-                        metro_lat,
-                        metro_lng,
-                        trip_miles,
-                        is_dropoff=True
-                    )
+                scored.extend(airport_scored)
+                scored.sort(key=lambda x: x["final_score"], reverse=True)
 
-        # If we STILL have no matches after fallback, fail safely
+        # If we STILL have no matches, fail safely
         if not scored:
              print(f"[GEOCODE] FAILED: '{cleaned}' - no candidates match trip distance {trip_miles} mi", flush=True)
              return {"status": "no_match", "reason": "distance_mismatch"}
@@ -290,7 +296,8 @@ def geocode_single(
         # We have a winner!
         winner = scored[0]
         print(f"[GEOCODE] WINNER: '{cleaned}' -> {winner['name']} "
-              f"(Dist: {winner['distance_miles']:.1f}mi vs Trip: {trip_miles}mi)", flush=True)
+              f"(Dist: {winner['distance_miles']:.1f}mi vs Trip: {trip_miles}mi, "
+              f"Circuity: {winner.get('circuity', 'N/A')})", flush=True)
         
         return {
             "status": "success",

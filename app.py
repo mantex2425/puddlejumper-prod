@@ -35,6 +35,7 @@ from decisions import decisions_bp
 from chat_ai import chat_ai_bp
 from puddles_brain import puddles_bp
 from account import account_bp
+from referrals import referrals_bp
 
 app.register_blueprint(markets_bp)
 app.register_blueprint(unified_search_bp, url_prefix="/api/v1")
@@ -48,6 +49,7 @@ app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
 app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(puddles_bp, url_prefix="/api/v1")
 app.register_blueprint(account_bp, url_prefix='/api/v1/account')
+app.register_blueprint(referrals_bp, url_prefix='/api/v1/referrals')
 
 
 # Force puddles_brain to fully initialize at startup
