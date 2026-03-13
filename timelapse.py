@@ -9,8 +9,8 @@ timelapse_bp = Blueprint('timelapse', __name__)
 def get_timelapse_frame():
     """
     Returns hex pricing data for a single day+hour frame.
-    Query params: day (0-6, DOW), hour (0-23)
-    Optional: include_fallback (true/false, default false)
+    Queries offer_history directly with low sample floor (2).
+    Includes confidence-based opacity: more samples = more opaque.
     """
     try:
         uid = verify_and_get_user_id(request)
@@ -19,7 +19,7 @@ def get_timelapse_frame():
 
     day = request.args.get('day', type=int)
     hour = request.args.get('hour', type=int)
-    include_fallback = request.args.get('include_fallback', 'false').lower() == 'true'
+    min_samples = request.args.get('min_samples', 2, type=int)
 
     if day is None or hour is None:
         return jsonify({"error": "day and hour required"}), 400
@@ -30,31 +30,39 @@ def get_timelapse_frame():
     cur = conn.cursor()
 
     try:
-        # Get hex pricing data for this frame
-        if include_fallback:
-            cur.execute("""
-                SELECT h3_index, ai_hourly, ai_mileage,
-                       revenue_hourly, revenue_mileage,
-                       picky_hourly, picky_mileage,
-                       sample_count, data_source
-                FROM app_private.hex_pricing_cache
-                WHERE day_of_week = %s AND hour_of_day = %s
-                ORDER BY sample_count DESC
-            """, (day, hour))
-        else:
-            cur.execute("""
-                SELECT h3_index, ai_hourly, ai_mileage,
-                       revenue_hourly, revenue_mileage,
-                       picky_hourly, picky_mileage,
-                       sample_count, data_source
-                FROM app_private.hex_pricing_cache
-                WHERE day_of_week = %s AND hour_of_day = %s
-                  AND data_source != 'metro_fallback'
-                ORDER BY sample_count DESC
-            """, (day, hour))
+        cur.execute("""
+            SELECT 
+                driver_h3 as h3_index,
+                count(*) as samples,
+                round(percentile_cont(0.25) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as revenue_hourly,
+                round(percentile_cont(0.25) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as revenue_mileage,
+                round(percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as ai_hourly,
+                round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as ai_mileage,
+                round(percentile_cont(0.75) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as picky_hourly,
+                round(percentile_cont(0.75) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as picky_mileage
+            FROM app_private.offer_history
+            WHERE driver_h3 IS NOT NULL
+              AND is_validated = true
+              AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
+              AND dollars_per_mile > 0 AND dollars_per_mile < 10
+              AND day_of_week = %s
+              AND hour_of_day = %s
+            GROUP BY driver_h3
+            HAVING count(*) >= %s
+            ORDER BY count(*) DESC
+        """, (day, hour, min_samples))
 
         hexes = []
         for row in cur.fetchall():
+            # Confidence opacity: 2 samples = 0.15, 5 = 0.30, 10+ = 0.50
+            s = row['samples']
+            if s >= 10:
+                opacity = 0.50
+            elif s >= 5:
+                opacity = 0.30
+            else:
+                opacity = 0.15
+
             hexes.append({
                 "h3": row['h3_index'],
                 "aiHourly": float(row['ai_hourly']),
@@ -63,35 +71,38 @@ def get_timelapse_frame():
                 "revenueMileage": float(row['revenue_mileage']),
                 "pickyHourly": float(row['picky_hourly']),
                 "pickyMileage": float(row['picky_mileage']),
-                "samples": row['sample_count'],
-                "source": row['data_source']
+                "samples": s,
+                "opacity": opacity,
+                "source": "live_query"
             })
 
-        # Get metro-wide summary for this frame (for the "average" indicator)
         cur.execute("""
-            SELECT round(avg(ai_hourly)::numeric, 2) AS avg_hourly,
-                   round(avg(ai_mileage)::numeric, 2) AS avg_mileage,
-                   count(*) AS hex_count,
-                   sum(sample_count) AS total_samples
-            FROM app_private.hex_pricing_cache
-            WHERE day_of_week = %s AND hour_of_day = %s
+            SELECT 
+                count(DISTINCT driver_h3) as hex_count,
+                count(*) as total_samples,
+                round(avg(effective_hourly_rate)::numeric, 2) as avg_hourly,
+                round(avg(dollars_per_mile)::numeric, 2) as avg_mileage
+            FROM app_private.offer_history
+            WHERE driver_h3 IS NOT NULL
+              AND is_validated = true
+              AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
+              AND dollars_per_mile > 0 AND dollars_per_mile < 10
+              AND day_of_week = %s
+              AND hour_of_day = %s
         """, (day, hour))
-        summary_row = cur.fetchone()
-
-        summary = {
-            "avgHourly": float(summary_row['avg_hourly']) if summary_row['avg_hourly'] else 0,
-            "avgMileage": float(summary_row['avg_mileage']) if summary_row['avg_mileage'] else 0,
-            "hexCount": summary_row['hex_count'] or 0,
-            "totalSamples": summary_row['total_samples'] or 0
-        }
+        s = cur.fetchone()
 
         return jsonify({
             "day": day,
             "hour": hour,
             "hexes": hexes,
-            "summary": summary
+            "summary": {
+                "avgHourly": float(s['avg_hourly']) if s['avg_hourly'] else 0,
+                "avgMileage": float(s['avg_mileage']) if s['avg_mileage'] else 0,
+                "hexCount": s['hex_count'] or 0,
+                "totalSamples": s['total_samples'] or 0
+            }
         })
-
     finally:
         cur.close()
         conn.close()
