@@ -442,7 +442,7 @@ BEGIN
                     INTO v_fs_hourly, v_fs_mileage, v_fs_source
                     FROM app_private.get_freestyle_thresholds(
                         current_lat_in, current_lng_in,
-                        COALESCE(v_settings->>'freestyleStrategy', 'ai')
+                        COALESCE(v_settings->>'freestyleStrategy', 'ai'), v_timezone
                     ) f;
 
                     IF v_fs_source IS NOT NULL AND v_fs_source != 'global_default' THEN
@@ -492,7 +492,7 @@ BEGIN
                     INTO v_hc_hourly, v_hc_mileage, v_hc_source, v_hc_samples
                     FROM app_private.get_freestyle_thresholds(
                         current_lat_in, current_lng_in,
-                        COALESCE(v_settings->>'freestyleStrategy', 'ai')
+                        COALESCE(v_settings->>'freestyleStrategy', 'ai'), v_timezone
                     ) f;
 
                     v_hex_cache_samples := COALESCE(v_hc_samples, 0);
@@ -552,7 +552,7 @@ BEGIN
                             INTO v_hc_hourly, v_hc_mileage, v_hc_source, v_hc_samples
                             FROM app_private.get_freestyle_thresholds(
                                 current_lat_in, current_lng_in,
-                                COALESCE(v_settings->>'freestyleStrategy', 'ai')
+                                COALESCE(v_settings->>'freestyleStrategy', 'ai'), v_timezone
                             ) f;
 
                             v_hex_cache_samples := COALESCE(v_hc_samples, 0);
@@ -661,7 +661,7 @@ BEGIN
                 INTO v_cache_hourly, v_cache_mileage, v_cache_source, v_cache_samples
                 FROM app_private.get_freestyle_thresholds(
                     current_lat_in, current_lng_in,
-                    COALESCE(v_settings->>'freestyleStrategy', 'ai')
+                    COALESCE(v_settings->>'freestyleStrategy', 'ai'), v_timezone
                 ) f;
 
                 v_hex_cache_samples := COALESCE(v_cache_samples, 0);
