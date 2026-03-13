@@ -473,11 +473,11 @@ def harvest_offer():
     conn_tz = get_db()
     cur_tz = conn_tz.cursor()
     cur_tz.execute(
-        "SELECT settings->>'timezone' FROM app_private.driver_settings_new WHERE driver_id = %s",
+        "SELECT settings->>'timezone' AS timezone FROM app_private.driver_settings_new WHERE driver_id = %s",
         (uid,)
     )
     tz_row = cur_tz.fetchone()
-    driver_tz = ZoneInfo(tz_row[0] if tz_row and tz_row[0] else 'America/Chicago')
+    driver_tz = ZoneInfo(tz_row.get('timezone') if tz_row and tz_row.get('timezone') else 'America/Chicago')
     cur_tz.close()
     now = datetime.now(driver_tz)
     day_of_year = now.timetuple().tm_yday
