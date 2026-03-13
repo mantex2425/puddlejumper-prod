@@ -250,6 +250,29 @@ def make_decision():
             logging.error(f"Arc band error (non-blocking): {arc_err}")
             arc_band_trace["error"] = str(arc_err)
 
+        # GEOCODE HALLUCINATION GUARD: if geocoded pickup is >30mi from driver GPS,
+        # the geocoder returned garbage (e.g. "Main Terminal, Texas" -> west Texas).
+        # Null out the bad coords so the engine uses OCR pickup_miles instead.
+        geocode_guard_triggered = False
+        if current_lat and current_lng and p_lat and p_lng:
+            from math import radians, cos, sin, asin, sqrt
+            def _haversine_mi(lat1, lng1, lat2, lng2):
+                lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
+                dlat = lat2 - lat1
+                dlng = lng2 - lng1
+                a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
+                return 3956 * 2 * asin(sqrt(a))
+            geocode_dist = _haversine_mi(current_lat, current_lng, p_lat, p_lng)
+            if geocode_dist > 30:
+                logging.warning(f"🚨 GEOCODE HALLUCINATION: pickup ({p_lat},{p_lng}) is {geocode_dist:.0f}mi from driver ({current_lat},{current_lng}). Nulling coords, using OCR pickup_miles={pickup_miles}")
+                arc_band_trace["geocode_hallucination"] = True
+                arc_band_trace["geocode_distance_mi"] = round(geocode_dist, 1)
+                arc_band_trace["original_pickup_lat"] = p_lat
+                arc_band_trace["original_pickup_lng"] = p_lng
+                p_lat = None
+                p_lng = None
+                geocode_guard_triggered = True
+
         # SINGLE SOURCE OF TRUTH: Call SQL decision engine
         cur.execute("""
             SELECT * FROM app_private.decision_engine_v2(
@@ -456,6 +479,21 @@ def harvest_offer():
     if effective_hourly_rate is not None: effective_hourly_rate = float(effective_hourly_rate)
     if dollars_per_mile is not None: dollars_per_mile = float(dollars_per_mile)
     if confidence_score is not None: confidence_score = float(confidence_score)
+
+    # GEOCODE HALLUCINATION GUARD (same as make_decision)
+    if driver_lat and driver_lng and pickup_lat and pickup_lng:
+        from math import radians, cos, sin, asin, sqrt
+        def _hav(lat1, lng1, lat2, lng2):
+            lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
+            dlat = lat2 - lat1
+            dlng = lng2 - lng1
+            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
+            return 3956 * 2 * asin(sqrt(a))
+        geo_dist = _hav(driver_lat, driver_lng, pickup_lat, pickup_lng)
+        if geo_dist > 30:
+            logging.warning(f"🚨 HARVEST GEOCODE HALLUCINATION: pickup ({pickup_lat},{pickup_lng}) is {geo_dist:.0f}mi from driver ({driver_lat},{driver_lng}). Nulling pickup coords.")
+            pickup_lat = None
+            pickup_lng = None
 
     # H3 computed in SQL instead
     driver_h3 = None
