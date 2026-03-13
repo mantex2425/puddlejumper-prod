@@ -1,3 +1,4 @@
+import threading
 # backend/decisions.py
 # VERSION: 8.0 - Added ocr_confidence storage
 import os
@@ -5,6 +6,7 @@ import random
 import json
 import traceback
 import logging
+from arc_band import correct_dropoff, get_street_geometry
 
 from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
@@ -193,13 +195,61 @@ def make_decision():
     # OCR confidence scores from YOLO pipeline (per-field)
     ocr_confidence = p.get("ocrConfidence")
 
+ # New: extract street names from Android OCR
+    pickup_address = p.get("pickupAddress")
+    dropoff_address = p.get("dropoffAddress")
+
     # DEBUG LOGGING
-    logging.info(f"🔍 Decision Request - currentLat: {current_lat}, currentLng: {current_lng}")
+    logging.info(f"🔍 Decision Request - currentLat: {current_lat}, currentLng: {current_lng}, dropoff: {dropoff_address}")
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
+        # ── ARC BAND GEOCODING CORRECTION ─────────────────────────
+        arc_band_trace = {}
+        try:
+            # Load driver's red zones
+            cur.execute("""
+                SELECT jsonb_array_elements_text(settings->'redZones') AS hex
+                FROM app_private.driver_settings_new
+                WHERE driver_id = %s
+            """, (uid,))
+            red_zone_set = {row['hex'] for row in cur.fetchall()}
+
+            correction = correct_dropoff(
+                pickup_lat=p_lat, pickup_lng=p_lng,
+                dropoff_lat=d_lat, dropoff_lng=d_lng,
+                trip_miles=trip_miles,
+                dropoff_address=dropoff_address,
+                red_zone_set=red_zone_set,
+                cur=cur, conn=conn
+            )
+
+            arc_band_trace = correction.get("trace", {})
+            arc_band_trace["arc_band_triggered"] = correction["arc_band_triggered"]
+            arc_band_trace["is_red_zone_risk"] = correction["is_red_zone_risk"]
+            arc_band_trace["use_ocr_distance"] = correction["use_ocr_distance"]
+            arc_band_trace["dropoff_address"] = dropoff_address
+            arc_band_trace["pickup_address"] = pickup_address
+
+            # Apply corrections
+            if correction["corrected_lat"] != d_lat or correction["corrected_lng"] != d_lng:
+                arc_band_trace["original_dropoff"] = {"lat": d_lat, "lng": d_lng}
+                d_lat = correction["corrected_lat"]
+                d_lng = correction["corrected_lng"]
+                logging.info(f"📍 Dropoff corrected to {d_lat}, {d_lng}")
+
+            if correction["use_ocr_distance"]:
+                logging.info(f"📏 Using OCR distance: {trip_miles} mi")
+
+            if correction["is_red_zone_risk"]:
+                logging.warning(f"🔴 Red zone risk detected for '{dropoff_address}'")
+
+        except Exception as arc_err:
+            logging.error(f"Arc band error (non-blocking): {arc_err}")
+            arc_band_trace["error"] = str(arc_err)
+
         # SINGLE SOURCE OF TRUTH: Call SQL decision engine
         cur.execute("""
             SELECT * FROM app_private.decision_engine_v2(
@@ -237,7 +287,6 @@ def make_decision():
             # --- Determine mode and market name logic ---
             if towards_active:
                 mode_name = "TOWARDS"
-                # Always use the active market name for logging
                 market_name = p.get("marketName")
                 
             elif is_puddle_jump:
@@ -249,21 +298,43 @@ def make_decision():
             # --------------------------------------------
 
             cur.execute("""
-                INSERT INTO app_private.decision_log (
+                   INSERT INTO app_private.decision_log (
                     driver_id, market_id, fare, pickup_minutes, trip_minutes,
                     pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
                     decision_result, mode_at_decision, market_name,
-                    ocr_confidence, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            """, (
+                    ocr_confidence, pickup_h3_index, dropoff_h3_index,
+                    trace_data, current_lat, current_lng,                   trip_miles, pickup_miles,
+                    towards_market_id, towards_target_lat, towards_target_lng,
+                    created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, %s, %s, %s, NOW())           """, (
                 uid, market_id, fare, pickup_min, trip_min, 
                 p_lat, p_lng, d_lat, d_lng, json.dumps(result),
                 mode_name, market_name,
-                json.dumps(ocr_confidence) if ocr_confidence else None
+                json.dumps(ocr_confidence) if ocr_confidence else None,
+                p_lat, p_lng,
+                d_lat, d_lng,
+                json.dumps({**(row['trace_data'] if row.get('trace_data') else {}), "arc_band": arc_band_trace}),
+                current_lat, current_lng,
+                trip_miles, pickup_miles,
+                towards_market_id, towards_target_lat, towards_target_lng
             ))
             
             conn.commit()
             logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
+
+            # Background cache: pre-warm street geometry for future hallucination recovery
+            if dropoff_address and d_lat and d_lng:
+                def _cache_street(addr, lat, lng):
+                    try:
+                        import psycopg2
+                        c = psycopg2.connect(dbname="puddlejumper")
+                        cr = c.cursor()
+                        get_street_geometry(addr, lat, lng, cr, c, bbox_margin=0.03)
+                        cr.close()
+                        c.close()
+                    except Exception as e:
+                        logging.debug(f"Street cache pre-warm failed: {e}")
+                threading.Thread(target=_cache_street, args=(dropoff_address, d_lat, d_lng), daemon=True).start()
 
         except Exception as db_e:
             logging.error(f"❌ Logging failed: {db_e}")
@@ -396,13 +467,21 @@ def harvest_offer():
         fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes, effective_hourly_rate
     )
 
-    # Compute time breakdowns (since we can't use GENERATED columns)
+    # Compute time breakdowns in driver's local timezone
     from datetime import datetime
-    now = datetime.utcnow()
+    from zoneinfo import ZoneInfo
+    conn_tz = get_db()
+    cur_tz = conn_tz.cursor()
+    cur_tz.execute(
+        "SELECT settings->>'timezone' FROM app_private.driver_settings_new WHERE driver_id = %s",
+        (uid,)
+    )
+    tz_row = cur_tz.fetchone()
+    driver_tz = ZoneInfo(tz_row[0] if tz_row and tz_row[0] else 'America/Chicago')
+    cur_tz.close()
+    now = datetime.now(driver_tz)
     day_of_year = now.timetuple().tm_yday
-    day_of_week = now.weekday()  # 0=Monday, 6=Sunday (Python convention)
-    # Convert to Postgres DOW: 0=Sunday, 6=Saturday
-    day_of_week = (day_of_week + 1) % 7
+    day_of_week = (now.weekday() + 1) % 7  # Convert Python DOW to Postgres DOW
     hour_of_day = now.hour
 
     conn = get_db()
@@ -555,6 +634,146 @@ def get_optimization_recommendations():
             "modeFilter": mode_filter,
             "timePeriod": time_period,
             "recommendations": results
+        }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if 'conn' in locals(): conn.close()
+
+@require_firebase_auth
+@decisions_bp.route("/optimize/pareto", methods=["GET"])
+def get_pareto_frontier():
+    """
+    Returns Pareto-optimal threshold combinations - the meaningful tradeoffs
+    between revenue and hourly rate.
+    
+    Query params:
+        market_id (required): UUID of market to analyze
+        days (optional): Number of days to analyze (default: 28)
+        mode (optional): PUDDLE_JUMP, TOWARDS, or FREESTYLE (default: all)
+        time_period (optional): morning_commute, midday, evening_commute, etc.
+        min_accept_pct (optional): Minimum acceptance % to consider (default: 20)
+        min_hourly_jump (optional): Minimum $/hr improvement between options (default: 1.0)
+        target_accept_pct (optional): User's target acceptance % for highlighting
+    
+    Returns JSON with Pareto frontier options and recommendations.
+    """
+    try:
+        uid = verify_and_get_user_id(request)
+    except:
+        return jsonify({"status": "auth_failed"}), 403
+    
+    try:
+        market_id = request.args.get('market_id', None)
+        if not market_id:
+            return jsonify({"error": "market_id is required"}), 400
+            
+        days_back = request.args.get('days', 28, type=int)
+        mode_filter = request.args.get('mode', None)
+        time_period = request.args.get('time_period', None)
+        min_accept_pct = request.args.get('min_accept_pct', 20.0, type=float)
+        min_hourly_jump = request.args.get('min_hourly_jump', 1.0, type=float)
+        target_accept_pct = request.args.get('target_accept_pct', None, type=float)
+        
+        # Validate mode if provided
+        if mode_filter and mode_filter not in ('PUDDLE_JUMP', 'TOWARDS', 'FREESTYLE'):
+            return jsonify({"error": "Invalid mode. Must be PUDDLE_JUMP, TOWARDS, or FREESTYLE"}), 400
+        
+        # Validate time_period if provided
+        valid_periods = ('morning_commute', 'midday', 'evening_commute', 'evening', 'night_shift', 'weekend_party', 'sunday')
+        if time_period and time_period not in valid_periods:
+            return jsonify({"error": f"Invalid time_period. Must be one of: {', '.join(valid_periods)}"}), 400
+        
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("""
+            SELECT 
+                test_hourly,
+                test_mileage,
+                would_accept,
+                total_offers,
+                accept_pct,
+                avg_hourly,
+                avg_dpm,
+                total_revenue,
+                is_max_revenue,
+                is_max_hourly,
+                is_ai_pick
+            FROM app_private.get_pareto_frontier(%s, %s, %s, %s, %s, %s, %s)
+        """, (uid, market_id, days_back, mode_filter, time_period, min_accept_pct, min_hourly_jump))
+        
+        rows = cur.fetchall()
+        
+        # Convert to clean JSON and find key options
+        options = []
+        max_revenue_option = None
+        max_hourly_option = None
+        ai_pick_option = None
+        closest_to_target = None
+        closest_distance = float('inf')
+        
+        for row in rows:
+            option = {
+                "testHourly": float(row['test_hourly']) if row['test_hourly'] else None,
+                "testMileage": float(row['test_mileage']) if row['test_mileage'] else None,
+                "wouldAccept": int(row['would_accept']) if row['would_accept'] else 0,
+                "totalOffers": int(row['total_offers']) if row['total_offers'] else 0,
+                "acceptPct": float(row['accept_pct']) if row['accept_pct'] else 0,
+                "avgHourly": float(row['avg_hourly']) if row['avg_hourly'] else 0,
+                "avgDpm": float(row['avg_dpm']) if row['avg_dpm'] else 0,
+                "totalRevenue": float(row['total_revenue']) if row['total_revenue'] else 0,
+                "isMaxRevenue": row['is_max_revenue'],
+                "isMaxHourly": row['is_max_hourly'],
+                "isAiPick": row.get('is_ai_pick', False)
+            }
+            options.append(option)
+            
+            # Track key options
+            if row['is_max_revenue']:
+                max_revenue_option = option
+            if row['is_max_hourly']:
+                max_hourly_option = option
+            if row.get('is_ai_pick'):
+                ai_pick_option = option
+            
+            # Find closest to user's target acceptance %
+            if target_accept_pct and row['accept_pct']:
+                distance = abs(float(row['accept_pct']) - target_accept_pct)
+                if distance < closest_distance:
+                    closest_distance = distance
+                    closest_to_target = option
+        
+        # Build recommendation summary
+        recommendation = None
+        if max_revenue_option and closest_to_target and max_revenue_option != closest_to_target:
+            revenue_diff = max_revenue_option['totalRevenue'] - closest_to_target['totalRevenue']
+            hourly_diff = closest_to_target['avgHourly'] - max_revenue_option['avgHourly']
+            
+            if revenue_diff > 0:
+                recommendation = {
+                    "message": f"Over the last {days_back} days, you'd have earned ~${revenue_diff:.0f} more total by relaxing to {max_revenue_option['acceptPct']:.0f}% acceptance",
+                    "revenueDiff": round(revenue_diff, 2),
+                    "hourlyDiff": round(hourly_diff, 2),
+                    "suggestedOption": max_revenue_option
+                }
+        
+        return jsonify({
+            "status": "success",
+            "driverId": uid,
+            "marketId": market_id,
+            "daysAnalyzed": days_back,
+            "modeFilter": mode_filter,
+            "timePeriod": time_period,
+            "targetAcceptPct": target_accept_pct,
+            "options": options,
+            "maxRevenueOption": max_revenue_option,
+            "maxHourlyOption": max_hourly_option,
+            "aiPickOption": ai_pick_option,
+            "closestToTarget": closest_to_target,
+            "recommendation": recommendation
         }), 200
 
     except Exception as e:
