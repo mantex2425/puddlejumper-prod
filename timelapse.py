@@ -12,40 +12,47 @@ def get_timelapse_frame():
     except:
         return jsonify({"status": "auth_failed"}), 403
 
-    day = request.args.get('day', type=int)
-    hour = request.args.get('hour', type=int)
+    day = request.args.get('day', type=int)       # optional: 0-6
+    hour = request.args.get('hour', type=int)      # optional: 0-23
     min_samples = request.args.get('min_samples', 2, type=int)
 
-    if day is None or hour is None:
-        return jsonify({"error": "day and hour required"}), 400
-    if day < 0 or day > 6 or hour < 0 or hour > 23:
-        return jsonify({"error": "day must be 0-6, hour must be 0-23"}), 400
+    if day is not None and (day < 0 or day > 6):
+        return jsonify({"error": "day must be 0-6"}), 400
+    if hour is not None and (hour < 0 or hour > 23):
+        return jsonify({"error": "hour must be 0-23"}), 400
 
     conn = get_db()
     cur = conn.cursor()
 
     try:
-        cur.execute("""
+        params = []
+        day_clause = ""
+        hour_clause = ""
+
+        if day is not None:
+            day_clause = "AND day_of_week = %s"
+            params.append(day)
+        if hour is not None:
+            hour_clause = "AND hour_of_day = %s"
+            params.append(hour)
+
+        cur.execute(f"""
             SELECT 
                 driver_h3 as h3_index,
                 count(*) as samples,
-                round(percentile_cont(0.25) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as revenue_hourly,
-                round(percentile_cont(0.25) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as revenue_mileage,
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as ai_hourly,
-                round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as ai_mileage,
-                round(percentile_cont(0.75) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as picky_hourly,
-                round(percentile_cont(0.75) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as picky_mileage
+                round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as ai_mileage
             FROM app_private.offer_history
             WHERE driver_h3 IS NOT NULL
               AND is_validated = true
               AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
               AND dollars_per_mile > 0 AND dollars_per_mile < 10
-              AND day_of_week = %s
-              AND hour_of_day = %s
+              {day_clause}
+              {hour_clause}
             GROUP BY driver_h3
             HAVING count(*) >= %s
             ORDER BY count(*) DESC
-        """, (day, hour, min_samples))
+        """, params + [min_samples])
 
         hexes = []
         for row in cur.fetchall():
@@ -59,18 +66,14 @@ def get_timelapse_frame():
 
             hexes.append({
                 "h3": row['h3_index'],
-                "aiHourly": float(row['ai_hourly']),
-                "aiMileage": float(row['ai_mileage']),
-                "revenueHourly": float(row['revenue_hourly']),
-                "revenueMileage": float(row['revenue_mileage']),
-                "pickyHourly": float(row['picky_hourly']),
-                "pickyMileage": float(row['picky_mileage']),
+                "hourly": float(row['ai_hourly']),
+                "mileage": float(row['ai_mileage']),
                 "samples": s,
-                "opacity": opacity,
-                "source": "live_query"
+                "opacity": opacity
             })
 
-        cur.execute("""
+        # Summary using same filters
+        cur.execute(f"""
             SELECT 
                 count(*) as hex_count,
                 sum(samples) as total_samples,
@@ -86,12 +89,12 @@ def get_timelapse_frame():
                   AND is_validated = true
                   AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
                   AND dollars_per_mile > 0 AND dollars_per_mile < 10
-                  AND day_of_week = %s
-                  AND hour_of_day = %s
+                  {day_clause}
+                  {hour_clause}
                 GROUP BY driver_h3
                 HAVING count(*) >= %s
             ) sub
-        """, (day, hour, min_samples))
+        """, params + [min_samples])
         s = cur.fetchone()
 
         return jsonify({
