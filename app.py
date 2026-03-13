@@ -36,6 +36,8 @@ from chat_ai import chat_ai_bp
 from puddles_brain import puddles_bp
 from account import account_bp
 from referrals import referrals_bp
+from crash_reports import crash_reports_bp
+from timelapse import timelapse_bp
 
 app.register_blueprint(markets_bp)
 app.register_blueprint(unified_search_bp, url_prefix="/api/v1")
@@ -50,6 +52,8 @@ app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(puddles_bp, url_prefix="/api/v1")
 app.register_blueprint(account_bp, url_prefix='/api/v1/account')
 app.register_blueprint(referrals_bp, url_prefix='/api/v1/referrals')
+app.register_blueprint(crash_reports_bp)
+app.register_blueprint(timelapse_bp, url_prefix="/api/v1")
 
 
 # Force puddles_brain to fully initialize at startup
@@ -127,7 +131,28 @@ def get_preferences():
             row = cur.fetchone()
 
             if row is None:
-                return jsonify({"driver_id": uid, "setup_completed": False, "car_type": "gas", "markets": [], "redZones": []})
+                # Return smart defaults matching auth.py _NEW_DRIVER_DEFAULTS
+                return jsonify({
+                    "driver_id": uid,
+                    "setup_completed": False,
+                    "car_type": "gas",
+                    "calculation_method": "both",
+                    "cost_per_mile": 0.67,
+                    "cost_per_hour": 12.0,
+                    "revenue_per_hour": 10.0,
+                    "revenue_per_mile": 1.00,
+                    "min_effective_hourly_rate": 15.0,
+                    "min_effective_dollar_per_mile": 0.70,
+                    "deadhead_percent": 1.0,
+                    "deadhead_basis": "hourly",
+                    "max_pickup_miles": 25.0,
+                    "timezone": "America/Chicago",
+                    "freestyleStrategy": "ai",
+                    "autoOptimizeEnabled": True,
+                    "markets": [],
+                    "redZones": [],
+                    "shifts": [],
+                })
 
             settings = row["settings"]
             settings.setdefault("driver_id", uid)
@@ -195,3 +220,39 @@ def list_routes():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5001))
     app.run(host="0.0.0.0", port=port)
+
+@app.route("/api/v1/freestyle-preview", methods=["GET"])
+def get_freestyle_preview_route():
+    # Lazy load database dependencies to keep boot fast
+    from db import get_db
+    from psycopg2.extras import RealDictCursor
+    
+    try:
+        # 1. Grab coordinates from the query parameters
+        lat = request.args.get('lat', type=float)
+        lng = request.args.get('lng', type=float)
+        
+        if lat is None or lng is None:
+            return jsonify({"error": "Missing or invalid lat/lng parameters"}), 400
+
+        # 2. Call the Supabase RPC directly via standard SQL
+        conn = get_db()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT public.get_freestyle_preview(%s, %s) AS preview_data;
+            """, (lat, lng))
+            
+            row = cur.fetchone()
+            
+            if row and row["preview_data"]:
+                return jsonify(row["preview_data"]), 200
+            else:
+                # Fallback if something weird happens in the DB
+                return jsonify({"error": "Failed to generate preview"}), 500
+
+    except Exception as e:
+        logger.error(f"FREESTYLE PREVIEW GET ERROR: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if "conn" in locals(): 
+            conn.close()
