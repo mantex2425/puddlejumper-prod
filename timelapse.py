@@ -7,11 +7,6 @@ timelapse_bp = Blueprint('timelapse', __name__)
 @require_firebase_auth
 @timelapse_bp.route('/timelapse', methods=['GET'])
 def get_timelapse_frame():
-    """
-    Returns hex pricing data for a single day+hour frame.
-    Queries offer_history directly with low sample floor (2).
-    Includes confidence-based opacity: more samples = more opaque.
-    """
     try:
         uid = verify_and_get_user_id(request)
     except:
@@ -54,7 +49,6 @@ def get_timelapse_frame():
 
         hexes = []
         for row in cur.fetchall():
-            # Confidence opacity: 2 samples = 0.15, 5 = 0.30, 10+ = 0.50
             s = row['samples']
             if s >= 10:
                 opacity = 0.50
@@ -78,18 +72,26 @@ def get_timelapse_frame():
 
         cur.execute("""
             SELECT 
-                count(DISTINCT driver_h3) as hex_count,
-                count(*) as total_samples,
-                round(avg(effective_hourly_rate)::numeric, 2) as avg_hourly,
-                round(avg(dollars_per_mile)::numeric, 2) as avg_mileage
-            FROM app_private.offer_history
-            WHERE driver_h3 IS NOT NULL
-              AND is_validated = true
-              AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
-              AND dollars_per_mile > 0 AND dollars_per_mile < 10
-              AND day_of_week = %s
-              AND hour_of_day = %s
-        """, (day, hour))
+                count(*) as hex_count,
+                sum(samples) as total_samples,
+                round(avg(ai_hourly)::numeric, 2) as avg_hourly,
+                round(avg(ai_mileage)::numeric, 2) as avg_mileage
+            FROM (
+                SELECT driver_h3,
+                    count(*) as samples,
+                    percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric as ai_hourly,
+                    percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric as ai_mileage
+                FROM app_private.offer_history
+                WHERE driver_h3 IS NOT NULL
+                  AND is_validated = true
+                  AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
+                  AND dollars_per_mile > 0 AND dollars_per_mile < 10
+                  AND day_of_week = %s
+                  AND hour_of_day = %s
+                GROUP BY driver_h3
+                HAVING count(*) >= %s
+            ) sub
+        """, (day, hour, min_samples))
         s = cur.fetchone()
 
         return jsonify({
