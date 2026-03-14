@@ -102,6 +102,10 @@ DECLARE
     v_hex_cache_applied      boolean := FALSE;
     v_hex_cache_samples      integer := 0;
 
+    -- [MARKET RATE] Community P40 rate from offer_history
+    v_market_hourly          numeric;
+    v_market_mileage         numeric;
+
     -- [MILEAGE FLOOR] Sliding $/mi for longer trips
     v_mileage_floor_config   jsonb;
     v_mf_base_per_mile       numeric;
@@ -243,6 +247,18 @@ BEGIN
     v_hourly_rate := gross_payout_in / NULLIF(v_total_time_hr, 0);
     v_dollars_per_mile := gross_payout_in / NULLIF(v_total_work_miles, 0);
 
+    -- =========================================================================
+    -- MARKET RATE LOOKUP (mode-agnostic, resolved once for all paths)
+    -- =========================================================================
+    IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
+        SELECT m.market_hourly, m.market_mileage
+        INTO v_market_hourly, v_market_mileage
+        FROM app_private.get_market_rate(
+            current_lat_in, current_lng_in,
+            user_id_in, NOW()
+        ) m;
+    END IF;
+    
     -- =========================================================================
     -- TOWARDS MODE LOGIC
     -- =========================================================================
@@ -448,22 +464,38 @@ BEGIN
                         v_threshold_per_hour := v_fs_hourly;
                         v_threshold_per_mile := v_fs_mileage;
                         v_threshold_source := v_fs_source;
-                    ELSIF (v_settings->>'freestyleMinHourly') IS NOT NULL
-                       AND (v_settings->>'freestyleMinMileage') IS NOT NULL THEN
-                        v_threshold_per_hour := (v_settings->>'freestyleMinHourly')::numeric;
-                        v_threshold_per_mile := (v_settings->>'freestyleMinMileage')::numeric;
-                        v_threshold_source := 'freestyle_manual';
-                    ELSE
-                        v_threshold_source := 'global';
+                     ELSE
+                        v_threshold_per_hour := COALESCE(
+                            v_market_hourly,
+                            (v_settings->>'dignity_hourly')::numeric,
+                            v_global_per_hour
+                        );
+                        v_threshold_per_mile := COALESCE(
+                            v_market_mileage,
+                            (v_settings->>'dignity_mileage')::numeric,
+                            v_global_per_mile
+                        );
+                        v_threshold_source := CASE
+                            WHEN v_market_hourly IS NOT NULL THEN 'market_rate'
+                            ELSE 'dignity_floor'
+                        END;
                     END IF;
                 END;
-            ELSIF (v_settings->>'freestyleMinHourly') IS NOT NULL
-               AND (v_settings->>'freestyleMinMileage') IS NOT NULL THEN
-                v_threshold_per_hour := (v_settings->>'freestyleMinHourly')::numeric;
-                v_threshold_per_mile := (v_settings->>'freestyleMinMileage')::numeric;
-                v_threshold_source := 'freestyle_manual';
             ELSE
-                v_threshold_source := 'global';
+                v_threshold_per_hour := COALESCE(
+                    v_market_hourly,
+                    (v_settings->>'dignity_hourly')::numeric,
+                    v_global_per_hour
+                );
+                v_threshold_per_mile := COALESCE(
+                    v_market_mileage,
+                    (v_settings->>'dignity_mileage')::numeric,
+                    v_global_per_mile
+                );
+                v_threshold_source := CASE
+                    WHEN v_market_hourly IS NOT NULL THEN 'market_rate'
+                    ELSE 'dignity_floor'
+                END;
             END IF;
 
         -- ================================================================
@@ -503,12 +535,13 @@ BEGIN
             -- FALLBACK: dignity floor if cache was too thin
             IF NOT v_hex_cache_applied THEN
                 v_threshold_source := COALESCE(v_active_market->>'name', 'current_market');
-
                 v_threshold_per_hour := COALESCE(
+                    v_market_hourly,
                     (v_settings->>'dignity_hourly')::numeric,
                     v_global_per_hour
                 );
                 v_threshold_per_mile := COALESCE(
+                    v_market_mileage,
                     (v_settings->>'dignity_mileage')::numeric,
                     v_global_per_mile
                 );
@@ -557,12 +590,13 @@ BEGIN
                     -- FALLBACK: dignity floor if cache was too thin
                     IF NOT v_hex_cache_applied THEN
                         v_threshold_source := 'destination_market:' || v_other_market_name;
-
                         v_threshold_per_hour := COALESCE(
+                            v_market_hourly,
                             (v_settings->>'dignity_hourly')::numeric,
                             v_global_per_hour
                         );
                         v_threshold_per_mile := COALESCE(
+                            v_market_mileage,
                             (v_settings->>'dignity_mileage')::numeric,
                             v_global_per_mile
                         );
@@ -601,12 +635,13 @@ BEGIN
 
                 IF v_active_market IS NOT NULL THEN
                     v_threshold_source := 'leaving_market:' || COALESCE(v_active_market->>'name', 'current');
-
                     v_threshold_per_hour := COALESCE(
+                        v_market_hourly,
                         (v_settings->>'dignity_hourly')::numeric,
                         v_global_per_hour
                     );
                     v_threshold_per_mile := COALESCE(
+                        v_market_mileage,
                         (v_settings->>'dignity_mileage')::numeric,
                         v_global_per_mile
                     );
