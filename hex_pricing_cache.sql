@@ -683,3 +683,7 @@ BEGIN
     RETURN QUERY SELECT NULL::numeric, NULL::numeric, 0::integer, 'market:no_data'::text;
 END;
 $$;
+
+CREATE INDEX IF NOT EXISTS idx_offer_history_dow_hour 
+ON app_private.offer_history(day_of_week, hour_of_day)
+WHERE is_validated = true;
