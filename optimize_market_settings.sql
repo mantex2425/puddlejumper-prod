@@ -73,40 +73,42 @@ BEGIN
     -- =======================================================================
     IF mode_filter IS NULL OR mode_filter IN ('PUDDLE_JUMP', 'FREESTYLE') THEN
         RETURN QUERY
-        WITH community_offers AS (
-            -- Pull from ALL drivers, filtered by YOUR market hexes
+WITH community_offers AS (
+            -- Pull from ALL drivers via offer_history (pre-computed timezone-aware DOW/hour)
             SELECT 
-                (decision_result->>'hourlyRate')::numeric as hourly_rate,
-                (decision_result->>'dollarsPerMile')::numeric as dpm,
+                effective_hourly_rate as hourly_rate,
+                dollars_per_mile as dpm,
                 fare,
-                created_at AT TIME ZONE v_timezone as local_ts
-            FROM app_private.decision_log
+                day_of_week,
+                hour_of_day
+            FROM app_private.offer_history
             WHERE 
                 -- NO driver_id filter — this is COMMUNITY data
                 created_at >= NOW() - (days_back_in || ' days')::interval
                 AND (mode_filter IS NULL OR mode_at_decision = mode_filter)
                 AND mode_at_decision IN ('PUDDLE_JUMP', 'FREESTYLE')
                 -- Geographic filter: YOUR market's hexes
-                AND (v_market_hexes IS NULL OR pickup_h3_index = ANY(v_market_hexes))
+                AND (v_market_hexes IS NULL OR driver_h3 = ANY(v_market_hexes))
                 -- The Bouncer: sanity checks
-                AND (decision_result->>'hourlyRate')::numeric > 5
-                AND (decision_result->>'hourlyRate')::numeric < 150
+                AND effective_hourly_rate > 5
+                AND effective_hourly_rate < 150
+                AND is_validated = true
         ),
         offers AS (
             SELECT *
             FROM community_offers
             WHERE 
-                -- Time filter: YOUR shift definition
+                -- Time filter: use pre-stored timezone-aware columns
                 (NOT v_shift_active OR (
-                    EXTRACT(DOW FROM local_ts)::int = ANY(v_shift_days)
+                    day_of_week = ANY(v_shift_days)
                     AND (
                         (v_shift_start <= v_shift_end 
-                         AND EXTRACT(HOUR FROM local_ts) >= v_shift_start 
-                         AND EXTRACT(HOUR FROM local_ts) < v_shift_end)
+                         AND hour_of_day >= v_shift_start 
+                         AND hour_of_day < v_shift_end)
                         OR
                         (v_shift_start > v_shift_end 
-                         AND (EXTRACT(HOUR FROM local_ts) >= v_shift_start 
-                              OR EXTRACT(HOUR FROM local_ts) < v_shift_end))
+                         AND (hour_of_day >= v_shift_start 
+                              OR hour_of_day < v_shift_end))
                     )
                 ))
         ),
