@@ -539,7 +539,45 @@ BEGIN
     END IF;
 
     -- ----------------------------------------------------------------
-    -- Step 4: Metro fallback — all offer_history for this day + hour
+    -- Step 4: K-ring(3) neighbors, same day + hour
+    SELECT
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric,
+        COUNT(*)::integer
+    INTO v_hourly, v_mileage, v_count
+    FROM app_private.offer_history
+    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 3)::text)
+      AND day_of_week = v_dow
+      AND hour_of_day = v_hour
+      AND is_validated = true
+      AND effective_hourly_rate > 5
+      AND effective_hourly_rate < 150;
+
+    IF v_count >= v_min_samples THEN
+        RETURN QUERY SELECT v_hourly, v_mileage, v_count, 'market:kring3'::text;
+        RETURN;
+    END IF;
+
+    -- Step 5: K-ring(4) neighbors, same day + hour
+    SELECT
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric,
+        COUNT(*)::integer
+    INTO v_hourly, v_mileage, v_count
+    FROM app_private.offer_history
+    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 4)::text)
+      AND day_of_week = v_dow
+      AND hour_of_day = v_hour
+      AND is_validated = true
+      AND effective_hourly_rate > 5
+      AND effective_hourly_rate < 150;
+
+    IF v_count >= v_min_samples THEN
+        RETURN QUERY SELECT v_hourly, v_mileage, v_count, 'market:kring4'::text;
+        RETURN;
+    END IF;
+
+    -- Step 6: Metro fallback — all offer_history for this day + hour
     -- ----------------------------------------------------------------
     SELECT
         PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
@@ -661,7 +699,45 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Step 4: Metro fallback — all offer_history for this day + hour
+    -- Step 4: K-ring(3) neighbors, same day + hour
+    SELECT
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric,
+        COUNT(*)::integer
+    INTO v_hourly, v_mileage, v_count
+    FROM app_private.offer_history
+    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 3)::text)
+      AND day_of_week = v_dow
+      AND hour_of_day = v_hour
+      AND is_validated = true
+      AND effective_hourly_rate > 5
+      AND effective_hourly_rate < 150;
+
+    IF v_count >= v_min_samples THEN
+        RETURN QUERY SELECT v_hourly, v_mileage, v_count, 'market:kring3'::text;
+        RETURN;
+    END IF;
+
+    -- Step 5: K-ring(4) neighbors, same day + hour
+    SELECT
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
+        PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric,
+        COUNT(*)::integer
+    INTO v_hourly, v_mileage, v_count
+    FROM app_private.offer_history
+    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 4)::text)
+      AND day_of_week = v_dow
+      AND hour_of_day = v_hour
+      AND is_validated = true
+      AND effective_hourly_rate > 5
+      AND effective_hourly_rate < 150;
+
+    IF v_count >= v_min_samples THEN
+        RETURN QUERY SELECT v_hourly, v_mileage, v_count, 'market:kring4'::text;
+        RETURN;
+    END IF;
+
+    -- Step 6: Metro fallback — all offer_history for this day + hour
     SELECT
         PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric,
         PERCENTILE_CONT(0.40) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric,
