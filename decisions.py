@@ -616,7 +616,8 @@ def get_optimization_recommendations():
         market_id = request.args.get('market_id', None)
         if not market_id:
             return jsonify({"error": "market_id is required. Pass your market UUID as ?market_id=..."}), 400
-        days_back = request.args.get('days', 7, type=int)        mode_filter = request.args.get('mode', None)
+        days_back = request.args.get('days', 7, type=int)
+        mode_filter = request.args.get('mode', None)
         time_period = request.args.get('time_period', None)
         
         # Validate mode if provided
