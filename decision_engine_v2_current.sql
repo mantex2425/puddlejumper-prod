@@ -94,14 +94,13 @@ DECLARE
 
     -- [PULSE] Real-time demand premium from offer velocity
     v_pulse_multiplier       numeric := 1.0;
-    v_pulse_applied          boolean := FALSE;  -- <<< FIX: was missing from DECLARE
+    v_pulse_applied          boolean := FALSE;
     v_pre_pulse_hourly       numeric;         -- For trace: threshold before Pulse
     v_pre_pulse_mileage      numeric;         -- For trace: threshold before Pulse
 
     -- [HEX-FIRST] Tracks whether hex cache already won in a green-zone branch
-    -- so the later leaving-market hex cache override doesn't double-apply.
     v_hex_cache_applied      boolean := FALSE;
-    v_hex_cache_samples      integer := 0;    -- For trace: how many samples cache had
+    v_hex_cache_samples      integer := 0;
 
     -- [MILEAGE FLOOR] Sliding $/mi for longer trips
     v_mileage_floor_config   jsonb;
@@ -162,11 +161,11 @@ BEGIN
                 ((elem->>'startHour')::integer > (elem->>'endHour')::integer AND (v_current_hour >= (elem->>'startHour')::integer OR v_current_hour < (elem->>'endHour')::integer))
             )
         ORDER BY
-            jsonb_array_length(elem->'days') ASC,                -- fewest days = most specific
+            jsonb_array_length(elem->'days') ASC,
             CASE WHEN (elem->>'startHour')::integer <= (elem->>'endHour')::integer
                  THEN (elem->>'endHour')::integer - (elem->>'startHour')::integer
                  ELSE 24 - (elem->>'startHour')::integer + (elem->>'endHour')::integer
-            END ASC                                               -- narrowest hour range
+            END ASC
         LIMIT 1;
 
         IF v_shift IS NOT NULL THEN
@@ -245,7 +244,7 @@ BEGIN
     v_dollars_per_mile := gross_payout_in / NULLIF(v_total_work_miles, 0);
 
     -- =========================================================================
-    -- TOWARDS MODE LOGIC (unchanged)
+    -- TOWARDS MODE LOGIC
     -- =========================================================================
     IF towards_active THEN
 
@@ -446,13 +445,11 @@ BEGIN
                     ) f;
 
                     IF v_fs_source IS NOT NULL AND v_fs_source != 'global_default' THEN
-                        -- Sufficient hex cache data: use it
                         v_threshold_per_hour := v_fs_hourly;
                         v_threshold_per_mile := v_fs_mileage;
                         v_threshold_source := v_fs_source;
                     ELSIF (v_settings->>'freestyleMinHourly') IS NOT NULL
                        AND (v_settings->>'freestyleMinMileage') IS NOT NULL THEN
-                        -- Insufficient cache data: fall back to manual values
                         v_threshold_per_hour := (v_settings->>'freestyleMinHourly')::numeric;
                         v_threshold_per_mile := (v_settings->>'freestyleMinMileage')::numeric;
                         v_threshold_source := 'freestyle_manual';
@@ -462,7 +459,6 @@ BEGIN
                 END;
             ELSIF (v_settings->>'freestyleMinHourly') IS NOT NULL
                AND (v_settings->>'freestyleMinMileage') IS NOT NULL THEN
-                -- No GPS: fall back to manual values
                 v_threshold_per_hour := (v_settings->>'freestyleMinHourly')::numeric;
                 v_threshold_per_mile := (v_settings->>'freestyleMinMileage')::numeric;
                 v_threshold_source := 'freestyle_manual';
@@ -472,10 +468,6 @@ BEGIN
 
         -- ================================================================
         -- PJ: DROPOFF STAYS IN CURRENT MARKET
-        -- HEX CACHE FIRST: if we have >= 10 samples at the driver's
-        -- current location, use those thresholds instead of flat
-        -- market/shift rates.  Falls back to market/shift if cache
-        -- is too thin.
         -- ================================================================
         ELSIF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
             v_return_miles := 0;
@@ -508,25 +500,19 @@ BEGIN
                 END;
             END IF;
 
-            -- FALLBACK: market/shift thresholds if cache was too thin
+            -- FALLBACK: dignity floor if cache was too thin
             IF NOT v_hex_cache_applied THEN
                 v_threshold_source := COALESCE(v_active_market->>'name', 'current_market');
 
                 v_threshold_per_hour := COALESCE(
-                    CASE WHEN v_auto_optimize THEN (v_active_market->'shiftThresholds'->v_shift_id->>'hourly')::numeric ELSE NULL END,
-                    (v_active_market->>'hourlyThreshold')::numeric,
-                    (v_active_market->>'min_effective_hourly_rate')::numeric,
+                    (v_settings->>'dignity_hourly')::numeric,
                     v_global_per_hour
                 );
                 v_threshold_per_mile := COALESCE(
-                    CASE WHEN v_auto_optimize THEN (v_active_market->'shiftThresholds'->v_shift_id->>'mileage')::numeric ELSE NULL END,
-                    (v_active_market->>'mileageThreshold')::numeric,
-                    (v_active_market->>'min_effective_dollar_per_mile')::numeric,
+                    (v_settings->>'dignity_mileage')::numeric,
                     v_global_per_mile
                 );
-                IF v_auto_optimize AND v_shift_id IS NOT NULL AND v_active_market->'shiftThresholds'->v_shift_id IS NOT NULL THEN
-                    v_threshold_source := v_threshold_source || ':shift:' || v_shift_id;
-                END IF;
+                v_threshold_source := v_threshold_source || ':dignity_floor';
             END IF;
 
         ELSE
@@ -540,7 +526,7 @@ BEGIN
                     v_other_market_id := v_other_market->>'id';
                     v_return_miles := 0;
 
-                    -- TRY HEX CACHE FIRST (same logic as current-market branch)
+                    -- TRY HEX CACHE FIRST
                     IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
                         DECLARE
                             v_hc_hourly  numeric;
@@ -568,25 +554,19 @@ BEGIN
                         END;
                     END IF;
 
-                    -- FALLBACK: other market/shift thresholds if cache was too thin
+                    -- FALLBACK: dignity floor if cache was too thin
                     IF NOT v_hex_cache_applied THEN
                         v_threshold_source := 'destination_market:' || v_other_market_name;
 
                         v_threshold_per_hour := COALESCE(
-                            CASE WHEN v_auto_optimize THEN (v_other_market->'shiftThresholds'->v_shift_id->>'hourly')::numeric ELSE NULL END,
-                            (v_other_market->>'hourlyThreshold')::numeric,
-                            (v_other_market->>'min_effective_hourly_rate')::numeric,
+                            (v_settings->>'dignity_hourly')::numeric,
                             v_global_per_hour
                         );
                         v_threshold_per_mile := COALESCE(
-                            CASE WHEN v_auto_optimize THEN (v_other_market->'shiftThresholds'->v_shift_id->>'mileage')::numeric ELSE NULL END,
-                            (v_other_market->>'mileageThreshold')::numeric,
-                            (v_other_market->>'min_effective_dollar_per_mile')::numeric,
+                            (v_settings->>'dignity_mileage')::numeric,
                             v_global_per_mile
                         );
-                        IF v_auto_optimize AND v_shift_id IS NOT NULL AND v_other_market->'shiftThresholds'->v_shift_id IS NOT NULL THEN
-                            v_threshold_source := v_threshold_source || ':shift:' || v_shift_id;
-                        END IF;
+                        v_threshold_source := v_threshold_source || ':dignity_floor';
                     END IF;
 
                     EXIT;
@@ -623,29 +603,20 @@ BEGIN
                     v_threshold_source := 'leaving_market:' || COALESCE(v_active_market->>'name', 'current');
 
                     v_threshold_per_hour := COALESCE(
-                        CASE WHEN v_auto_optimize THEN (v_active_market->'shiftThresholds'->v_shift_id->>'hourly')::numeric ELSE NULL END,
-                        (v_active_market->>'hourlyThreshold')::numeric,
-                        (v_active_market->>'min_effective_hourly_rate')::numeric,
+                        (v_settings->>'dignity_hourly')::numeric,
                         v_global_per_hour
                     );
                     v_threshold_per_mile := COALESCE(
-                        CASE WHEN v_auto_optimize THEN (v_active_market->'shiftThresholds'->v_shift_id->>'mileage')::numeric ELSE NULL END,
-                        (v_active_market->>'mileageThreshold')::numeric,
-                        (v_active_market->>'min_effective_dollar_per_mile')::numeric,
+                        (v_settings->>'dignity_mileage')::numeric,
                         v_global_per_mile
                     );
-                    IF v_auto_optimize AND v_shift_id IS NOT NULL AND v_active_market->'shiftThresholds'->v_shift_id IS NOT NULL THEN
-                        v_threshold_source := v_threshold_source || ':shift:' || v_shift_id;
-                    END IF;
+                    v_threshold_source := v_threshold_source || ':dignity_floor';
                 END IF;
             END IF;
         END IF;
 
         -- ================================================================
         -- HEX CACHE OVERRIDE (leaving-market only)
-        -- Green-zone branches already checked the cache inline above.
-        -- This block only fires for the leaving-market path where
-        -- v_hex_cache_applied is still FALSE.
         -- ================================================================
         IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL
            AND v_threshold_source NOT LIKE '%manual%'
@@ -677,8 +648,7 @@ BEGIN
         -- ================================================================
 
         -- ================================================================
-        -- SAVE PRE-PULSE THRESHOLDS (base thresholds before any pulse)
-        -- These are the "fair" thresholds used for the safety valve.
+        -- SAVE PRE-PULSE THRESHOLDS
         -- ================================================================
         v_pre_pulse_hourly := v_threshold_per_hour;
         v_pre_pulse_mileage := v_threshold_per_mile;
@@ -686,11 +656,6 @@ BEGIN
 
         -- ================================================================
         -- DEADHEAD COST
-        -- <<< FIX: Now computed BEFORE pulse, so deadhead uses base
-        -- thresholds instead of pulse-inflated thresholds.
-        -- Previously, pulse inflated v_threshold_per_hour first,
-        -- then deadhead used that inflated value, depressing net_pay
-        -- and hourly_rate before the safety valve could check them.
         -- ================================================================
         v_return_minutes := v_return_miles * 2.0;
 
@@ -708,8 +673,6 @@ BEGIN
 
         -- ================================================================
         -- [MILEAGE FLOOR] Sliding $/mi floor for longer trips
-        -- <<< FIX: Now computed BEFORE pulse so v_effective_per_mile
-        -- uses base thresholds for the fallback default.
         -- ================================================================
         v_mileage_floor_config := v_settings->'mileageFloorConfig';
         v_mf_base_per_mile     := COALESCE((v_mileage_floor_config->>'basePerMile')::numeric, v_threshold_per_mile);
@@ -723,15 +686,11 @@ BEGIN
         -- ================================================================
 
         -- ================================================================
-        -- [PULSE] APPLY DEMAND PREMIUM (thresholds only, AFTER deadhead)
-        -- Pulse now only inflates the threshold variables used in the
-        -- ELSE branch of the safety valve. It cannot affect deadhead
-        -- cost, net_pay, or hourly_rate calculations.
+        -- [PULSE] APPLY DEMAND PREMIUM
         -- ================================================================
         v_pulse_multiplier := app_private.get_pulse_multiplier(user_id_in, v_pickup_hex);
 
         IF v_pulse_multiplier > 1.0 THEN
-            -- PULSE GATE v3: Only apply on offers clearly viable pre-deadhead
             IF v_hourly_rate >= (v_pre_pulse_hourly * 1.20)
                AND v_dollars_per_mile >= v_pre_pulse_mileage THEN
                 v_threshold_per_hour := v_threshold_per_hour * v_pulse_multiplier;
@@ -746,19 +705,15 @@ BEGIN
 
         -- ================================================================
         -- SAFETY VALVE + PASS/FAIL
-        -- If the offer clears base (pre-pulse) thresholds with clean
-        -- deadhead, pulse cannot block it. Period.
         -- ================================================================
         v_pass_hourly := TRUE;
         v_pass_mileage := TRUE;
 
         IF v_hourly_rate >= v_pre_pulse_hourly
            AND v_dollars_per_mile >= v_effective_per_mile THEN
-            -- >>> SAFETY VALVE: Offer clears base thresholds → ACCEPT
             v_pass_hourly := TRUE;
             v_pass_mileage := TRUE;
         ELSE
-            -- Normal check against final thresholds (pulse-inflated if applied)
             IF v_calc_method IN ('per_hour', 'both') AND (v_hourly_rate IS NULL OR v_hourly_rate < v_threshold_per_hour) THEN v_pass_hourly := FALSE; END IF;
             IF v_calc_method IN ('per_mile', 'both') AND (v_dollars_per_mile IS NULL OR v_dollars_per_mile < v_effective_per_mile) THEN v_pass_mileage := FALSE; END IF;
         END IF;
@@ -768,7 +723,6 @@ BEGIN
             v_verdict := 'ACCEPT';
             IF v_lands_in_other_market THEN
                 v_reason := 'Lands in: ' || v_other_market_name;
-                -- AUTO-SWITCH for PJ landing in another market
                 v_switch_to_mode := 'puddle_jump';
                 v_switch_to_market_id := v_other_market_id;
             ELSIF v_return_miles = 0 THEN
@@ -824,22 +778,18 @@ BEGIN
         'threshold_mileage', v_threshold_per_mile,
         'source', v_threshold_source,
         'cache_value', v_threshold_per_hour,
-        -- [PULSE] Trace fields
         'pulse_multiplier', v_pulse_multiplier,
         'pulse_applied', v_pulse_applied,
         'pre_pulse_hourly', round(v_pre_pulse_hourly, 2),
         'pre_pulse_mileage', round(v_pre_pulse_mileage, 2),
-        -- [HEX-FIRST] Trace fields
         'hexCacheApplied', v_hex_cache_applied,
         'hexCacheSamples', v_hex_cache_samples,
-        -- [MILEAGE FLOOR] Trace fields
         'mileageFloorConfig', v_mileage_floor_config,
         'basePerMile', round(v_mf_base_per_mile, 4),
         'effectivePerMile', round(v_effective_per_mile, 4),
         'mileageDiscountApplied', round(v_mf_discount, 4),
         'extraMiles', round(v_mf_extra_miles, 2),
         'minPerMileFloor', round(v_mf_min_per_mile, 4),
-        -- Diagnostics
         'maxPickupMiles', v_max_pickup_miles,
         'gpsPickupDist', round(v_gps_pickup_dist, 2),
         'gpsTripDist', round(v_gps_trip_dist, 2),
