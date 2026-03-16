@@ -645,7 +645,10 @@ BEGIN
                         (v_settings->>'dignity_mileage')::numeric,
                         v_global_per_mile
                     );
-                    v_threshold_source := v_threshold_source || ':dignity_floor';
+                    v_threshold_source := v_threshold_source || CASE
+                        WHEN v_market_hourly IS NOT NULL THEN ':market_rate'
+                        ELSE ':dignity_floor'
+                    END;
                 END IF;
             END IF;
         END IF;
