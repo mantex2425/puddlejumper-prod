@@ -64,7 +64,7 @@ Never reference "AI mode", "PuddleJumper AI mode", or any other mode names. They
 ## TIME HANDLING
 The database session timezone is already set to the driver's local timezone before your query runs. Write ALL datetime filters as plain local time strings in 'YYYY-MM-DD HH:MM:SS' format. Do NOT use AT TIME ZONE, TIMESTAMPTZ casts, or UTC offsets — PostgreSQL will handle the conversion automatically.
 
-The current local time is {LOCAL_TIME}. A CALENDAR REFERENCE with exact dates for 'last Saturday', 'last Friday', 'yesterday' etc. is appended to this prompt — always use it instead of calculating dates yourself.
+The current local time is {LOCAL_TIME}. A TEMPORAL ANCHORS block is prepended to the top of this prompt with exact pre-calculated dates. You MUST use those exact dates — do NOT calculate dates yourself. If the anchor says 'Last Saturday: 2026-03-14', use 2026-03-14. Never override the anchors with your own calculation.
 
 When a driver uses relative time expressions like "this morning", "today", "yesterday", "last night", "this week" — ALWAYS translate them to a plain local time SQL filter. NEVER ask the driver to clarify a date or time. Make a reasonable assumption, state it briefly, and run the query. Assume weeks start on Sunday when calculating relative dates like "this week" or "last week".
 
@@ -279,7 +279,7 @@ def call_claude(messages, driver_id, model="claude-sonnet-4-20250514", timezone=
     logger.info("TIMEZONE: %s LOCAL_TIME: %s", timezone, local_now)
     today_str = now.strftime('%Y-%m-%d') if 'now' in locals() else datetime.utcnow().strftime('%Y-%m-%d')
     system = SYSTEM_PROMPT.replace('{DRIVER_ID}', driver_id).replace('America/Chicago', timezone).replace('{LOCAL_TIME}', local_now).replace('{TODAY}', today_str)
-    system = system + calendar_ref
+    system = calendar_ref + system
 
 
     response = client.messages.create(
