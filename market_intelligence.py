@@ -420,7 +420,7 @@ def market_intelligence_stream():
             clean_answer = re.sub(r'<query>.*?</query>', '', final_response, flags=re.DOTALL).strip()
             save_exchange(driver_id, user_message, clean_answer, len(queries))
 
-            yield f"event: answer\ndata: {json.dumps(clean_answer)}\n\n"
+            yield f"event: answer\ndata: {json.dumps(clean_answer, ensure_ascii=False)}\n\n"
             yield "event: done\ndata: {}\n\n"
 
         except Exception as e:
