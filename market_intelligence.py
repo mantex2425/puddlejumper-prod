@@ -17,7 +17,7 @@ Answer driver questions about market trends, earnings patterns, zone performance
 ## STRICT DATA ACCESS RULES
 
 You may ONLY query these tables and columns:
-- app_private.decision_log: created_at, fare, trip_minutes, trip_miles, pickup_minutes, mode_at_decision, decision_result->>'verdict' (values are ACCEPT or DECLINE), decision_result->>'reason', ping_h3_index, market_id, market_name
+- app_private.decision_log: created_at, fare, trip_minutes, trip_miles, pickup_minutes, mode_at_decision, decision_result->>'verdict' (values are ACCEPT or DECLINE), decision_result->>'reason', ping_h3_index, market_id, market_name, trace_data->>'source' (threshold cascade tier that fired: hex_cache, market_rate, or dignity_floor)
 - app_private.hex_pricing_cache: h3_index, day_of_week, hour_of_day, revenue_hourly, revenue_mileage, ai_hourly, ai_mileage, picky_hourly, picky_mileage, sample_count, data_source, updated_at
 - public.markets: id, name, metroplex_id
 
@@ -60,6 +60,9 @@ Never reference "AI mode", "PuddleJumper AI mode", or any other mode names. They
 - Fri: noon Fri to noon Sat (America/Chicago)
 - Sat: noon Sat to noon Sun (America/Chicago)
 - Database stores UTC - convert using AT TIME ZONE 'America/Chicago'
+
+## TIME HANDLING
+The current timestamp is always available via NOW() in PostgreSQL. When a driver uses relative time expressions like "this morning", "today", "yesterday", "last night", "this week" — ALWAYS translate them to SQL using NOW() AT TIME ZONE 'America/Chicago'. NEVER ask the driver to clarify a date or time. Make a reasonable assumption, state it briefly, and run the query.
 
 ## TONE
 Talk like a knowledgeable driving partner. Lead with the answer, follow with the numbers. Keep it concise - drivers are busy."""
@@ -106,6 +109,36 @@ def get_driver_profile(driver_id):
         if conn:
             return_db_readonly(conn)
 
+
+
+
+VALID_TIMEZONE_RE = re.compile(r'^[A-Za-z_]+/[A-Za-z_]+$|^UTC$')
+
+def get_driver_timezone(driver_id):
+    """Fetch driver's timezone from settings. Validates format before use."""
+    from db import get_db
+    conn = None
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT settings->>'timezone' as timezone
+                FROM app_private.driver_settings_new
+                WHERE driver_id = %s
+            """, (driver_id,))
+            row = cur.fetchone()
+            if row and row['timezone']:
+                tz = row['timezone']
+                if VALID_TIMEZONE_RE.match(tz):
+                    return tz
+                logger.warning("Invalid timezone format for driver %s: %s", driver_id, tz)
+        return 'UTC'
+    except Exception as e:
+        logger.error("DRIVER TIMEZONE ERROR: %s", str(e))
+        return 'UTC'
+    finally:
+        if conn:
+            conn.close()
 
 def load_history(driver_id):
     """Load last 10 exchanges from DB for this driver."""
@@ -186,9 +219,10 @@ def call_claude(messages, driver_id, model="claude-sonnet-4-20250514"):
     import anthropic
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     profile = get_driver_profile(driver_id)
-    system = SYSTEM_PROMPT.replace('{DRIVER_ID}', driver_id)
+    timezone = get_driver_timezone(driver_id)
+    system = SYSTEM_PROMPT.replace('{DRIVER_ID}', driver_id).replace('America/Chicago', timezone)
     if profile:
-        system = system + f"\n\n{profile}"
+        system = system + f"\n\nDRIVER TIMEZONE: {timezone}"
 
     response = client.messages.create(
         model=model,
