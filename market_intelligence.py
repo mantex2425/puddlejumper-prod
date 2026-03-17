@@ -2,7 +2,7 @@ import os
 import re
 import json
 import logging
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response, stream_with_context
 from utils import verify_and_get_user_id
 
 logger = logging.getLogger(__name__)
@@ -90,8 +90,31 @@ When a driver asks about a specific day (e.g., "Saturday"), they mean their DRIV
 - Saturday shift: Saturday noon to Sunday noon  
 - Weekday shifts: 4am to midnight
 
+## RESPONSE FORMAT
+
+**ALWAYS start with a one-line dashboard:**
+📊 [X offers] | ✅ [X accepts] | 💰 $[total] | ⚡ [accept rate]%
+
+**For shift/session summaries, use the Tier Table:**
+| Tier | Count | Avg Fare | Result |
+|------|-------|----------|--------|
+| 🦄 Unicorns ($20+) | X | $XX | Accepted |
+| 🍞 Bread & Butter ($10-19) | X | $XX | XX% Accepted |
+| 🗑️ Trash (< $7) | X | $XX | Rejected |
+
+**For hourly patterns, use ASCII pulse bars — scale bar length to volume (1 offer = [|---------], 15+ offers = [||||||||||], scale proportionally):**
+`8PM  [||||||||||] 12 offers — HOT`
+`9PM  [|||||||---] 8 offers  — WARM`
+`10PM [|||-------] 4 offers  — COOLING`
+`11PM [|---------] 1 offer   — DEAD`
+
+**For comparisons use a markdown table with a Winner column.**
+
+**Always end with a bold Verdict:**
+**Verdict:** [One punchy sentence — what to do differently or confirm they nailed it.]
+
 ## TONE
-Talk like a knowledgeable driving partner. Lead with the answer, follow with the numbers. Keep it concise - drivers are busy."""
+Talk like a sharp, no-BS driving partner who's seen every market condition. Respect the driver's time — lead with the dashboard, back it up with data, end with a verdict. Never waffle. Never explain SQL. If the numbers are good, say so. If they're bad, say that too. Drivers can handle the truth."""
 
 FORBIDDEN_KEYWORDS = re.compile(
     r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CREATE|REPLACE)\b',
@@ -347,3 +370,67 @@ def market_intelligence():
     except Exception as e:
         logger.error("MARKET INTELLIGENCE ERROR: %s", str(e))
         return jsonify({"error": str(e)}), 500
+
+
+@market_intelligence_bp.route('/v1/market-intelligence/stream', methods=['POST', 'OPTIONS'])
+def market_intelligence_stream():
+    if request.method == 'OPTIONS':
+        return Response('', status=200, headers={
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        })
+
+    try:
+        driver_id = verify_and_get_user_id(request)
+        body = request.get_json()
+        user_message = body['message'].strip()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 401
+
+    def generate():
+        try:
+            timezone = get_driver_timezone(driver_id)
+            history = load_history(driver_id)
+            messages = history + [{"role": "user", "content": user_message}]
+
+            yield "event: status\ndata: Analyzing your question...\n\n"
+
+            first_response = call_claude(messages, driver_id,
+                model="claude-sonnet-4-20250514", timezone=timezone)
+            queries = extract_queries(first_response)
+
+            if queries:
+                yield "event: status\ndata: Querying the market data...\n\n"
+                query_results = run_queries(queries, driver_id, timezone)
+
+                yield "event: status\ndata: Building your dashboard...\n\n"
+                result_message = {
+                    "role": "user",
+                    "content": f"Query results: {json.dumps(query_results, default=str)}\n\nNow answer the driver's question using these results."
+                }
+                messages_with_results = messages + [
+                    {"role": "assistant", "content": first_response},
+                    result_message
+                ]
+                final_response = call_claude(messages_with_results, driver_id, timezone=timezone)
+            else:
+                final_response = first_response
+
+            clean_answer = re.sub(r'<query>.*?</query>', '', final_response, flags=re.DOTALL).strip()
+            save_exchange(driver_id, user_message, clean_answer, len(queries))
+
+            yield f"event: answer\ndata: {json.dumps(clean_answer)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+
+        except Exception as e:
+            logger.error("STREAM ERROR: %s", str(e))
+            yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
+
+    return Response(stream_with_context(generate()),
+                   mimetype='text/event-stream',
+                   headers={
+                       'Cache-Control': 'no-cache',
+                       'X-Accel-Buffering': 'no',
+                       'Access-Control-Allow-Origin': '*',
+                   })
