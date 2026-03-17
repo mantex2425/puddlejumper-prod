@@ -84,6 +84,9 @@ If a query returns 0 rows, do NOT immediately tell the driver they didn't drive.
 2. Consider that the driver may have driven at different hours than assumed
 3. Say "I didn't find data for that exact window — want me to check a broader range?"
 
+## SAME-DAY COMPARISON RULE
+When a driver asks about a future shift (e.g., "tomorrow", "this weekend"), identify the day of week for that shift and ALWAYS query historical data for that SAME DAY OF WEEK from previous weeks. If tomorrow is Wednesday, filter WHERE clause to target recent Wednesdays, not just the most recent session. Use the "Same day last week" anchor from TEMPORAL ANCHORS for the comparison date.
+
 ## SHIFT vs CALENDAR DAY
 When a driver asks about a specific day (e.g., "Saturday"), they mean their DRIVING SHIFT, not midnight to midnight. Use these shift boundaries:
 - Friday shift: Friday noon to Saturday noon
@@ -294,6 +297,8 @@ def call_claude(messages, driver_id, model="claude-sonnet-4-20250514", timezone=
             f"Last Sunday:         {get_last_day(6)}\n"
             f"Month-to-date start: {now.strftime('%Y-%m-01')}\n"
             f"Year-to-date start:  {now.strftime('%Y-01-01')}\n"
+            f"Tomorrow:            {(now + timedelta(days=1)).strftime('%A, %Y-%m-%d')}\n"
+            f"Same day last week:  {(now + timedelta(days=1) - timedelta(days=7)).strftime('%Y-%m-%d')} ({(now + timedelta(days=1)).strftime('%A')})\n"
             "-----------------------------------------------------------------"
         )
     except Exception:
