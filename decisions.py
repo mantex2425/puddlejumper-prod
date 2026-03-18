@@ -205,9 +205,13 @@ def make_decision():
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
+    import time
+    _t0 = time.time()
+
     try:
         # ── ARC BAND GEOCODING CORRECTION ─────────────────────────
         arc_band_trace = {}
+        _t_arc_start = time.time()
         try:
             # Load driver's red zones
             cur.execute("""
@@ -249,6 +253,7 @@ def make_decision():
         except Exception as arc_err:
             logging.error(f"Arc band error (non-blocking): {arc_err}")
             arc_band_trace["error"] = str(arc_err)
+        logging.info(f"⏱️ Arc band: {(time.time()-_t_arc_start)*1000:.0f}ms")
 
         # GEOCODE HALLUCINATION GUARD: if geocoded pickup is >30mi from driver GPS,
         # the geocoder returned garbage (e.g. "Main Terminal, Texas" -> west Texas).
@@ -273,6 +278,7 @@ def make_decision():
                 p_lng = None
                 geocode_guard_triggered = True
 
+        _t_sql_start = time.time()
         # SINGLE SOURCE OF TRUTH: Call SQL decision engine
         cur.execute("""
             SELECT * FROM app_private.decision_engine_v2(
@@ -287,6 +293,7 @@ def make_decision():
         ))
 
         row = cur.fetchone()
+        logging.info(f"⏱️ Decision engine SQL: {(time.time()-_t_sql_start)*1000:.0f}ms")
         if not row: 
             return jsonify({"error": "Engine returned no result"}), 500
 
@@ -346,23 +353,27 @@ def make_decision():
             logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
 
             # Background cache: pre-warm street geometry for future hallucination recovery
-            if dropoff_address and d_lat and d_lng:
+            if d_lat and d_lng:
                 def _cache_street(addr, lat, lng):
                     try:
-                        import psycopg2
-                        c = psycopg2.connect(dbname="puddlejumper")
+                        from db import get_db
+                        c = get_db()
                         cr = c.cursor()
-                        get_street_geometry(addr, lat, lng, cr, c, bbox_margin=0.03)
+                        get_street_geometry(addr or f"{lat},{lng}", lat, lng, cr, c, bbox_margin=0.03)
                         cr.close()
                         c.close()
+                        logging.info(f"✅ Street geometry cached for '{addr}'")
                     except Exception as e:
-                        logging.debug(f"Street cache pre-warm failed: {e}")
-                threading.Thread(target=_cache_street, args=(dropoff_address, d_lat, d_lng), daemon=True).start()
+                        logging.warning(f"Street cache pre-warm failed: {e}")
+                t = threading.Thread(target=_cache_street, args=(dropoff_address, d_lat, d_lng), daemon=False)
+                t.start()
+
 
         except Exception as db_e:
             logging.error(f"❌ Logging failed: {db_e}")
             conn.rollback()
 
+        logging.info(f"⏱️ TOTAL decision time: {(time.time()-_t0)*1000:.0f}ms")
         return jsonify(result), 200
 
     except Exception as e:
