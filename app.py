@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
 
 # --------------------------------------------------------------
 # 1. Light Boot Strategy
@@ -10,6 +11,7 @@ from flask import Flask, request, jsonify, Response
 # We keep the global scope extremely light to ensure instant 
 # container startup and fast health checks.
 app = Flask(__name__)
+CORS(app, origins=["https://app.puddlejumper.io", "http://localhost:5173", "http://localhost:3000"])
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +40,7 @@ from account import account_bp
 from referrals import referrals_bp
 from crash_reports import crash_reports_bp
 from timelapse import timelapse_bp
+from market_intelligence import market_intelligence_bp
 
 app.register_blueprint(markets_bp)
 app.register_blueprint(unified_search_bp, url_prefix="/api/v1")
@@ -54,6 +57,7 @@ app.register_blueprint(account_bp, url_prefix='/api/v1/account')
 app.register_blueprint(referrals_bp, url_prefix='/api/v1/referrals')
 app.register_blueprint(crash_reports_bp)
 app.register_blueprint(timelapse_bp, url_prefix="/api/v1")
+app.register_blueprint(market_intelligence_bp, url_prefix="/api")
 
 
 # Force puddles_brain to fully initialize at startup
@@ -71,7 +75,7 @@ def require_auth_globally():
         "/.well-known/apple-app-site-association",
     }
     
-    if request.path in public_paths or request.path.startswith("/h/"):
+    if request.method == "OPTIONS" or request.path in public_paths or request.path.startswith("/h/"):
         return None
 
     # Lazy load auth logic only for secured requests

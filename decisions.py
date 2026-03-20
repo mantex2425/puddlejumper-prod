@@ -1,4 +1,4 @@
-import threading
+from concurrent.futures import ThreadPoolExecutor
 # backend/decisions.py
 # VERSION: 8.0 - Added ocr_confidence storage
 import os
@@ -18,6 +18,7 @@ from utils import verify_and_get_user_id, require_firebase_auth
 
 load_dotenv()
 decisions_bp = Blueprint('decisions', __name__)
+executor = ThreadPoolExecutor(max_workers=4)
 
 # ======================================================================
 # HELPER: Get Coordinates from Hex via SQL
@@ -334,9 +335,10 @@ def make_decision():
                     decision_result, mode_at_decision, market_name,
                     ocr_confidence, pickup_h3_index, dropoff_h3_index,
                     trace_data, current_lat, current_lng,                   trip_miles, pickup_miles,
+                    ping_h3_index,
                     towards_market_id, towards_target_lat, towards_target_lng,
                     created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, %s, %s, %s, NOW())           """, (
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s, NOW())           """, (
                 uid, market_id, fare, pickup_min, trip_min, 
                 p_lat, p_lng, d_lat, d_lng, json.dumps(result),
                 mode_name, market_name,
@@ -346,6 +348,7 @@ def make_decision():
                 json.dumps({**(row['trace_data'] if row.get('trace_data') else {}), "arc_band": arc_band_trace}),
                 current_lat, current_lng,
                 trip_miles, pickup_miles,
+                current_lat, current_lng,
                 towards_market_id, towards_target_lat, towards_target_lng
             ))
             
@@ -355,18 +358,20 @@ def make_decision():
             # Background cache: pre-warm street geometry for future hallucination recovery
             if d_lat and d_lng:
                 def _cache_street(addr, lat, lng):
+                    c = None
+                    cr = None
                     try:
                         from db import get_db
                         c = get_db()
                         cr = c.cursor()
                         get_street_geometry(addr or f"{lat},{lng}", lat, lng, cr, c, bbox_margin=0.03)
-                        cr.close()
-                        c.close()
                         logging.info(f"✅ Street geometry cached for '{addr}'")
                     except Exception as e:
                         logging.warning(f"Street cache pre-warm failed: {e}")
-                t = threading.Thread(target=_cache_street, args=(dropoff_address, d_lat, d_lng), daemon=False)
-                t.start()
+                    finally:
+                        if cr: cr.close()
+                        if c: c.close()
+                executor.submit(_cache_street, dropoff_address, d_lat, d_lng)
 
 
         except Exception as db_e:

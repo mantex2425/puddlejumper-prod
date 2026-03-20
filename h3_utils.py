@@ -95,3 +95,26 @@ def cluster_polygons():
     except Exception as e:
         print(f"Cluster Polygon General Error: {e}")
         return jsonify({"success": False, "error": f"Internal server error: {str(e)}"}), 500
+
+@bp.get("/starter_market")
+@require_firebase_auth
+def starter_market():
+    """
+    Generate a filled hex disk for a new user's starter market.
+    /api/v1/h3/starter_market?lat=29.58&lng=-95.53&ring=3
+    Returns 37 contiguous hexes (ring=3) as a filled hexagon.
+    """
+    lat = float(request.args.get("lat"))
+    lng = float(request.args.get("lng"))
+    ring = int(request.args.get("ring", 3))
+    
+    center_h3 = h3.latlng_to_cell(lat, lng, 8)
+    filled = list(h3.grid_disk(center_h3, ring))
+    
+    return jsonify({
+        "center_h3": center_h3,
+        "hexes": filled,
+        "count": len(filled),
+        "ring": ring,
+        "resolution": 8
+    })

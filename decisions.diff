@@ -1,0 +1,659 @@
+diff --git a/decisions.py b/decisions.py
+index 90e30f8..2c90678 100644
+--- a/decisions.py
++++ b/decisions.py
+@@ -1,12 +1,16 @@
+-# backend/routes/decisions.py
+-# VERSION: 5.8 - Added Decision History Retrieval & Fixed Schema Persistence
++# backend/decisions.py
++# VERSION: 8.0 - Added ocr_confidence storage
+ import os
+ import random
+ import json
+ import traceback
++import logging
++
+ from dotenv import load_dotenv
+ from flask import Blueprint, request, jsonify
+ from psycopg2.extras import RealDictCursor
++
++# 🟢 RESTORING ORIGINAL WORKING IMPORTS
+ from db import get_db
+ from utils import verify_and_get_user_id, require_firebase_auth
+ 
+@@ -17,30 +21,22 @@ decisions_bp = Blueprint('decisions', __name__)
+ # HELPER: Get Coordinates from Hex via SQL
+ # ======================================================================
+ def get_coords_from_hex(cur, hex_code):
+-    """
+-    Verified fix based on SQL Ground Truth.
+-    pt[0] = Longitude, pt[1] = Latitude.
+-    """
+     cur.execute("""
+         SELECT 
+             (h3_cell_to_latlng(%s::h3index))[0] as lng, 
+             (h3_cell_to_latlng(%s::h3index))[1] as lat
+     """, (hex_code, hex_code))
+     row = cur.fetchone()
+-    if not row:
+-        return None
++    if not row: return None
+     return {"lat": float(row['lat']), "lng": float(row['lng'])}
+ 
+ # ======================================================================
+-# GET: /api/v1/decisions/history
++# ROUTES
+ # ======================================================================
++
+ @require_firebase_auth
+ @decisions_bp.route("/history", methods=["GET"])
+ def get_decision_history():
+-    """
+-    Retrieves the last N decisions for the authenticated driver.
+-    Matches the schema verified in the app_private.decision_log table.
+-    """
+     try:
+         uid = verify_and_get_user_id(request)
+         limit = request.args.get('limit', 10, type=int)
+@@ -48,7 +44,6 @@ def get_decision_history():
+         conn = get_db()
+         cur = conn.cursor(cursor_factory=RealDictCursor)
+ 
+-        # Query matches verified table columns
+         cur.execute("""
+             SELECT 
+                 id, driver_id as "driverId", created_at as "createdAt", 
+@@ -64,8 +59,6 @@ def get_decision_history():
+         """, (uid, limit))
+ 
+         rows = cur.fetchall()
+-        
+-        # Ensure decisionResult is parsed if stored as a string
+         history = []
+         for row in rows:
+             if isinstance(row.get('decisionResult'), str):
+@@ -81,9 +74,6 @@ def get_decision_history():
+         if 'conn' in locals(): conn.close()
+ 
+ 
+-# ======================================================================
+-# POST: /api/v1/decisions/simulate-suite
+-# ======================================================================
+ @require_firebase_auth
+ @decisions_bp.route("/simulate-suite", methods=["POST"])
+ def simulate_test_suite():
+@@ -169,87 +159,546 @@ def make_decision():
+ 
+     p = request.get_json(silent=True) or {}
+ 
++    # Extract all parameters
+     fare = float(p.get("fare") or 0)
+     trip_miles = float(p.get("tripMiles") or 0)
+     trip_min = float(p.get("tripMinutes") or 0)
+     pickup_min = float(p.get("pickupMinutes") or 0)
++    pickup_miles = float(p.get("pickupMiles") or (pickup_min * 0.33))
+ 
+     d_lat = float(p.get("dropoffLat") or 0)
+     d_lng = float(p.get("dropoffLng") or 0)
+     p_lat = float(p.get("lat") or 0)
+     p_lng = float(p.get("lng") or 0)
++    
++    # Driver's current GPS position
++    current_lat = p.get("currentLat")
++    current_lng = p.get("currentLng")
++    if current_lat is not None: current_lat = float(current_lat)
++    if current_lng is not None: current_lng = float(current_lng)
+ 
+-    # Use the validated Houston Market UUID if none provided
+-    market_id = p.get("marketId") or "6a35d28b-8e6c-4d60-94aa-2661e2650863"
++    market_id = p.get("marketId")
+ 
+-    pickup_miles = float(p.get("pickupMiles") or (pickup_min * 0.33))
+-
+-    # Towards Mode Parameters (from Android voice command)
++    # Mode parameters
+     towards_active = bool(p.get("towardsActive", False))
+     towards_target_lat = p.get("towardsTargetLat")
+     towards_target_lng = p.get("towardsTargetLng")
+     towards_market_id = p.get("towardsMarketId")
++    is_puddle_jump = bool(p.get("isPuddleJumpMode", True))
++    towards_backtrack_tolerance = float(p.get("towardsBacktrackTolerance", 3.0))
++
++    if towards_target_lat is not None: towards_target_lat = float(towards_target_lat)
++    if towards_target_lng is not None: towards_target_lng = float(towards_target_lng)
++
++    # OCR confidence scores from YOLO pipeline (per-field)
++    ocr_confidence = p.get("ocrConfidence")
+ 
+-    # Convert to float or None for SQL
+-    if towards_target_lat is not None:
+-        towards_target_lat = float(towards_target_lat)
+-    if towards_target_lng is not None:
+-        towards_target_lng = float(towards_target_lng)
++    # DEBUG LOGGING
++    logging.info(f"🔍 Decision Request - currentLat: {current_lat}, currentLng: {current_lng}")
+ 
+     conn = get_db()
+     cur = conn.cursor(cursor_factory=RealDictCursor)
+ 
+     try:
+-        # 1. Run the Decision Engine SQL function (now with Towards Mode)
++        # SINGLE SOURCE OF TRUTH: Call SQL decision engine
+         cur.execute("""
+             SELECT * FROM app_private.decision_engine_v2(
+                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+-                %s, %s, %s, %s
++                %s, %s, %s, %s, %s, %s, %s, %s
+             )
+         """, (
+             uid, p_lat, p_lng, d_lat, d_lng, fare, trip_miles, trip_min,
+             pickup_min, pickup_miles, market_id,
+-            towards_active, towards_target_lat, towards_target_lng, towards_market_id
++            towards_active, towards_target_lat, towards_target_lng, towards_market_id,
++            current_lat, current_lng, towards_backtrack_tolerance, is_puddle_jump
+         ))
+ 
+         row = cur.fetchone()
+         if not row: 
+             return jsonify({"error": "Engine returned no result"}), 500
+ 
+-        # Output format remains camelCase for the Android DTOs
++        # Build response
+         result = {
+             "verdict": row['verdict'],
+             "reason": row['reason'],
+-            "netPay": float(row['net_pay']),
+-            "hourlyRate": float(row['hourly_rate']),
+-            "dollarsPerMile": float(row['dollars_per_mile']),
+-            "deadheadMiles": float(row['deadhead_miles']),
+-            "deadheadCost": float(row['deadhead_cost']),
+-            "auditSource": "SQL_V2"
++            "netPay": float(row['net_pay'] or 0),
++            "hourlyRate": float(row['hourly_rate'] or 0),
++            "dollarsPerMile": float(row['dollars_per_mile'] or 0),
++            "deadheadMiles": float(row['deadhead_miles'] or 0),
++            "deadheadCost": float(row['deadhead_cost'] or 0),
++            "arrivalDetected": row['arrival_detected'],
++            "switchToMode": row['switch_to_mode'],
++            "switchToMarketId": row['switch_to_market_id'],
++            "thresholdSource": row['threshold_source']
+         }
+ 
+-        # 2. Persist the record to the decision_log table
++        # Persist the decision log
+         try:
++            # --- Determine mode and market name logic ---
++            if towards_active:
++                mode_name = "TOWARDS"
++                market_name = p.get("marketName")
++                
++            elif is_puddle_jump:
++                mode_name = "PUDDLE_JUMP"
++                market_name = p.get("marketName")
++            else:
++                mode_name = "FREESTYLE"
++                market_name = None
++            # --------------------------------------------
++
+             cur.execute("""
+                 INSERT INTO app_private.decision_log (
+                     driver_id, market_id, fare, pickup_minutes, trip_minutes,
+                     pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+-                    decision_result, created_at
+-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
++                    decision_result, mode_at_decision, market_name,
++                    ocr_confidence, pickup_h3_index, created_at
++                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), NOW())
+             """, (
+                 uid, market_id, fare, pickup_min, trip_min, 
+-                p_lat, p_lng, d_lat, d_lng, json.dumps(result)
++                p_lat, p_lng, d_lat, d_lng, json.dumps(result),
++                mode_name, market_name,
++                json.dumps(ocr_confidence) if ocr_confidence else None,
++                p_lat, p_lng
+             ))
++            
+             conn.commit()
++            logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
++
+         except Exception as db_e:
+-            print(f"Logging failed: {db_e}")
++            logging.error(f"❌ Logging failed: {db_e}")
+             conn.rollback()
+ 
+         return jsonify(result), 200
+ 
+     except Exception as e:
++        logging.error(f"❌ Decision engine error: {e}")
+         traceback.print_exc()
+         return jsonify({"error": str(e)}), 500
+     finally:
+         cur.close()
+-        conn.close()
+\ No newline at end of file
++        conn.close()
++
++# ======================================================================
++# HARVEST: Async offer data collection (fire-and-forget)
++# ======================================================================
++
++def validate_offer(fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes, hourly_rate):
++    """Sanity Gatekeeper - flag suspicious OCR data"""
++    flags = []
++    is_valid = True
++    
++    # Check 1: Impossible speed (>110 mph)
++    if trip_miles and trip_minutes and trip_minutes > 0:
++        mph = trip_miles / (trip_minutes / 60)
++        if mph > 110:
++            flags.append('IMPOSSIBLE_SPEED')
++            is_valid = False
++    
++    # Check 2: Insane hourly rate (>$150/hr)
++    if hourly_rate and hourly_rate > 150:
++        flags.append('HIGH_HOURLY')
++        is_valid = False
++    
++    # Check 3: Suspiciously cheap (<$3 fare)
++    if fare and fare < 3.00:
++        flags.append('LOW_FARE')
++        is_valid = False
++    
++    # Check 4: Zero distance with high fare
++    if trip_miles and fare and trip_miles < 0.5 and fare > 10:
++        flags.append('SUSPICIOUS_DISTANCE')
++        is_valid = False
++    
++    # Check 5: Missing critical data
++    if not trip_minutes or trip_minutes == 0:
++        flags.append('MISSING_TIME')
++        is_valid = False
++    
++    if not trip_miles or trip_miles == 0:
++        flags.append('MISSING_DISTANCE')
++        is_valid = False
++    
++    return is_valid, flags
++
++@require_firebase_auth
++@decisions_bp.route("/harvest", methods=["POST"])
++def harvest_offer():
++    """
++    Fire-and-forget endpoint to store offer data for crowdsourced pricing database.
++    Called by Android AFTER decision is made and announced.
++    """
++    try:
++        uid = verify_and_get_user_id(request)
++    except:
++        return jsonify({"status": "auth_failed"}), 403
++
++    p = request.get_json(silent=True) or {}
++
++    # Extract offer data
++    fare = p.get("fare")
++    trip_miles = p.get("tripMiles")
++    trip_minutes = p.get("tripMinutes")
++    pickup_miles = p.get("pickupMiles")
++    pickup_minutes = p.get("pickupMinutes")
++    
++    # Locations
++    driver_lat = p.get("driverLat") or p.get("currentLat")
++    driver_lng = p.get("driverLng") or p.get("currentLng")
++    pickup_lat = p.get("pickupLat") or p.get("lat")
++    pickup_lng = p.get("pickupLng") or p.get("lng")
++    dropoff_lat = p.get("dropoffLat")
++    dropoff_lng = p.get("dropoffLng")
++    
++    pickup_address = p.get("pickupAddress")
++    dropoff_address = p.get("dropoffAddress")
++    
++    # Offer details
++    ride_type = p.get("rideType") or p.get("vehicleType")
++    is_surge = bool(p.get("isSurge", False))
++    is_priority = bool(p.get("isPriority", False))
++    is_reserve = bool(p.get("isReserve", False))
++    
++    # Calculated metrics
++    effective_hourly_rate = p.get("hourlyRate")
++    dollars_per_mile = p.get("dollarsPerMile")
++    
++    # Decision context
++    confidence_score = p.get("confidenceScore")
++    app_verdict = p.get("verdict")
++    app_reason = p.get("reason")
++    mode_at_decision = p.get("modeAtDecision")
++    market_name = p.get("marketName")
++
++    # Convert to proper types
++    if fare is not None: fare = float(fare)
++    if trip_miles is not None: trip_miles = float(trip_miles)
++    if trip_minutes is not None: trip_minutes = float(trip_minutes)
++    if pickup_miles is not None: pickup_miles = float(pickup_miles)
++    if pickup_minutes is not None: pickup_minutes = float(pickup_minutes)
++    if driver_lat is not None: driver_lat = float(driver_lat)
++    if driver_lng is not None: driver_lng = float(driver_lng)
++    if pickup_lat is not None: pickup_lat = float(pickup_lat)
++    if pickup_lng is not None: pickup_lng = float(pickup_lng)
++    if dropoff_lat is not None: dropoff_lat = float(dropoff_lat)
++    if dropoff_lng is not None: dropoff_lng = float(dropoff_lng)
++    if effective_hourly_rate is not None: effective_hourly_rate = float(effective_hourly_rate)
++    if dollars_per_mile is not None: dollars_per_mile = float(dollars_per_mile)
++    if confidence_score is not None: confidence_score = float(confidence_score)
++
++    # H3 computed in SQL instead
++    driver_h3 = None
++    pickup_h3 = None
++    dropoff_h3 = None
++
++    # Sanity Gatekeeper
++    is_validated, validation_flags = validate_offer(
++        fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes, effective_hourly_rate
++    )
++
++    # Compute time breakdowns (since we can't use GENERATED columns)
++    from datetime import datetime
++    now = datetime.utcnow()
++    day_of_year = now.timetuple().tm_yday
++    day_of_week = now.weekday()  # 0=Monday, 6=Sunday (Python convention)
++    # Convert to Postgres DOW: 0=Sunday, 6=Saturday
++    day_of_week = (day_of_week + 1) % 7
++    hour_of_day = now.hour
++
++    conn = get_db()
++    cur = conn.cursor()
++
++    try:
++        cur.execute("""
++            INSERT INTO app_private.offer_history (
++                created_at, day_of_year, day_of_week, hour_of_day,
++                driver_lat, driver_lng, driver_h3,
++                pickup_lat, pickup_lng, pickup_h3, pickup_address, pickup_miles, pickup_minutes,
++                dropoff_lat, dropoff_lng, dropoff_h3, dropoff_address, trip_miles, trip_minutes,
++                fare, ride_type, is_surge, is_priority, is_reserve,
++                effective_hourly_rate, dollars_per_mile,
++                confidence_score, is_validated, validation_flags,
++                app_verdict, app_reason, mode_at_decision, market_name
++            ) VALUES (
++                NOW(), %s, %s, %s,
++                %s, %s, app_private.safe_h3(%s, %s),
++                %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
++                %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
++                %s, %s, %s, %s, %s,
++                %s, %s,
++                %s, %s, %s,
++                %s, %s, %s, %s
++            )
++        """, (
++            day_of_year, day_of_week, hour_of_day,
++            driver_lat, driver_lng, driver_lat, driver_lng,
++            pickup_lat, pickup_lng, pickup_lat, pickup_lng, pickup_address, pickup_miles, pickup_minutes,
++            dropoff_lat, dropoff_lng, dropoff_lat, dropoff_lng, dropoff_address, trip_miles, trip_minutes,
++            fare, ride_type, is_surge, is_priority, is_reserve,
++            effective_hourly_rate, dollars_per_mile,
++            confidence_score, is_validated, validation_flags,
++            app_verdict, app_reason, mode_at_decision, market_name
++        ))
++        
++        conn.commit()
++
++                # --- Referral offer count increment ---
++        try:
++            cur2 = conn.cursor()
++            cur2.execute("""
++                UPDATE referrals 
++                SET offer_count = offer_count + 1,
++                    updated_at = NOW(),
++                    status = CASE 
++                        WHEN offer_count + 1 >= 100 THEN 'PENDING_PAYMENT'::referral_status
++                        ELSE status 
++                    END
++                WHERE referee_id = %s AND status = 'PENDING_WORK'
++            """, (uid,))
++            conn.commit()
++            cur2.close()
++        except Exception as ref_err:
++            logging.error(f"Referral count update failed (non-blocking): {ref_err}")
++        # --- End referral increment ---
++        
++        logging.info(f"📊 Offer harvested - validated: {is_validated}, flags: {validation_flags}")
++        
++        return jsonify({"status": "harvested", "validated": is_validated}), 200
++
++    except Exception as e:
++        logging.error(f"❌ Harvest failed: {e}")
++        traceback.print_exc()
++        conn.rollback()
++        # Still return 200 - don't block the app
++        return jsonify({"status": "failed", "error": str(e)}), 200
++    finally:
++        cur.close()
++        conn.close()
++        
++@require_firebase_auth
++@decisions_bp.route("/optimize", methods=["GET"])
++def get_optimization_recommendations():
++    """
++    Returns threshold optimization recommendations based on historical decision data.
++    
++    Query params:
++        market_id (optional): UUID of specific market to analyze
++        days (optional): Number of days to analyze (default: 7)
++        mode (optional): PUDDLE_JUMP, TOWARDS, or FREESTYLE (default: all)
++        time_period (optional): morning_commute, midday, evening_commute, evening, night_shift, weekend_party, sunday
++    
++    Returns JSON with optimization matrix showing acceptance rates and revenue
++    at different threshold combinations.
++    """
++    try:
++        uid = verify_and_get_user_id(request)
++    except:
++        return jsonify({"status": "auth_failed"}), 403
++    
++    try:
++        market_id = request.args.get('market_id', None)
++        days_back = request.args.get('days', 7, type=int)
++        mode_filter = request.args.get('mode', None)
++        time_period = request.args.get('time_period', None)
++        
++        # Validate mode if provided
++        if mode_filter and mode_filter not in ('PUDDLE_JUMP', 'TOWARDS', 'FREESTYLE'):
++            return jsonify({"error": "Invalid mode. Must be PUDDLE_JUMP, TOWARDS, or FREESTYLE"}), 400
++        
++        # Validate time_period if provided
++        valid_periods = ('morning_commute', 'midday', 'evening_commute', 'evening', 'night_shift', 'weekend_party', 'sunday')
++        if time_period and time_period not in valid_periods:
++            return jsonify({"error": f"Invalid time_period. Must be one of: {', '.join(valid_periods)}"}), 400
++        
++        conn = get_db()
++        cur = conn.cursor(cursor_factory=RealDictCursor)
++        
++        cur.execute("""
++            SELECT 
++                test_hourly as "testHourly",
++                test_mileage as "testMileage",
++                test_efficiency as "testEfficiency",
++                would_accept as "wouldAccept",
++                total_offers as "totalOffers",
++                accept_pct as "acceptPct",
++                total_revenue as "totalRevenue",
++                avg_hourly as "avgHourly",
++                avg_dpm as "avgDpm",
++                total_progress as "totalProgress",
++                avg_progress_per_ride as "avgProgressPerRide",
++                mode_analyzed as "modeAnalyzed",
++                market_analyzed as "marketAnalyzed",
++                time_period_analyzed as "timePeriodAnalyzed"
++            FROM app_private.optimize_market_settings(%s, %s, %s, %s, %s)
++        """, (uid, market_id, days_back, mode_filter, time_period))
++        
++        rows = cur.fetchall()
++        
++        # Convert Decimal types to float for JSON serialization
++        results = []
++        for row in rows:
++            clean_row = {}
++            for key, value in row.items():
++                if value is None:
++                    clean_row[key] = None
++                elif hasattr(value, 'is_finite'):  # Decimal type
++                    clean_row[key] = float(value)
++                else:
++                    clean_row[key] = value
++            results.append(clean_row)
++        
++        return jsonify({
++            "status": "success",
++            "driverId": uid,
++            "marketId": market_id,
++            "daysAnalyzed": days_back,
++            "modeFilter": mode_filter,
++            "timePeriod": time_period,
++            "recommendations": results
++        }), 200
++
++    except Exception as e:
++        traceback.print_exc()
++        return jsonify({"error": str(e)}), 500
++    finally:
++        if 'conn' in locals(): conn.close()
++
++@require_firebase_auth
++@decisions_bp.route("/optimize/pareto", methods=["GET"])
++def get_pareto_frontier():
++    """
++    Returns Pareto-optimal threshold combinations - the meaningful tradeoffs
++    between revenue and hourly rate.
++    
++    Query params:
++        market_id (required): UUID of market to analyze
++        days (optional): Number of days to analyze (default: 28)
++        mode (optional): PUDDLE_JUMP, TOWARDS, or FREESTYLE (default: all)
++        time_period (optional): morning_commute, midday, evening_commute, etc.
++        min_accept_pct (optional): Minimum acceptance % to consider (default: 20)
++        min_hourly_jump (optional): Minimum $/hr improvement between options (default: 1.0)
++        target_accept_pct (optional): User's target acceptance % for highlighting
++    
++    Returns JSON with Pareto frontier options and recommendations.
++    """
++    try:
++        uid = verify_and_get_user_id(request)
++    except:
++        return jsonify({"status": "auth_failed"}), 403
++    
++    try:
++        market_id = request.args.get('market_id', None)
++        if not market_id:
++            return jsonify({"error": "market_id is required"}), 400
++            
++        days_back = request.args.get('days', 28, type=int)
++        mode_filter = request.args.get('mode', None)
++        time_period = request.args.get('time_period', None)
++        min_accept_pct = request.args.get('min_accept_pct', 20.0, type=float)
++        min_hourly_jump = request.args.get('min_hourly_jump', 1.0, type=float)
++        target_accept_pct = request.args.get('target_accept_pct', None, type=float)
++        
++        # Validate mode if provided
++        if mode_filter and mode_filter not in ('PUDDLE_JUMP', 'TOWARDS', 'FREESTYLE'):
++            return jsonify({"error": "Invalid mode. Must be PUDDLE_JUMP, TOWARDS, or FREESTYLE"}), 400
++        
++        # Validate time_period if provided
++        valid_periods = ('morning_commute', 'midday', 'evening_commute', 'evening', 'night_shift', 'weekend_party', 'sunday')
++        if time_period and time_period not in valid_periods:
++            return jsonify({"error": f"Invalid time_period. Must be one of: {', '.join(valid_periods)}"}), 400
++        
++        conn = get_db()
++        cur = conn.cursor(cursor_factory=RealDictCursor)
++        
++        cur.execute("""
++            SELECT 
++                test_hourly,
++                test_mileage,
++                would_accept,
++                total_offers,
++                accept_pct,
++                avg_hourly,
++                avg_dpm,
++                total_revenue,
++                is_max_revenue,
++                is_max_hourly,
++                is_ai_pick
++            FROM app_private.get_pareto_frontier(%s, %s, %s, %s, %s, %s, %s)
++        """, (uid, market_id, days_back, mode_filter, time_period, min_accept_pct, min_hourly_jump))
++        
++        rows = cur.fetchall()
++        
++        # Convert to clean JSON and find key options
++        options = []
++        max_revenue_option = None
++        max_hourly_option = None
++        ai_pick_option = None
++        closest_to_target = None
++        closest_distance = float('inf')
++        
++        for row in rows:
++            option = {
++                "testHourly": float(row['test_hourly']) if row['test_hourly'] else None,
++                "testMileage": float(row['test_mileage']) if row['test_mileage'] else None,
++                "wouldAccept": int(row['would_accept']) if row['would_accept'] else 0,
++                "totalOffers": int(row['total_offers']) if row['total_offers'] else 0,
++                "acceptPct": float(row['accept_pct']) if row['accept_pct'] else 0,
++                "avgHourly": float(row['avg_hourly']) if row['avg_hourly'] else 0,
++                "avgDpm": float(row['avg_dpm']) if row['avg_dpm'] else 0,
++                "totalRevenue": float(row['total_revenue']) if row['total_revenue'] else 0,
++                "isMaxRevenue": row['is_max_revenue'],
++                "isMaxHourly": row['is_max_hourly'],
++                "isAiPick": row.get('is_ai_pick', False)
++            }
++            options.append(option)
++            
++            # Track key options
++            if row['is_max_revenue']:
++                max_revenue_option = option
++            if row['is_max_hourly']:
++                max_hourly_option = option
++            if row.get('is_ai_pick'):
++                ai_pick_option = option
++            
++            # Find closest to user's target acceptance %
++            if target_accept_pct and row['accept_pct']:
++                distance = abs(float(row['accept_pct']) - target_accept_pct)
++                if distance < closest_distance:
++                    closest_distance = distance
++                    closest_to_target = option
++        
++        # Build recommendation summary
++        recommendation = None
++        if max_revenue_option and closest_to_target and max_revenue_option != closest_to_target:
++            revenue_diff = max_revenue_option['totalRevenue'] - closest_to_target['totalRevenue']
++            hourly_diff = closest_to_target['avgHourly'] - max_revenue_option['avgHourly']
++            
++            if revenue_diff > 0:
++                recommendation = {
++                    "message": f"Over the last {days_back} days, you'd have earned ~${revenue_diff:.0f} more total by relaxing to {max_revenue_option['acceptPct']:.0f}% acceptance",
++                    "revenueDiff": round(revenue_diff, 2),
++                    "hourlyDiff": round(hourly_diff, 2),
++                    "suggestedOption": max_revenue_option
++                }
++        
++        return jsonify({
++            "status": "success",
++            "driverId": uid,
++            "marketId": market_id,
++            "daysAnalyzed": days_back,
++            "modeFilter": mode_filter,
++            "timePeriod": time_period,
++            "targetAcceptPct": target_accept_pct,
++            "options": options,
++            "maxRevenueOption": max_revenue_option,
++            "maxHourlyOption": max_hourly_option,
++            "aiPickOption": ai_pick_option,
++            "closestToTarget": closest_to_target,
++            "recommendation": recommendation
++        }), 200
++
++    except Exception as e:
++        traceback.print_exc()
++        return jsonify({"error": str(e)}), 500
++    finally:
++        if 'conn' in locals(): conn.close()
+\ No newline at end of file

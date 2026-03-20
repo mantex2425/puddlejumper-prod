@@ -2,8 +2,8 @@
 -- PUDDLEJUMPER SHIFT AUDIT
 -- ============================================================
 -- EDIT ONLY THESE TWO LINES (local CST times):
-\set shift_start '2026-01-31 16:00'
-\set shift_end '2026-02-01 03:30'
+\set shift_start '2026-02-05 15:00'
+\set shift_end '2026-02-05 21:00'
 -- ============================================================
 
 -- Create temp table with UTC times
