@@ -764,7 +764,12 @@ BEGIN
                 v_switch_to_mode := 'puddle_jump';
                 v_switch_to_market_id := v_other_market_id;
             ELSIF v_return_miles = 0 THEN
-                IF is_puddle_jump_mode THEN v_reason := 'Stays in market';
+                IF is_puddle_jump_mode THEN
+                    IF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
+                        v_reason := 'Stays in market';
+                    ELSE
+                        v_reason := 'Rates met';
+                    END IF;
                 ELSE v_reason := 'Rates met'; END IF;
             ELSE v_reason := 'Rates met'; END IF;
         ELSE
