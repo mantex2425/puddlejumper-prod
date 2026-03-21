@@ -1,54 +1,252 @@
-                                                                                                                             st_asgeojson                                                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"type":"LineString","coordinates":[[-95.3402866,29.9873797],[-95.3413623,29.9874084],[-95.3417559,29.9873853],[-95.341932,29.9873761],[-95.3421578,29.9873484]]}
- {"type":"LineString","coordinates":[[-95.3415102,29.9870267],[-95.3415876,29.9871186],[-95.3416926,29.9872019],[-95.3418166,29.9872643],[-95.3419594,29.987312],[-95.3421578,29.9873484]]}
- {"type":"LineString","coordinates":[[-95.3421578,29.9873484],[-95.3422463,29.9873456],[-95.3424231,29.9873398],[-95.3425491,29.9873358]]}
- {"type":"LineString","coordinates":[[-95.3393285,29.987384],[-95.3402866,29.9873797]]}
- {"type":"LineString","coordinates":[[-95.3425491,29.9873358],[-95.3430085,29.9873289]]}
- {"type":"LineString","coordinates":[[-95.3414685,29.986464],[-95.3414627,29.9864993],[-95.3414501,29.9867293],[-95.3414638,29.9868774],[-95.3414958,29.9869883],[-95.3415102,29.9870267]]}
- {"type":"LineString","coordinates":[[-95.3430085,29.9873289],[-95.3430026,29.9871719]]}
- {"type":"LineString","coordinates":[[-95.3430085,29.9873289],[-95.3433213,29.9873197]]}
- {"type":"LineString","coordinates":[[-95.3430026,29.9871719],[-95.3430045,29.9869687]]}
- {"type":"LineString","coordinates":[[-95.3433213,29.9873197],[-95.3439271,29.9873196],[-95.3448051,29.9873033]]}
- {"type":"LineString","coordinates":[[-95.338438,29.9873888],[-95.3393285,29.987384]]}
- {"type":"LineString","coordinates":[[-95.3430045,29.9869687],[-95.3430033,29.9869258],[-95.3429892,29.9864154],[-95.3429806,29.9862835]]}
- {"type":"LineString","coordinates":[[-95.3415342,29.9860672],[-95.3414968,29.9862933],[-95.3414685,29.986464]]}
- {"type":"LineString","coordinates":[[-95.3374728,29.9873926],[-95.3383852,29.9873884],[-95.338438,29.9873888]]}
- {"type":"LineString","coordinates":[[-95.3415528,29.9859586],[-95.3415342,29.9860672]]}
- {"type":"LineString","coordinates":[[-95.3421351,29.9860168],[-95.340088,29.985998],[-95.3395791,29.9859908]]}
- {"type":"LineString","coordinates":[[-95.3429806,29.9862835],[-95.3429749,29.9862315]]}
- {"type":"LineString","coordinates":[[-95.3415984,29.9856397],[-95.3415528,29.9859586]]}
- {"type":"LineString","coordinates":[[-95.3423209,29.9860183],[-95.3421351,29.9860168]]}
- {"type":"LineString","coordinates":[[-95.3429749,29.9862315],[-95.3429381,29.9860538]]}
- {"type":"LineString","coordinates":[[-95.3426895,29.9860378],[-95.3426223,29.9860323],[-95.3425435,29.9860267],[-95.3424096,29.9860191],[-95.3423209,29.9860183]]}
- {"type":"LineString","coordinates":[[-95.3429381,29.9860538],[-95.3427762,29.9860266],[-95.3426895,29.9860378]]}
- {"type":"LineString","coordinates":[[-95.3431829,29.9860923],[-95.3429381,29.9860538]]}
- {"type":"LineString","coordinates":[[-95.3429381,29.9860538],[-95.3429377,29.9857881],[-95.3429333,29.9857528],[-95.3429225,29.9857191],[-95.3429011,29.9856796],[-95.3428716,29.9856413],[-95.3428564,29.9856197],[-95.342845,29.9855917],[-95.3428404,29.9855454]]}
- {"type":"LineString","coordinates":[[-95.3448051,29.9873033],[-95.3448894,29.9873035]]}
- {"type":"LineString","coordinates":[[-95.3438012,29.9861074],[-95.3435757,29.9861071],[-95.3434362,29.9861047],[-95.3431829,29.9860923]]}
- {"type":"LineString","coordinates":[[-95.3448894,29.9873035],[-95.3451163,29.9873029],[-95.3452085,29.9873027]]}
- {"type":"LineString","coordinates":[[-95.3416058,29.9852308],[-95.3416069,29.9853869],[-95.3415984,29.9856397]]}
- {"type":"LineString","coordinates":[[-95.3395791,29.9859908],[-95.3391922,29.9859894],[-95.3381677,29.9859924]]}
- {"type":"LineString","coordinates":[[-95.3448751,29.9860911],[-95.344461,29.9861022],[-95.3438012,29.9861074]]}
- {"type":"LineString","coordinates":[[-95.3452085,29.9873027],[-95.345867,29.9872998],[-95.3461915,29.987305],[-95.3462712,29.9873067]]}
- {"type":"LineString","coordinates":[[-95.3365166,29.9873614],[-95.3369351,29.9873818],[-95.3374183,29.9873928],[-95.3374728,29.9873926]]}
- {"type":"LineString","coordinates":[[-95.3428404,29.9855454],[-95.3428283,29.9853673],[-95.3428237,29.9852903]]}
- {"type":"LineString","coordinates":[[-95.34159,29.9831149],[-95.3416058,29.9852308]]}
- {"type":"LineString","coordinates":[[-95.3428237,29.9852903],[-95.3428241,29.9852308]]}
- {"type":"LineString","coordinates":[[-95.3428241,29.9852308],[-95.3428373,29.9833491],[-95.3428356,29.9831825]]}
- {"type":"LineString","coordinates":[[-95.3381677,29.9859924],[-95.3377914,29.9859928],[-95.3370256,29.9859937]]}
- {"type":"LineString","coordinates":[[-95.3461967,29.9860822],[-95.3456345,29.9860752],[-95.3454621,29.986073],[-95.3449258,29.9860897],[-95.3448751,29.9860911]]}
- {"type":"LineString","coordinates":[[-95.3356139,29.9874519],[-95.3357596,29.9874524],[-95.3359603,29.9874439],[-95.3365166,29.9873614]]}
- {"type":"LineString","coordinates":[[-95.3462712,29.9873067],[-95.3463496,29.9873059]]}
- {"type":"LineString","coordinates":[[-95.3463496,29.9873059],[-95.3469987,29.9873058],[-95.3474919,29.9873061]]}
- {"type":"LineString","coordinates":[[-95.3370256,29.9859937],[-95.336782,29.985994],[-95.3363004,29.9859877]]}
- {"type":"LineString","coordinates":[[-95.3462795,29.9860833],[-95.3461967,29.9860822]]}
- {"type":"LineString","coordinates":[[-95.3469275,29.9860925],[-95.346615,29.9860875],[-95.3463095,29.9860837],[-95.3462795,29.9860833]]}
- {"type":"LineString","coordinates":[[-95.3354494,29.9874049],[-95.3356139,29.9874519]]}
- {"type":"LineString","coordinates":[[-95.3352211,29.9873459],[-95.3354494,29.9874049]]}
- {"type":"LineString","coordinates":[[-95.3363004,29.9859877],[-95.3354977,29.9859755]]}
- {"type":"LineString","coordinates":[[-95.3474919,29.9873061],[-95.3475192,29.9873058]]}
- {"type":"LineString","coordinates":[[-95.3475192,29.9873058],[-95.3476779,29.9873045]]}
- {"type":"LineString","coordinates":[[-95.3351007,29.9873453],[-95.3351457,29.9873457],[-95.3352211,29.9873459]]}
-(50 rows)
+                                                                                    pg_get_functiondef                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION app_private.get_freestyle_thresholds(driver_lat_in numeric, driver_lng_in numeric, strategy_in text DEFAULT 'ai'::text)                                      +
+  RETURNS TABLE(threshold_hourly numeric, threshold_mileage numeric, source text, sample_count integer)                                                                                  +
+  LANGUAGE plpgsql                                                                                                                                                                       +
+  STABLE                                                                                                                                                                                 +
+ AS $function$                                                                                                                                                                           +
+ DECLARE                                                                                                                                                                                 +
+     v_hex       text;                                                                                                                                                                   +
+     v_dow       integer;                                                                                                                                                                +
+     v_hour      integer;                                                                                                                                                                +
+     v_result    record;                                                                                                                                                                 +
+     v_min_samples integer := 10;                                                                                                                                                        +
+ BEGIN                                                                                                                                                                                   +
+     v_hex := h3_latlng_to_cell(POINT(driver_lng_in::float8, driver_lat_in::float8), 8)::text;                                                                                           +
+     v_dow  := EXTRACT(DOW FROM now() AT TIME ZONE 'America/Chicago')::integer;                                                                                                          +
+     v_hour := EXTRACT(HOUR FROM now() AT TIME ZONE 'America/Chicago')::integer;                                                                                                         +
+                                                                                                                                                                                         +
+     -- Step 1: Exact hex + day + hour with enough samples                                                                                                                               +
+     SELECT                                                                                                                                                                              +
+         CASE strategy_in                                                                                                                                                                +
+             WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                        +
+             WHEN 'picky'   THEN c.picky_hourly                                                                                                                                          +
+             ELSE c.ai_hourly                                                                                                                                                            +
+         END as hourly,                                                                                                                                                                  +
+         CASE strategy_in                                                                                                                                                                +
+             WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                       +
+             WHEN 'picky'   THEN c.picky_mileage                                                                                                                                         +
+             ELSE c.ai_mileage                                                                                                                                                           +
+         END as mileage,                                                                                                                                                                 +
+         c.data_source,                                                                                                                                                                  +
+         c.sample_count                                                                                                                                                                  +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index = v_hex                                                                                                                                                            +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day = v_hour                                                                                                                                                        +
+       AND c.sample_count >= v_min_samples;                                                                                                                                              +
+                                                                                                                                                                                         +
+     IF FOUND THEN                                                                                                                                                                       +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly,                                                                                                                                                            +
+             v_result.mileage,                                                                                                                                                           +
+             ('hex_cache:' || v_result.data_source)::text,                                                                                                                               +
+             v_result.sample_count;                                                                                                                                                      +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 2: K-ring weighted average for same day + hour                                                                                                                              +
+     -- (catches thin exact-hex data and blends with neighbors)                                                                                                                          +
+     SELECT                                                                                                                                                                              +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                    +
+                 WHEN 'picky'   THEN c.picky_hourly                                                                                                                                      +
+                 ELSE c.ai_hourly                                                                                                                                                        +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as hourly,                                                                                                                                  +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                   +
+                 WHEN 'picky'   THEN c.picky_mileage                                                                                                                                     +
+                 ELSE c.ai_mileage                                                                                                                                                       +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as mileage,                                                                                                                                 +
+         SUM(c.sample_count) as total_samples                                                                                                                                            +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index IN (                                                                                                                                                               +
+         SELECT h3_grid_disk(v_hex::h3index, 1)::text                                                                                                                                    +
+     )                                                                                                                                                                                   +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day = v_hour;                                                                                                                                                       +
+                                                                                                                                                                                         +
+     IF v_result.total_samples >= v_min_samples THEN                                                                                                                                     +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly::numeric,                                                                                                                                                   +
+             v_result.mileage::numeric,                                                                                                                                                  +
+             ('hex_cache:kring_blend:' || v_dow || 'h' || v_hour)::text,                                                                                                                 +
+             v_result.total_samples::integer;                                                                                                                                            +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 3: K-ring weighted average for adjacent hours (±1)                                                                                                                          +
+     SELECT                                                                                                                                                                              +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                    +
+                 WHEN 'picky'   THEN c.picky_hourly                                                                                                                                      +
+                 ELSE c.ai_hourly                                                                                                                                                        +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as hourly,                                                                                                                                  +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                   +
+                 WHEN 'picky'   THEN c.picky_mileage                                                                                                                                     +
+                 ELSE c.ai_mileage                                                                                                                                                       +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as mileage,                                                                                                                                 +
+         SUM(c.sample_count) as total_samples                                                                                                                                            +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index IN (                                                                                                                                                               +
+         SELECT h3_grid_disk(v_hex::h3index, 1)::text                                                                                                                                    +
+     )                                                                                                                                                                                   +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day IN (v_hour, (v_hour + 1) % 24, (v_hour + 23) % 24);                                                                                                             +
+                                                                                                                                                                                         +
+     IF v_result.total_samples >= v_min_samples THEN                                                                                                                                     +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly::numeric,                                                                                                                                                   +
+             v_result.mileage::numeric,                                                                                                                                                  +
+             ('hex_cache:kring_blend_adj:' || v_dow || 'h' || v_hour)::text,                                                                                                             +
+             v_result.total_samples::integer;                                                                                                                                            +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 4: Global default                                                                                                                                                           +
+     RETURN QUERY SELECT                                                                                                                                                                 +
+         15.0::numeric,                                                                                                                                                                  +
+         0.70::numeric,                                                                                                                                                                  +
+         'global_default'::text,                                                                                                                                                         +
+         0::integer;                                                                                                                                                                     +
+ END;                                                                                                                                                                                    +
+ $function$                                                                                                                                                                              +
+ 
+ CREATE OR REPLACE FUNCTION app_private.get_freestyle_thresholds(driver_lat_in numeric, driver_lng_in numeric, strategy_in text DEFAULT 'ai'::text, driver_id_in text DEFAULT NULL::text)+
+  RETURNS TABLE(threshold_hourly numeric, threshold_mileage numeric, source text, sample_count integer)                                                                                  +
+  LANGUAGE plpgsql                                                                                                                                                                       +
+  STABLE                                                                                                                                                                                 +
+ AS $function$                                                                                                                                                                           +
+ DECLARE                                                                                                                                                                                 +
+     v_hex       text;                                                                                                                                                                   +
+     v_dow       integer;                                                                                                                                                                +
+     v_hour      integer;                                                                                                                                                                +
+     v_result    record;                                                                                                                                                                 +
+     v_min_samples integer := 10;                                                                                                                                                        +
+ BEGIN                                                                                                                                                                                   +
+     v_hex := h3_latlng_to_cell(POINT(driver_lng_in::float8, driver_lat_in::float8), 8)::text;                                                                                           +
+     v_dow  := app_private.driver_dow(driver_id_in, NOW());                                                                                                                              +
+     v_hour := app_private.driver_hour(driver_id_in, NOW());                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 1: Exact hex + day + hour with enough samples                                                                                                                               +
+     SELECT                                                                                                                                                                              +
+         CASE strategy_in                                                                                                                                                                +
+             WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                        +
+             WHEN 'picky'   THEN c.picky_hourly                                                                                                                                          +
+             ELSE c.ai_hourly                                                                                                                                                            +
+         END as hourly,                                                                                                                                                                  +
+         CASE strategy_in                                                                                                                                                                +
+             WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                       +
+             WHEN 'picky'   THEN c.picky_mileage                                                                                                                                         +
+             ELSE c.ai_mileage                                                                                                                                                           +
+         END as mileage,                                                                                                                                                                 +
+         c.data_source,                                                                                                                                                                  +
+         c.sample_count                                                                                                                                                                  +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index = v_hex                                                                                                                                                            +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day = v_hour                                                                                                                                                        +
+       AND c.sample_count >= v_min_samples;                                                                                                                                              +
+                                                                                                                                                                                         +
+     IF FOUND THEN                                                                                                                                                                       +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly,                                                                                                                                                            +
+             v_result.mileage,                                                                                                                                                           +
+             ('hex_cache:' || v_result.data_source)::text,                                                                                                                               +
+             v_result.sample_count;                                                                                                                                                      +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 2: K-ring weighted average for same day + hour                                                                                                                              +
+     -- (catches thin exact-hex data and blends with neighbors)                                                                                                                          +
+     SELECT                                                                                                                                                                              +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                    +
+                 WHEN 'picky'   THEN c.picky_hourly                                                                                                                                      +
+                 ELSE c.ai_hourly                                                                                                                                                        +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as hourly,                                                                                                                                  +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                   +
+                 WHEN 'picky'   THEN c.picky_mileage                                                                                                                                     +
+                 ELSE c.ai_mileage                                                                                                                                                       +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as mileage,                                                                                                                                 +
+         SUM(c.sample_count) as total_samples                                                                                                                                            +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index IN (                                                                                                                                                               +
+         SELECT h3_grid_disk(v_hex::h3index, 1)::text                                                                                                                                    +
+     )                                                                                                                                                                                   +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day = v_hour;                                                                                                                                                       +
+                                                                                                                                                                                         +
+     IF v_result.total_samples >= v_min_samples THEN                                                                                                                                     +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly::numeric,                                                                                                                                                   +
+             v_result.mileage::numeric,                                                                                                                                                  +
+             ('hex_cache:kring_blend:' || v_dow || 'h' || v_hour)::text,                                                                                                                 +
+             v_result.total_samples::integer;                                                                                                                                            +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 3: K-ring weighted average for adjacent hours (±1)                                                                                                                          +
+     SELECT                                                                                                                                                                              +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_hourly                                                                                                                                    +
+                 WHEN 'picky'   THEN c.picky_hourly                                                                                                                                      +
+                 ELSE c.ai_hourly                                                                                                                                                        +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as hourly,                                                                                                                                  +
+         (SUM(                                                                                                                                                                           +
+             CASE strategy_in                                                                                                                                                            +
+                 WHEN 'revenue' THEN c.revenue_mileage                                                                                                                                   +
+                 WHEN 'picky'   THEN c.picky_mileage                                                                                                                                     +
+                 ELSE c.ai_mileage                                                                                                                                                       +
+             END * c.sample_count                                                                                                                                                        +
+         ) / NULLIF(SUM(c.sample_count), 0)) as mileage,                                                                                                                                 +
+         SUM(c.sample_count) as total_samples                                                                                                                                            +
+     INTO v_result                                                                                                                                                                       +
+     FROM app_private.hex_pricing_cache c                                                                                                                                                +
+     WHERE c.h3_index IN (                                                                                                                                                               +
+         SELECT h3_grid_disk(v_hex::h3index, 1)::text                                                                                                                                    +
+     )                                                                                                                                                                                   +
+       AND c.day_of_week = v_dow                                                                                                                                                         +
+       AND c.hour_of_day IN (v_hour, (v_hour + 1) % 24, (v_hour + 23) % 24);                                                                                                             +
+                                                                                                                                                                                         +
+     IF v_result.total_samples >= v_min_samples THEN                                                                                                                                     +
+         RETURN QUERY SELECT                                                                                                                                                             +
+             v_result.hourly::numeric,                                                                                                                                                   +
+             v_result.mileage::numeric,                                                                                                                                                  +
+             ('hex_cache:kring_blend_adj:' || v_dow || 'h' || v_hour)::text,                                                                                                             +
+             v_result.total_samples::integer;                                                                                                                                            +
+         RETURN;                                                                                                                                                                         +
+     END IF;                                                                                                                                                                             +
+                                                                                                                                                                                         +
+     -- Step 4: Global default                                                                                                                                                           +
+     RETURN QUERY SELECT                                                                                                                                                                 +
+         15.0::numeric,                                                                                                                                                                  +
+         0.70::numeric,                                                                                                                                                                  +
+         'global_default'::text,                                                                                                                                                         +
+         0::integer;                                                                                                                                                                     +
+ END;                                                                                                                                                                                    +
+ $function$                                                                                                                                                                              +
+ 
+(2 rows)
 
