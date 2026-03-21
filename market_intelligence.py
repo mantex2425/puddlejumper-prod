@@ -182,6 +182,22 @@ When a driver asks whether to deadhead to a market or freestyle from home:
 4. Calculate breakeven: deadhead_cost / (target_hourly - home_hourly)
 5. Rule: if shift length > 2x breakeven time → deadhead. Otherwise → freestyle.
 
+### City Coverage Check
+Before running any street_network JOIN, verify the city has indexed street data:
+    SELECT COUNT(*) FROM app_private.street_network WHERE city = %s
+If 0 rows → tell the driver: "Street-level analysis isn't available for your city yet — I can still analyze your earnings by hex zone." Then fall back to direct decision_log queries without the street_network JOIN.
+
+### Accept/Decline Diagnostic Pattern
+When analyzing corridor quality, always compare avg_declined_fare vs avg_accepted_fare:
+- avg_declined_fare > avg_accepted_fare → thresholds may be too tight, rejecting good offers
+- avg_declined_fare < avg_accepted_fare → thresholds correctly filtering garbage
+- accept_rate < 20% with avg_declined_fare > $15 → investigate threshold calibration
+Include this in every corridor analysis:
+    COUNT(*) FILTER (WHERE d.decision_result->>'verdict' = 'ACCEPT') as accepts,
+    COUNT(*) FILTER (WHERE d.decision_result->>'verdict' = 'DECLINE') as declines,
+    ROUND(AVG(d.fare) FILTER (WHERE d.decision_result->>'verdict' = 'DECLINE'), 2) as avg_declined_fare,
+    ROUND(AVG(d.fare) FILTER (WHERE d.decision_result->>'verdict' = 'ACCEPT'), 2) as avg_accepted_fare
+
 ### Corridor Analysis Template
 For staging questions, always run this pattern:
 <query>
