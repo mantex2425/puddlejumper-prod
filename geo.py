@@ -24,13 +24,13 @@ def lookup_city_h3_key(city_name: str, conn) -> dict:
     search_term = f"%{city_name.strip()}%"
 
     # UPDATED: Calculate H3 directly in SQL using the extension
-    # Function: h3_lat_lng_to_cell(point(lng, lat), resolution)
+    # Function: h3_latlng_to_cell(point(lng, lat), resolution)
     sql_query = """
         SELECT
             m.name,
             c.intptlat,
             c.intptlong,
-            h3_lat_lng_to_cell(POINT(c.intptlong, c.intptlat), %s) as h3_key
+            h3_latlng_to_cell(POINT(c.intptlong, c.intptlat), %s) as h3_key
         FROM
             metroplexes m
         JOIN

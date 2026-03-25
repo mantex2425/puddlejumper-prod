@@ -71,8 +71,8 @@ def get_zones_geometry():
 
         # Compute L7 market hex
         cur.execute("""
-            SELECT h3_lat_lng_to_cell(%s, %s, 7) AS hex_l7;
-        """, (focal_lat, focal_lng))
+            SELECT h3_latlng_to_cell(POINT(%s, %s), 7) AS hex_l7;
+        """, (focal_lng, focal_lat))
         row = cur.fetchone()
         market_hex_l7 = row[0]
 

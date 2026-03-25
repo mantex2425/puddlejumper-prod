@@ -137,3 +137,33 @@ def delete_account_info():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@account_bp.route('/request-deletion', methods=['POST'])
+def request_deletion():
+    """
+    Public endpoint — no auth required.
+    For users who cannot log in but want to request account deletion.
+    Inserts email into app_private.deletion_requests for manual processing.
+    """
+    from db import get_db
+
+    data = request.get_json() or {}
+    email = data.get('email', '').strip().lower()
+
+    if not email or '@' not in email:
+        return jsonify({'success': False, 'error': 'Valid email required'}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_private.deletion_requests (email) VALUES (%s)",
+                (email,)
+            )
+        conn.commit()
+        return jsonify({'success': True, 'message': 'Deletion request received'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        conn.close()

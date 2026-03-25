@@ -11,7 +11,7 @@ from flask_cors import CORS
 # We keep the global scope extremely light to ensure instant 
 # container startup and fast health checks.
 app = Flask(__name__)
-CORS(app, origins=["https://app.puddlejumper.io", "http://localhost:5173", "http://localhost:3000"])
+CORS(app, origins=["https://app.puddlejumper.io", "https://puddlejumper.io", "http://localhost:5173", "http://localhost:3000"])
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +34,7 @@ from active_market import active_market_bp
 from auth import auth_bp
 from superpower_geo import superpower_geo_bp
 from decisions import decisions_bp
+from pickup_confirm import pickup_confirm_bp
 from chat_ai import chat_ai_bp
 from puddles_brain import puddles_bp
 from account import account_bp
@@ -51,6 +52,7 @@ app.register_blueprint(active_market_bp, url_prefix="")
 app.register_blueprint(auth_bp)
 app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
+app.register_blueprint(pickup_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(puddles_bp, url_prefix="/api/v1")
 app.register_blueprint(account_bp, url_prefix='/api/v1/account')
@@ -72,6 +74,7 @@ def require_auth_globally():
     public_paths = {
         "/",
         "/api/v1/health",
+        "/api/v1/account/request-deletion",
         "/.well-known/apple-app-site-association",
     }
     

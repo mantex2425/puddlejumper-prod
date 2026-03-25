@@ -112,7 +112,7 @@ def _get_region_h3(lat: float, lng: float, cur) -> str:
         # Fallback if h3_latlng_to_cell not available, try deprecated version
         try:
             cur.execute(
-                "SELECT h3_lat_lng_to_cell(point(%s, %s), 4)::text",
+                "SELECT h3_latlng_to_cell(point(%s, %s), 4)::text",
                 (lng, lat)
             )
             row = cur.fetchone()
@@ -420,7 +420,7 @@ def check_band_red_zones(band_points: List[Tuple], red_zone_set: set, cur) -> Di
         except Exception:
             try:
                 cur.execute(
-                    "SELECT h3_lat_lng_to_cell(point(%s, %s), 8)::text",
+                    "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
                     (plng, plat)
                 )
                 row = cur.fetchone()
@@ -489,7 +489,9 @@ def correct_dropoff(
     trip_miles: float,
     dropoff_address: Optional[str],
     red_zone_set: set,
-    cur, conn
+    cur, conn,
+    green_zone_set: set = None,
+    is_puddle_jump: bool = False
 ) -> Dict:
     """
     Main arc band correction entry point. Called from decisions.py.
@@ -554,7 +556,7 @@ def correct_dropoff(
         except Exception:
             try:
                 cur.execute(
-                    "SELECT h3_lat_lng_to_cell(point(%s, %s), 8)::text",
+                    "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
                     (dropoff_lng, dropoff_lat)
                 )
                 row = cur.fetchone()
@@ -563,6 +565,30 @@ def correct_dropoff(
                 pass
 
         result["trace"]["dropoff_hex"] = dropoff_hex
+
+        # Trigger: Outside green zone in PUDDLE_JUMP mode
+        if is_puddle_jump and green_zone_set and dropoff_hex and dropoff_hex not in green_zone_set:
+            result["arc_band_triggered"] = True
+            result["trace"]["trigger"] = "outside_green_zone"
+            return result
+
+        # Trigger: Long street detection
+        if dropoff_hex:
+            try:
+                cur.execute("""
+                    SELECT COUNT(DISTINCT s.id) > 3
+                    FROM app_private.street_network s
+                    WHERE s.h3_indices_res8 @> ARRAY[%s]
+                    AND s.highway_type IN ('motorway','trunk','primary')
+                """, (dropoff_hex,))
+                row = cur.fetchone()
+                is_long_street = row[0] if row else False
+            except Exception:
+                is_long_street = False
+            if is_long_street:
+                result["arc_band_triggered"] = True
+                result["trace"]["trigger"] = "long_street"
+                return result
 
         # Already in red zone? Flag it directly
         if dropoff_hex and dropoff_hex in red_zone_set:

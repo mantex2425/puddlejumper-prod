@@ -222,12 +222,26 @@ def make_decision():
             """, (uid,))
             red_zone_set = {row['hex'] for row in cur.fetchall()}
 
+            # Load driver's green zones for active market
+            green_zone_set = set()
+            if market_id:
+                cur.execute("""
+                    SELECT jsonb_array_elements_text(elem->'greenZones')
+                    FROM app_private.driver_settings_new,
+                    jsonb_array_elements(settings->'markets') elem
+                    WHERE driver_id = %s
+                    AND elem->>'id' = %s
+                """, (uid, market_id))
+                green_zone_set = {row['jsonb_array_elements_text'] for row in cur.fetchall()}
+
             correction = correct_dropoff(
                 pickup_lat=p_lat, pickup_lng=p_lng,
                 dropoff_lat=d_lat, dropoff_lng=d_lng,
                 trip_miles=trip_miles,
                 dropoff_address=dropoff_address,
                 red_zone_set=red_zone_set,
+                green_zone_set=green_zone_set,
+                is_puddle_jump=is_puddle_jump,
                 cur=cur, conn=conn
             )
 
@@ -260,7 +274,7 @@ def make_decision():
         # the geocoder returned garbage (e.g. "Main Terminal, Texas" -> west Texas).
         # Null out the bad coords so the engine uses OCR pickup_miles instead.
         geocode_guard_triggered = False
-        if current_lat and current_lng and p_lat and p_lng:
+        if current_lat and current_lng:
             from math import radians, cos, sin, asin, sqrt
             def _haversine_mi(lat1, lng1, lat2, lng2):
                 lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
@@ -269,6 +283,7 @@ def make_decision():
                 a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
                 return 3956 * 2 * asin(sqrt(a))
             geocode_dist = _haversine_mi(current_lat, current_lng, p_lat, p_lng)
+            arc_band_trace["geocode_distance_mi"] = round(geocode_dist, 2)
             if geocode_dist > 30:
                 logging.warning(f"🚨 GEOCODE HALLUCINATION: pickup ({p_lat},{p_lng}) is {geocode_dist:.0f}mi from driver ({current_lat},{current_lng}). Nulling coords, using OCR pickup_miles={pickup_miles}")
                 arc_band_trace["geocode_hallucination"] = True
@@ -338,7 +353,7 @@ def make_decision():
                     ping_h3_index,
                     towards_market_id, towards_target_lat, towards_target_lng,
                     created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s, NOW())           """, (
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s, NOW()) RETURNING id           """, (
                 uid, market_id, fare, pickup_min, trip_min, 
                 p_lat, p_lng, d_lat, d_lng, json.dumps(result),
                 mode_name, market_name,
@@ -352,8 +367,72 @@ def make_decision():
                 towards_market_id, towards_target_lat, towards_target_lng
             ))
             
+            result_row = cur.fetchone()
+            decision_log_id = result_row['id'] if result_row else None
             conn.commit()
             logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
+
+            # ================================================================
+            # SHADOW TABLE: pickup_market_signals
+            # ================================================================
+            try:
+                if current_lat and current_lng:
+                    reported = pickup_miles or 0
+
+                    if p_lat and p_lng:
+                        cur.execute(
+                            "SELECT (ST_Distance(ST_MakePoint(%s, %s)::geography, ST_MakePoint(%s, %s)::geography) / 1609.34) AS dist",
+                            (current_lng, current_lat, p_lng, p_lat)
+                        )
+                        geo_row = cur.fetchone()
+                        geocoded_miles = float(geo_row['dist']) if geo_row else None
+
+                        if geocoded_miles is not None and reported > 0:
+                            raw_delta = abs(geocoded_miles - reported) / reported
+                            if reported < 3:
+                                is_validated = abs(geocoded_miles - reported) < 1.5
+                            else:
+                                is_validated = raw_delta < 0.60
+                            delta_pct = raw_delta
+                        else:
+                            delta_pct = 1.0
+                            is_validated = False
+
+                        cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (p_lat, p_lng))
+                        r = cur.fetchone()
+                        pickup_h3 = r['h3'] if r else None
+                    else:
+                        geocoded_miles = None
+                        delta_pct = 1.0
+                        is_validated = False
+                        pickup_h3 = None
+
+                    cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (current_lat, current_lng))
+                    r = cur.fetchone()
+                    driver_h3 = r['h3'] if r else None
+
+                    if driver_h3:
+                        data_source = 'geocode' if pickup_h3 else 'unresolved'
+                        cur.execute(
+                            "INSERT INTO app_private.pickup_market_signals "
+                            "(offer_id, driver_h3, pickup_h3, reported_miles, geocoded_miles, "
+                            "distance_delta_pct, is_validated, hourly_rate_offered, "
+                            "dollars_per_mile, day_of_week, hour_of_day, is_accepted, data_source) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                            "EXTRACT(DOW FROM NOW() AT TIME ZONE 'America/Chicago')::integer, "
+                            "EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::integer, %s, %s)",
+                            (decision_log_id, driver_h3, pickup_h3, reported, geocoded_miles, delta_pct,
+                             is_validated, result.get('hourlyRate'), result.get('dollarsPerMile'),
+                             result['verdict'] == 'ACCEPT', data_source)
+                        )
+                        conn.commit()
+                        logging.info(f"✅ Shadow signal logged — validated: {is_validated}, accepted: {result['verdict'] == 'ACCEPT'}")
+            except Exception as shadow_e:
+                logging.warning(f"⚠️ Shadow table insert failed (non-fatal): {shadow_e}")
+                try:
+                    conn.rollback()
+                except:
+                    pass
 
             # Background cache: pre-warm street geometry for future hallucination recovery
             if d_lat and d_lng:
@@ -531,20 +610,20 @@ def harvest_offer():
         (uid,)
     )
     tz_row = cur_tz.fetchone()
-    driver_tz = ZoneInfo(tz_row.get('timezone') if tz_row and tz_row.get('timezone') else 'America/Chicago')
+    driver_tz_str = tz_row.get('timezone') if tz_row and tz_row.get('timezone') else 'America/Chicago'
+    driver_tz = ZoneInfo(driver_tz_str)
     cur_tz.close()
     now = datetime.now(driver_tz)
     day_of_year = now.timetuple().tm_yday
-    day_of_week = (now.weekday() + 1) % 7  # Convert Python DOW to Postgres DOW
-    hour_of_day = now.hour
 
     conn = get_db()
     cur = conn.cursor()
 
     try:
+        cur.execute("SET LOCAL app.driver_tz = %s", (driver_tz_str,))
         cur.execute("""
             INSERT INTO app_private.offer_history (
-                created_at, day_of_year, day_of_week, hour_of_day,
+                created_at, day_of_year,
                 driver_lat, driver_lng, driver_h3,
                 pickup_lat, pickup_lng, pickup_h3, pickup_address, pickup_miles, pickup_minutes,
                 dropoff_lat, dropoff_lng, dropoff_h3, dropoff_address, trip_miles, trip_minutes,
@@ -553,7 +632,7 @@ def harvest_offer():
                 confidence_score, is_validated, validation_flags,
                 app_verdict, app_reason, mode_at_decision, market_name
             ) VALUES (
-                NOW(), %s, %s, %s,
+                NOW(), %s,
                 %s, %s, app_private.safe_h3(%s, %s),
                 %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
                 %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
@@ -563,7 +642,7 @@ def harvest_offer():
                 %s, %s, %s, %s
             )
         """, (
-            day_of_year, day_of_week, hour_of_day,
+            day_of_year,
             driver_lat, driver_lng, driver_lat, driver_lng,
             pickup_lat, pickup_lng, pickup_lat, pickup_lng, pickup_address, pickup_miles, pickup_minutes,
             dropoff_lat, dropoff_lng, dropoff_lat, dropoff_lng, dropoff_address, trip_miles, trip_minutes,
@@ -834,6 +913,64 @@ def get_pareto_frontier():
 
     except Exception as e:
         traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if 'conn' in locals(): conn.close()
+# ======================================================================
+# GET /api/v1/decisions/market-rate
+# Returns current market rate for a given lat/lng (and optional dow/hour)
+# ======================================================================
+@require_firebase_auth
+@decisions_bp.route("/market-rate", methods=["GET"])
+def get_market_rate():
+    try:
+        driver_id = verify_and_get_user_id(request)
+        lat  = request.args.get("lat",  type=float)
+        lng  = request.args.get("lng",  type=float)
+        dow  = request.args.get("dow",  type=int)   # 0=Sun..6=Sat, optional
+        hour = request.args.get("hour", type=int)   # 0-23, optional
+
+        if lat is None or lng is None:
+            return jsonify({"error": "lat and lng are required"}), 400
+
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # If dow/hour provided, override the driver's current local time
+        if dow is not None and hour is not None:
+            cur.execute("""
+                SELECT market_hourly, market_mileage, sample_count, data_source
+                FROM app_private.get_market_rate(%s, %s, %s,
+                    (date_trunc('week', NOW() AT TIME ZONE 'America/Chicago')
+                     + (%s || ' days')::interval
+                     + (%s || ' hours')::interval) AT TIME ZONE 'America/Chicago')
+            """, (lat, lng, driver_id, dow, hour))
+        else:
+            cur.execute("""
+                SELECT market_hourly, market_mileage, sample_count, data_source
+                FROM app_private.get_market_rate(%s, %s, %s)
+            """, (lat, lng, driver_id))
+
+        r = cur.fetchone()
+
+        if not r or r['data_source'] == 'market:no_data':
+            return jsonify({
+                "market_hourly":  None,
+                "market_mileage": None,
+                "sample_count":   0,
+                "data_source":    "no_data",
+                "message":        "No market data available for this location/time"
+            }), 200
+
+        return jsonify({
+            "market_hourly":  float(r['market_hourly'])  if r['market_hourly']  else None,
+            "market_mileage": float(r['market_mileage']) if r['market_mileage'] else None,
+            "sample_count":   r['sample_count'],
+            "data_source":    r['data_source'],
+        }), 200
+
+    except Exception as e:
+        logging.exception("market-rate endpoint error")
         return jsonify({"error": str(e)}), 500
     finally:
         if 'conn' in locals(): conn.close()
