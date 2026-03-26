@@ -169,6 +169,15 @@ def make_decision():
     pickup_min = float(p.get("pickupMinutes") or 0)
     pickup_miles = float(p.get("pickupMiles") or (pickup_min * 0.33))
 
+    # Sanity check: detect YOLO distance swap (trip/pickup fields swapped)
+    # Flag only — do NOT overwrite pickup_miles (highway pickups can exceed 45mph)
+    yolo_swap_suspected = False
+    if pickup_min > 0 and pickup_miles > 0:
+        max_realistic_miles = pickup_min * 0.75  # 45mph threshold
+        if pickup_miles > max_realistic_miles:
+            yolo_swap_suspected = True
+            logging.warning(f"⚠️ YOLO swap suspected: {pickup_miles}mi in {pickup_min}min ({round(pickup_miles/pickup_min*60,1)}mph). Flagging only, not clamping.")
+
     d_lat = float(p.get("dropoffLat") or 0)
     d_lng = float(p.get("dropoffLng") or 0)
     p_lat = float(p.get("lat") or 0)
@@ -401,18 +410,79 @@ def make_decision():
                         cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (p_lat, p_lng))
                         r = cur.fetchone()
                         pickup_h3 = r['h3'] if r else None
+
+                        # Triangulation: only if geocode is plausible (within 2x YOLO distance)
+                        triangulated_h3 = None
+                        if geocoded_miles is not None and reported > 0 and geocoded_miles <= (reported * 2.0):
+                            try:
+                                cur.execute("""
+                                    WITH params AS (
+                                        SELECT 
+                                            ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS driver_gps,
+                                            ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS geo_pickup,
+                                            %s AS yolo_dist_mi
+                                    ),
+                                    geometry_prep AS (
+                                        SELECT driver_gps, geo_pickup, yolo_dist_mi,
+                                            ST_Difference(
+                                                ST_Buffer(driver_gps::geography, (yolo_dist_mi * 1.2) * 1609.34)::geometry,
+                                                ST_Buffer(driver_gps::geography, (yolo_dist_mi * 0.8) * 1609.34)::geometry
+                                            ) AS distance_arc,
+                                            ST_Azimuth(driver_gps, geo_pickup) AS bearing_rad
+                                        FROM params
+                                    ),
+                                    wedge AS (
+                                        SELECT driver_gps, geo_pickup,
+                                            ST_Intersection(
+                                                distance_arc,
+                                                ST_MakePolygon(ST_MakeLine(ARRAY[
+                                                    driver_gps,
+                                                    ST_Project(driver_gps::geography, (yolo_dist_mi * 1.5) * 1609.34, bearing_rad - radians(45))::geometry,
+                                                    ST_Project(driver_gps::geography, (yolo_dist_mi * 1.5) * 1609.34, bearing_rad + radians(45))::geometry,
+                                                    driver_gps
+                                                ]))
+                                            ) AS search_area
+                                        FROM geometry_prep
+                                    )
+                                    SELECT h3_latlng_to_cell(
+                                        point(ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps)),
+                                              ST_X(ST_ClosestPoint(s.geometry, w.driver_gps))), 8
+                                    )::text AS h3
+                                    FROM app_private.street_network s, wedge w
+                                    WHERE ST_Intersects(s.geometry, w.search_area)
+                                      AND GeometryType(s.geometry) = 'LINESTRING'
+                                      AND s.highway_type NOT IN ('motorway','motorway_link','trunk','trunk_link')
+                                    ORDER BY ST_Distance(s.geometry, w.geo_pickup) ASC
+                                    LIMIT 1
+                                """, (current_lng, current_lat, p_lng, p_lat, reported))
+                                tri_row = cur.fetchone()
+                                if tri_row and tri_row['h3']:
+                                    triangulated_h3 = tri_row['h3']
+                                    logging.info(f"✅ Triangulation succeeded: {triangulated_h3}")
+                            except Exception as tri_e:
+                                logging.warning(f"⚠️ Triangulation failed: {tri_e}")
+                        elif geocoded_miles is not None and reported > 0:
+                            logging.info(f"⚠️ Skipping triangulation: hallucination ({geocoded_miles:.1f}mi geocode vs {reported}mi YOLO)")
+
                     else:
                         geocoded_miles = None
                         delta_pct = 1.0
                         is_validated = False
                         pickup_h3 = None
+                        triangulated_h3 = None
 
                     cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (current_lat, current_lng))
                     r = cur.fetchone()
                     driver_h3 = r['h3'] if r else None
 
                     if driver_h3:
-                        data_source = 'geocode' if pickup_h3 else 'unresolved'
+                        final_pickup_h3 = triangulated_h3 if triangulated_h3 else pickup_h3
+                        if triangulated_h3:
+                            data_source = 'triangulated'
+                        elif pickup_h3:
+                            data_source = 'geocode'
+                        else:
+                            data_source = 'unresolved'
                         cur.execute(
                             "INSERT INTO app_private.pickup_market_signals "
                             "(offer_id, driver_h3, pickup_h3, reported_miles, geocoded_miles, "
@@ -421,7 +491,7 @@ def make_decision():
                             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
                             "EXTRACT(DOW FROM NOW() AT TIME ZONE 'America/Chicago')::integer, "
                             "EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::integer, %s, %s)",
-                            (decision_log_id, driver_h3, pickup_h3, reported, geocoded_miles, delta_pct,
+                            (decision_log_id, driver_h3, final_pickup_h3, reported, geocoded_miles, delta_pct,
                              is_validated, result.get('hourlyRate'), result.get('dollarsPerMile'),
                              result['verdict'] == 'ACCEPT', data_source)
                         )
