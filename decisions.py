@@ -26,8 +26,8 @@ executor = ThreadPoolExecutor(max_workers=4)
 def get_coords_from_hex(cur, hex_code):
     cur.execute("""
         SELECT 
-            (h3_cell_to_latlng(%s::h3index))[0] as lng, 
-            (h3_cell_to_latlng(%s::h3index))[1] as lat
+            app_private.h3_to_lat(%s) AS lat,
+            app_private.h3_to_lng(%s) AS lng
     """, (hex_code, hex_code))
     row = cur.fetchone()
     if not row: return None
@@ -390,7 +390,7 @@ def make_decision():
 
                     if p_lat and p_lng:
                         cur.execute(
-                            "SELECT (ST_Distance(ST_MakePoint(%s, %s)::geography, ST_MakePoint(%s, %s)::geography) / 1609.34) AS dist",
+                            "SELECT app_private.distance_miles(%s, %s, %s, %s) AS dist",
                             (current_lng, current_lat, p_lng, p_lat)
                         )
                         geo_row = cur.fetchone()
@@ -418,8 +418,8 @@ def make_decision():
                                 cur.execute("""
                                     WITH params AS (
                                         SELECT 
-                                            ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS driver_gps,
-                                            ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS geo_pickup,
+                                            app_private.coords_to_point(%s, %s) AS driver_gps,
+                                            app_private.coords_to_point(%s, %s) AS geo_pickup,
                                             %s AS yolo_dist_mi
                                     ),
                                     geometry_prep AS (
@@ -444,10 +444,10 @@ def make_decision():
                                             ) AS search_area
                                         FROM geometry_prep
                                     )
-                                    SELECT h3_latlng_to_cell(
-                                        point(ST_X(ST_ClosestPoint(s.geometry, w.driver_gps)),
-                                              ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps))), 8
-                                    )::text AS h3
+                                    SELECT app_private.coords_to_h3(
+                                        ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps)),
+                                        ST_X(ST_ClosestPoint(s.geometry, w.driver_gps))
+                                    ) AS h3
                                     FROM app_private.street_network s, wedge w
                                     WHERE ST_Intersects(s.geometry, w.search_area)
                                       AND GeometryType(s.geometry) = 'LINESTRING'

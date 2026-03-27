@@ -101,26 +101,16 @@ def _get_region_h3(lat: float, lng: float, cur) -> str:
     """Get H3 resolution-4 hex for regional cache grouping."""
     try:
         cur.execute(
-            "SELECT h3_latlng_to_cell(point(%s, %s), 4)::text",
-            (lng, lat)
+            "SELECT app_private.coords_to_h3(%s, %s, 4)",
+            (lat, lng)
         )
         row = cur.fetchone()
         if row:
             return row[0] if isinstance(row, tuple) else row.get('h3_latlng_to_cell', '')
         return ""
     except Exception:
-        # Fallback if h3_latlng_to_cell not available, try deprecated version
-        try:
-            cur.execute(
-                "SELECT h3_latlng_to_cell(point(%s, %s), 4)::text",
-                (lng, lat)
-            )
-            row = cur.fetchone()
-            if row:
-                return row[0] if isinstance(row, tuple) else list(row.values())[0]
-        except Exception:
-            pass
-        return ""
+        pass
+    return ""
 
 
 def _fetch_from_cache(street_name: str, region_h3: str, cur) -> Optional[List]:
@@ -270,10 +260,10 @@ def get_street_geometry(street_name: str, center_lat: float, center_lng: float,
             FROM app_private.street_network
             WHERE street_name = %s
             AND ST_DWithin(geometry::geography,
-                           ST_MakePoint(%s, %s)::geography,
+                           app_private.coords_to_geography(%s, %s),
                            10000)
             LIMIT 100
-        """, (_normalize_street_name(street_name), center_lng, center_lat))
+        """, (_normalize_street_name(street_name), center_lat, center_lng))
         rows = cur.fetchall()
         if rows:
             segments = [
@@ -292,14 +282,14 @@ def get_street_geometry(street_name: str, center_lat: float, center_lng: float,
             SELECT ST_AsGeoJSON(geometry)
             FROM app_private.street_network
             WHERE ST_DWithin(geometry,
-                             ST_SetSRID(ST_MakePoint(%s, %s), 4326),
+                             app_private.coords_to_point(%s, %s),
                              0.018)
             AND ST_GeometryType(geometry) = 'ST_LineString'
             AND highway_type IN ('motorway', 'trunk', 'primary', 'secondary',
                                  'tertiary', 'residential', 'unclassified')
-            ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+            ORDER BY geometry <-> app_private.coords_to_point(%s, %s)
             LIMIT 50
-        """, (center_lng, center_lat, center_lng, center_lat))
+        """, (center_lat, center_lng, center_lat, center_lng))
         rows = cur.fetchall()
         if rows:
             segments = [
@@ -412,21 +402,13 @@ def check_band_red_zones(band_points: List[Tuple], red_zone_set: set, cur) -> Di
     for plat, plng, dist in samples:
         try:
             cur.execute(
-                "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
-                (plng, plat)
+                "SELECT app_private.coords_to_h3(%s, %s)",
+                (plat, plng)
             )
             row = cur.fetchone()
             hex_id = row[0] if isinstance(row, tuple) else list(row.values())[0]
         except Exception:
-            try:
-                cur.execute(
-                    "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
-                    (plng, plat)
-                )
-                row = cur.fetchone()
-                hex_id = row[0] if isinstance(row, tuple) else list(row.values())[0]
-            except Exception:
-                continue
+            continue
 
         hexes_checked.append(hex_id)
         if hex_id in red_zone_set:
@@ -548,21 +530,13 @@ def correct_dropoff(
         dropoff_hex = None
         try:
             cur.execute(
-                "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
-                (dropoff_lng, dropoff_lat)
+                "SELECT app_private.coords_to_h3(%s, %s)",
+                (dropoff_lat, dropoff_lng)
             )
             row = cur.fetchone()
             dropoff_hex = row[0] if isinstance(row, tuple) else list(row.values())[0]
         except Exception:
-            try:
-                cur.execute(
-                    "SELECT h3_latlng_to_cell(point(%s, %s), 8)::text",
-                    (dropoff_lng, dropoff_lat)
-                )
-                row = cur.fetchone()
-                dropoff_hex = row[0] if isinstance(row, tuple) else list(row.values())[0]
-            except Exception:
-                pass
+            pass
 
         result["trace"]["dropoff_hex"] = dropoff_hex
 

@@ -64,17 +64,15 @@ def confirm_pickup():
         cur.execute("""
             WITH actual AS (
                 SELECT 
-                    h3_latlng_to_cell(point(%s, %s), 8) AS actual_h3,
-                    ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography AS actual_point
+                    app_private.coords_to_h3(%s, %s) AS actual_h3,
+                    app_private.coords_to_geography(%s, %s) AS actual_point
             ),
             triangulated AS (
                 SELECT 
-                    ST_SetSRID(
-                        ST_MakePoint(
-                            ST_X(h3_cell_to_latlng(%s::h3index)::geometry),
-                            ST_Y(h3_cell_to_latlng(%s::h3index)::geometry)
-                        ), 4326
-                    )::geography AS tri_point
+                    app_private.coords_to_geography(
+                        app_private.h3_to_lat(%s),
+                        app_private.h3_to_lng(%s)
+                    ) AS tri_point
             )
             SELECT 
                 actual.actual_h3::text,
