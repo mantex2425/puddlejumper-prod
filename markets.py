@@ -374,7 +374,7 @@ def check_proximity():
               FROM active_market_obj
           ),
           user_location AS (
-              SELECT h3_latlng_to_cell(point(%s, %s), 8) as current_cell
+              SELECT app_private.coords_to_h3(%s, %s) as current_cell
           ),
           nearest_green AS (
               SELECT 
@@ -390,11 +390,11 @@ def check_proximity():
                   WHERE hex = (SELECT current_cell FROM user_location)
               ) as is_in_active_green,
               COALESCE((SELECT dist FROM nearest_green), 999) as hex_distance,
-              (SELECT (h3_cell_to_latlng(hex))[1] FROM nearest_green) as nearest_green_lat,
-              (SELECT (h3_cell_to_latlng(hex))[0] FROM nearest_green) as nearest_green_lng
+              (SELECT app_private.h3_to_lat(hex::text) FROM nearest_green) as nearest_green_lat,
+              (SELECT app_private.h3_to_lng(hex::text) FROM nearest_green) as nearest_green_lng
           """
 
-          cur.execute(query, (uid, float(lng), float(lat)))
+          cur.execute(query, (uid, float(lat), float(lng)))
           result = cur.fetchone()
 
           return jsonify({

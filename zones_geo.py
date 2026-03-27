@@ -71,10 +71,10 @@ def get_zones_geometry():
 
         # Compute L7 market hex
         cur.execute("""
-            SELECT h3_latlng_to_cell(POINT(%s, %s), 7) AS hex_l7;
-        """, (focal_lng, focal_lat))
+            SELECT app_private.coords_to_h3(%s, %s, 7) AS hex_l7;
+        """, (focal_lat, focal_lng))
         row = cur.fetchone()
-        market_hex_l7 = row[0]
+        market_hex_l7 = row['hex_l7']
 
         # Market boundary polygon
         cur.execute(HEX_TO_POLYGON_SQL, ([market_hex_l7],))

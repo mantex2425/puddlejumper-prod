@@ -72,14 +72,14 @@ def get_proximity_segments(cur, lat, lng):
         SELECT ST_AsGeoJSON(geometry)
         FROM app_private.street_network
         WHERE ST_DWithin(geometry,
-                         ST_SetSRID(ST_MakePoint(%s, %s), 4326),
+                         app_private.coords_to_point(%s, %s),
                          0.018)
         AND ST_GeometryType(geometry) = 'ST_LineString'
         AND highway_type IN ('motorway', 'trunk', 'primary', 'secondary',
                              'tertiary', 'residential', 'unclassified')
-        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+        ORDER BY geometry <-> app_private.coords_to_point(%s, %s)
         LIMIT 50
-    """, (lng, lat, lng, lat))
+    """, (lat, lng, lat, lng))
     rows = cur.fetchall()
     if not rows:
         return None
