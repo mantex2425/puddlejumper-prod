@@ -445,8 +445,8 @@ def make_decision():
                                         FROM geometry_prep
                                     )
                                     SELECT h3_latlng_to_cell(
-                                        point(ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps)),
-                                              ST_X(ST_ClosestPoint(s.geometry, w.driver_gps))), 8
+                                        point(ST_X(ST_ClosestPoint(s.geometry, w.driver_gps)),
+                                              ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps))), 8
                                     )::text AS h3
                                     FROM app_private.street_network s, wedge w
                                     WHERE ST_Intersects(s.geometry, w.search_area)

@@ -80,7 +80,7 @@ def confirm_pickup():
                 actual.actual_h3::text,
                 round(ST_Distance(actual.actual_point, triangulated.tri_point)::numeric, 1) AS error_m
             FROM actual, triangulated
-        """, (actual_lat, actual_lng, actual_lng, actual_lat,
+        """, (actual_lng, actual_lat, actual_lng, actual_lat,
               triangulated_h3, triangulated_h3))
 
         geo_row = cur.fetchone()
