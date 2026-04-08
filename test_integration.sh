@@ -66,7 +66,7 @@ reset_state() {
 
 clear_logs() {
     $DB -q -c "DELETE FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER';" 2>/dev/null
-    $DB -q -c "DELETE FROM app_private.offer_history oh USING app_private.decision_log dl WHERE oh.decision_log_id = dl.id AND dl.driver_id = '$DRIVER';" 2>/dev/null
+    $DB -q -c "DELETE FROM app_private.offer_history oh USING app_private.decision_log dl WHERE oh.decision_log_id = dl.id AND dl.driver_id = '$DRIVER' AND dl.created_at > NOW() - INTERVAL '1 hour';" 2>/dev/null
 }
 
 decide() {
