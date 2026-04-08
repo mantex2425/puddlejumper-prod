@@ -303,6 +303,53 @@ def make_decision():
             cur, conn, uid, ep, result, driver_state, decision_log_id
         )
 
+        # ── Stage 5b: Price Radar shadow (never fails) ─────────────────
+        try:
+            import time as _time
+            _t_radar = _time.time()
+            p_lat = ep.get("p_lat")
+            p_lng = ep.get("p_lng")
+            if p_lat and p_lng:
+                cur.execute("""
+                    SELECT idw_hourly, idw_mileage, point_count,
+                           avg_distance_m, confidence_tier
+                    FROM app_private.get_price_radar(%s, %s)
+                """, (p_lat, p_lng))
+                radar_row = cur.fetchone()
+                radar_ms = (_time.time() - _t_radar) * 1000
+                if radar_ms > 100:
+                    logging.warning(f"[RADAR] ⚠️ Slow query: {radar_ms:.0f}ms")
+                if radar_row and radar_row['point_count'] > 0:
+                    result["radarHourly"]     = float(radar_row['idw_hourly'] or 0)
+                    result["radarMileage"]    = float(radar_row['idw_mileage'] or 0)
+                    result["radarPointCount"] = radar_row['point_count']
+                    result["radarAvgDistM"]   = float(radar_row['avg_distance_m'] or 0)
+                    result["radarConfidence"] = radar_row['confidence_tier']
+                    result["radarLatencyMs"]  = round(radar_ms, 1)
+                    hex_hourly = result.get("hourlyRate")
+                    if hex_hourly and radar_row['idw_hourly']:
+                        result["radarVsHexDelta"] = round(
+                            float(radar_row['idw_hourly']) - float(hex_hourly), 2
+                        )
+                    logging.info(
+                        f"[RADAR] 📡 {radar_row['confidence_tier'].upper()} "
+                        f"n={radar_row['point_count']} "
+                        f"idw=${float(radar_row['idw_hourly']):.2f}/hr "
+                        f"hex=${result.get('hourlyRate', 0):.2f}/hr "
+                        f"delta={result.get('radarVsHexDelta', 'n/a')} "
+                        f"{radar_ms:.0f}ms"
+                    )
+                else:
+                    result["radarConfidence"] = "none"
+                    result["radarPointCount"] = 0
+                    result["radarLatencyMs"]  = round(radar_ms, 1)
+                    logging.info(
+                        f"[RADAR] 📡 no signal at ({p_lat:.4f},{p_lng:.4f}) "
+                        f"{radar_ms:.0f}ms"
+                    )
+        except Exception as radar_err:
+            logging.warning(f"[RADAR] ⚠️ Shadow query failed (non-fatal): {radar_err}")
+
         # ── Stage 6: Patch decision_log (never fails) ──────────────────
         patch_decision_log(cur, conn, decision_log_id, result)
 
