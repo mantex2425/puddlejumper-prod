@@ -39,10 +39,12 @@ def confirm_pickup():
                 pms.actual_pickup_lat,
                 dl.dropoff_lat,
                 dl.dropoff_lng,
-                dl.trip_miles
+                dl.trip_miles,
+                oh.pickup_address
             FROM app_private.driver_trip_state dts
             JOIN app_private.decision_log dl ON dl.id = dts.current_offer_id::integer
             JOIN app_private.pickup_market_signals pms ON pms.offer_id = dl.id
+            LEFT JOIN app_private.offer_history oh ON oh.decision_log_id = dl.id
             WHERE dts.driver_id = %s
               AND dts.state IN ('ENROUTE', 'IN_TRIP', 'STACKED')
               AND dts.current_offer_id IS NOT NULL
@@ -61,9 +63,11 @@ def confirm_pickup():
                     pms.actual_pickup_lat,
                     dl.dropoff_lat,
                     dl.dropoff_lng,
-                    dl.trip_miles
+                    dl.trip_miles,
+                    oh.pickup_address
                 FROM app_private.pickup_market_signals pms
                 JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                LEFT JOIN app_private.offer_history oh ON oh.decision_log_id = dl.id
                 WHERE dl.driver_id = %s
                   AND pms.is_accepted = true
                   AND pms.offer_status = 'pending'
@@ -228,6 +232,32 @@ def confirm_pickup():
                 conn.rollback()
             except Exception:
                 pass
+
+        # ── Pre-warm street geometry cache for this pickup area ────────
+        try:
+            import threading
+            from arc_band import get_street_geometry
+            pickup_address = row.get('pickup_address') if row else None
+            if pickup_address and actual_lat and actual_lng:
+                def _prewarm():
+                    _c = _cr = None
+                    try:
+                        from db import get_db as _get_db
+                        _c  = _get_db()
+                        _cr = _c.cursor()
+                        get_street_geometry(
+                            pickup_address, actual_lat, actual_lng,
+                            _cr, _c, bbox_margin=0.03
+                        )
+                        logging.info(f"[CACHE] Pickup geometry pre-warmed for '{pickup_address}'")
+                    except Exception as _e:
+                        logging.warning(f"[CACHE] Pre-warm failed: {_e}")
+                    finally:
+                        if _cr: _cr.close()
+                        if _c:  _c.close()
+                threading.Thread(target=_prewarm, daemon=True).start()
+        except Exception as prewarm_err:
+            logging.warning(f"[CACHE] Pre-warm dispatch failed: {prewarm_err}")
 
         voice = build_voice(stats['totalConfirmed'], error_m, "pickup")
         logging.info(f"Pickup confirmed: offer={offer_id} error={error_m}m class={classification}")
