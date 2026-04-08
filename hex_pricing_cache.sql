@@ -94,15 +94,15 @@ BEGIN
     -- Clear old cache
     TRUNCATE TABLE app_private.hex_pricing_cache;
 
-    -- Loop through every distinct driver_h3 + day + hour combination
-    -- Using driver_h3 because Freestyle cares about WHERE THE DRIVER IS
+    -- Loop through every distinct pickup_h3 + day + hour combination
+    -- Using pickup_h3 because pricing should reflect WHERE THE PICKUP IS
     FOR v_hex IN
         SELECT DISTINCT
-            driver_h3,
+            pickup_h3,
             day_of_week,
             hour_of_day
         FROM app_private.offer_history
-        WHERE driver_h3 IS NOT NULL
+        WHERE pickup_h3 IS NOT NULL
           AND is_validated = true
           AND created_at >= v_cutoff
     LOOP
@@ -121,7 +121,7 @@ BEGIN
             percentile_cont(0.75) WITHIN GROUP (ORDER BY dollars_per_mile)      as p75_mi
         INTO v_stats
         FROM app_private.offer_history
-        WHERE driver_h3 = v_hex.driver_h3
+        WHERE pickup_h3 = v_hex.pickup_h3
           AND day_of_week = v_hex.day_of_week
           AND hour_of_day = v_hex.hour_of_day
           AND is_validated = true
@@ -150,8 +150,8 @@ BEGIN
                 percentile_cont(0.75) WITHIN GROUP (ORDER BY dollars_per_mile)      as p75_mi
             INTO v_stats
             FROM app_private.offer_history
-            WHERE driver_h3 IN (
-                SELECT h3_grid_disk(v_hex.driver_h3::h3index, 1)::text
+            WHERE pickup_h3 IN (
+                SELECT h3_grid_disk(v_hex.pickup_h3::h3index, 1)::text
             )
               AND day_of_week = v_hex.day_of_week
               AND hour_of_day = v_hex.hour_of_day
@@ -182,8 +182,8 @@ BEGIN
                 percentile_cont(0.75) WITHIN GROUP (ORDER BY dollars_per_mile)      as p75_mi
             INTO v_stats
             FROM app_private.offer_history
-            WHERE driver_h3 IN (
-                SELECT h3_grid_disk(v_hex.driver_h3::h3index, 2)::text
+            WHERE pickup_h3 IN (
+                SELECT h3_grid_disk(v_hex.pickup_h3::h3index, 2)::text
             )
               AND day_of_week = v_hex.day_of_week
               AND hour_of_day = v_hex.hour_of_day
@@ -237,7 +237,7 @@ BEGIN
             picky_hourly, picky_mileage,
             sample_count, data_source, updated_at
         ) VALUES (
-            v_hex.driver_h3,
+            v_hex.pickup_h3,
             v_hex.day_of_week,
             v_hex.hour_of_day,
             -- Revenue: p25 (accept 75% of rides) — floor at dignity minimums
@@ -455,7 +455,7 @@ DECLARE
     v_mileage     numeric;
     v_count       integer;
 BEGIN
-    v_hex  := h3_latlng_to_cell(POINT(p_lng::float8, p_lat::float8), 8)::text;
+    v_hex  := app_private.coords_to_h3(p_lat, p_lng);
     v_dow  := app_private.driver_dow(p_driver_id, p_ts);
     v_hour := app_private.driver_hour(p_driver_id, p_ts);
 
@@ -466,7 +466,7 @@ BEGIN
         COUNT(*)::integer
     INTO v_hourly, v_mileage, v_count
     FROM app_private.offer_history
-    WHERE driver_h3 = v_hex
+    WHERE pickup_h3 = v_hex
       AND day_of_week = v_dow
       AND hour_of_day = v_hour
       AND is_validated = true
@@ -485,7 +485,7 @@ BEGIN
         COUNT(*)::integer
     INTO v_hourly, v_mileage, v_count
     FROM app_private.offer_history
-    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 1)::text)
+    WHERE pickup_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 1)::text)
       AND day_of_week = v_dow
       AND hour_of_day = v_hour
       AND is_validated = true
@@ -504,7 +504,7 @@ BEGIN
         COUNT(*)::integer
     INTO v_hourly, v_mileage, v_count
     FROM app_private.offer_history
-    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 2)::text)
+    WHERE pickup_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 2)::text)
       AND day_of_week = v_dow
       AND hour_of_day = v_hour
       AND is_validated = true
@@ -523,7 +523,7 @@ BEGIN
         COUNT(*)::integer
     INTO v_hourly, v_mileage, v_count
     FROM app_private.offer_history
-    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 3)::text)
+    WHERE pickup_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 3)::text)
       AND day_of_week = v_dow
       AND hour_of_day = v_hour
       AND is_validated = true
@@ -542,7 +542,7 @@ BEGIN
         COUNT(*)::integer
     INTO v_hourly, v_mileage, v_count
     FROM app_private.offer_history
-    WHERE driver_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 4)::text)
+    WHERE pickup_h3 IN (SELECT h3_grid_disk(v_hex::h3index, 4)::text)
       AND day_of_week = v_dow
       AND hour_of_day = v_hour
       AND is_validated = true
