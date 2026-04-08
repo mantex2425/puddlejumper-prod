@@ -150,6 +150,54 @@ def confirm_dropoff():
         except Exception as e:
             logging.warning(f"⚠️ PMS nail_it elevation failed: {e}")
 
+        # ── Community radar feed from PMS elevation (fire-and-forget) ──
+        try:
+            if offer_id:
+                cur.execute("""
+                    INSERT INTO public.community_offers (
+                        created_at, day_of_year, day_of_week, hour_of_day,
+                        platform, metroplex_id,
+                        pickup_h3, dropoff_h3,
+                        actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                        fare, trip_miles,
+                        dollars_per_mile, effective_hourly_rate,
+                        data_source, geog
+                    )
+                    SELECT
+                        NOW(),
+                        EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        'uber', 1,
+                        pms.pickup_h3, dl.dropoff_h3_index,
+                        pms.actual_pickup_lat, pms.actual_pickup_lng,
+                        app_private.coords_to_h3(pms.actual_pickup_lat, pms.actual_pickup_lng),
+                        dl.fare, dl.trip_miles,
+                        pms.dollars_per_mile, pms.hourly_rate_offered,
+                        'nail_it',
+                        app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
+                    FROM app_private.pickup_market_signals pms
+                    JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                    WHERE pms.offer_id = %s
+                      AND pms.data_source = 'nail_it'
+                      AND pms.actual_pickup_lat IS NOT NULL
+                      AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.community_offers co
+                          WHERE co.actual_pickup_lat = pms.actual_pickup_lat
+                            AND co.actual_pickup_lng = pms.actual_pickup_lng
+                            AND co.data_source = 'nail_it'
+                      )
+                """, (offer_id,))
+                conn.commit()
+                logging.info(f"🌐 Community radar feed written via dropoff elevation: offer={offer_id}")
+        except Exception as community_err:
+            logging.warning(f"⚠️ Community radar INSERT failed (non-fatal): {community_err}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
         # ── Update offer_history ──────────────────────────────────────
         try:
             if offer_id:
