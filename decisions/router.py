@@ -307,9 +307,16 @@ def make_decision():
         try:
             import time as _time
             _t_radar = _time.time()
-            p_lat = ep.get("p_lat")
-            p_lng = ep.get("p_lng")
-            if p_lat and p_lng:
+            # Use best available pickup location — triangulated > raw payload > driver GPS
+            p_lat = result.get("triangulatedPickupLat") or ep.get("pickupLat") or ep.get("p_lat")
+            p_lng = result.get("triangulatedPickupLng") or ep.get("pickupLng") or ep.get("p_lng")
+            if result.get("triangulatedPickupLat"):
+                logging.info(f"[RADAR] using triangulated pickup: {p_lat:.5f},{p_lng:.5f}")
+            elif ep.get("pickupLat"):
+                logging.info(f"[RADAR] using raw payload pickup")
+            else:
+                logging.info(f"[RADAR] falling back to driver GPS")
+            if p_lat and p_lng and abs(p_lat) > 1 and abs(p_lng) > 1:
                 cur.execute("""
                     SELECT idw_hourly, idw_mileage, point_count,
                            avg_distance_m, confidence_tier
