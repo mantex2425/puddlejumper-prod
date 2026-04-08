@@ -303,15 +303,10 @@ def get_street_geometry(street_name: str, center_lat: float, center_lng: float,
     except Exception as e:
         logging.warning(f"houston_ways proximity lookup failed: {e}")
 
-    # Fetch from Overpass
-    logging.info(f"🌐 Cache miss for '{street_name}' — fetching from Overpass")
-    result = _fetch_from_overpass(street_name, center_lat, center_lng,
-                                  bbox_margin=bbox_margin)
-
-    if result is None:
-        return None
-
-    segments, osm_ids, aliases = result
+    # Overpass disabled — houston_ways covers all of Houston
+    # External API calls are not permitted in the 3-second decision window
+    logging.info(f"🚫 houston_ways miss for '{street_name}' — Overpass disabled, returning None")
+    return None
 
     # Store in cache under the queried name
     _store_in_cache(street_name, region_h3, segments, osm_ids, cur, conn)
