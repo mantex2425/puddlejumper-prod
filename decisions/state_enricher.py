@@ -38,30 +38,13 @@ def enrich_with_state(cur, conn, uid, ep, result):
         )
 
         # ── S04: ENROUTE + new offer = implicit cancel ────────────────
-        _s04_is_retry = False
-        if driver_state["state"] == "ENROUTE" and ep["p_lat"] and ep["p_lng"]:
+        # A new offer card from Uber = the previous transaction is dead.
+        # No distance checks, no retry detection. We reset to a clean UNCOMMITTED state.
+        # This prevents "ghost ENROUTE" states with stale current_offer_id.
+        if driver_state["state"] == "ENROUTE":
+            logging.info("[S04] New offer while ENROUTE → implicit cancel → UNCOMMITTED")
             try:
-                cur.execute("""
-                    SELECT pickup_lat, pickup_lng
-                    FROM app_private.driver_trip_state
-                    WHERE driver_id = %s AND pickup_lat IS NOT NULL
-                """, (uid,))
-                _active = cur.fetchone()
-                if _active:
-                    _dlat = float(_active["pickup_lat"]) - ep["p_lat"]
-                    _dlng = float(_active["pickup_lng"]) - ep["p_lng"]
-                    _dist = (_dlat**2 + _dlng**2) ** 0.5 * 69.0
-                    if _dist < 0.1:
-                        _s04_is_retry = True
-                        logging.info(
-                            f"[S04] Suppressed -- retry detected (dist={_dist:.3f}mi)"
-                        )
-            except Exception as _e:
-                logging.warning(f"[WARN] S04 retry check failed: {_e}")
-
-        if driver_state["state"] == "ENROUTE" and not _s04_is_retry:
-            logging.info("[S04] New offer while ENROUTE -> implicit cancel -> UNCOMMITTED")
-            try:
+                # Mark the previous pending offer as cancelled
                 cur.execute("""
                     UPDATE app_private.pickup_market_signals
                     SET offer_status = 'cancelled'
@@ -71,16 +54,19 @@ def enrich_with_state(cur, conn, uid, ep, result):
                         WHERE driver_id = %s
                     ) AND offer_status = 'pending'
                 """, (uid,))
+                # Reset state cleanly
                 DriverStateMachine.transition(
                     uid, 'offer_cancelled_implicit', cur, conn,
                     clear_coords=True
                 )
                 driver_state = DriverStateMachine.read(uid, cur)
-                logging.info("[S04] Complete -- UNCOMMITTED")
+                logging.info("[S04] Complete — now UNCOMMITTED")
             except Exception as s04_err:
                 logging.warning(f"[WARN] S04 failed: {s04_err}")
-                try:    conn.rollback()
-                except: pass
+                try:
+                    conn.rollback()
+                except:
+                    pass
 
         result["driverState"] = driver_state["state"]
         return result, driver_state

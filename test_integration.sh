@@ -57,7 +57,7 @@ get_state() {
 }
 
 get_log_count() {
-    $DB -t -c "SELECT COUNT(*) FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER';" 2>/dev/null | tr -d ' '
+    $DB -t -c "SELECT COUNT(*) FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER' AND logged_at >= '${SCENARIO_START}'::timestamptz;" 2>/dev/null | tr -d ' '
 }
 
 reset_state() {
@@ -65,6 +65,7 @@ reset_state() {
 }
 
 clear_logs() {
+    export SCENARIO_START=$($DB -t -c "SELECT NOW();" 2>/dev/null | xargs)
     $DB -q -c "DELETE FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER' AND logged_at > NOW() - INTERVAL '1 hour';" 2>/dev/null
     $DB -q -c "DELETE FROM app_private.offer_history oh USING app_private.decision_log dl WHERE oh.decision_log_id = dl.id AND dl.driver_id = '$DRIVER' AND dl.created_at > NOW() - INTERVAL '1 hour';" 2>/dev/null
 }
@@ -457,7 +458,7 @@ check "T36" "5 rapid heartbeats at pickup → IN_TRIP (not UNCOMMITTED)" "$STATE
 
 # Count INITIAL_NAIL entries — should be exactly 1
 NAIL_COUNT=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t \
-    -c "SELECT COUNT(*) FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER' AND trigger_event = 'gps_convergence' AND from_state = 'ENROUTE';" 2>/dev/null | tr -d ' ')
+    -c "SELECT COUNT(*) FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER' AND trigger_event = 'gps_convergence' AND from_state = 'ENROUTE' AND logged_at >= '${SCENARIO_START}'::timestamptz;" 2>/dev/null | tr -d ' ')
 check "T37" "Exactly 1 INITIAL_NAIL from rapid heartbeats (no double-fire)" "$NAIL_COUNT" "1"
 
 echo ""
