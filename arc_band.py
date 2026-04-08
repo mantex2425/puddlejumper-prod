@@ -90,11 +90,18 @@ def check_distance_gate(
 # ======================================================================
 
 def _normalize_street_name(name: str) -> str:
-    """Normalize street name for cache lookups."""
+    """Normalize street name for houston_ways and cache lookups."""
     if not name:
         return ""
-    # Strip common suffixes for matching, keep original for Overpass
-    return name.strip().lower()
+    name = name.strip().lower()
+    for suffix in [' dr', ' drive', ' st', ' street', ' rd', ' road',
+                   ' blvd', ' boulevard', ' ave', ' avenue', ' ln', ' lane',
+                   ' ct', ' court', ' pl', ' place', ' way', ' pkwy',
+                   ' parkway', ' fwy', ' freeway', ' hwy', ' highway']:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return name.strip()
 
 
 def _get_region_h3(lat: float, lng: float, cur) -> str:
