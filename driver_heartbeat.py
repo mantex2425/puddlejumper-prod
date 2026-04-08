@@ -13,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
-from nail_it_core import check_convergence, write_nailed_position
+from nail_it_core import check_convergence, write_nailed_position, classify
 from decisions.triangulation_enricher import refine_dropoff_background
 from state_machine import DriverStateMachine
 
@@ -175,6 +175,102 @@ def post_heartbeat():
             logging.warning(f"S29 INITIAL_NAIL: ENROUTE->IN_TRIP at {new_error_m or 0:.0f}m")
             driverState = "IN_TRIP"
             _just_nailed_pickup = True
+
+        if _just_nailed_pickup:
+            # ── Feed community radar from Auto Nail It (fire-and-forget) ──
+            try:
+                cur.execute("""
+                    UPDATE app_private.pickup_market_signals
+                    SET actual_pickup_lat     = %s,
+                        actual_pickup_lng     = %s,
+                        actual_pickup_h3      = app_private.coords_to_h3(%s, %s),
+                        actual_pickup_at      = NOW() AT TIME ZONE 'America/Chicago',
+                        triangulation_error_m = %s,
+                        data_source           = 'nail_it',
+                        offer_status          = 'completed'
+                    WHERE offer_id = (
+                        SELECT current_offer_id::integer
+                        FROM app_private.driver_trip_state
+                        WHERE driver_id = %s
+                    )
+                    AND data_source != 'nail_it'
+                """, (current_lat, current_lng,
+                      current_lat, current_lng,
+                      new_error_m, driver_id))
+
+                cur.execute("""
+                    INSERT INTO public.community_offers (
+                        created_at, day_of_year, day_of_week, hour_of_day,
+                        platform, metroplex_id,
+                        pickup_h3, dropoff_h3,
+                        actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                        fare, trip_miles,
+                        dollars_per_mile, effective_hourly_rate,
+                        data_source, geog
+                    )
+                    SELECT
+                        NOW(),
+                        EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                        'uber', 1,
+                        pms.pickup_h3, dl.dropoff_h3_index,
+                        %s, %s, app_private.coords_to_h3(%s, %s),
+                        dl.fare, dl.trip_miles,
+                        pms.dollars_per_mile, pms.hourly_rate_offered,
+                        'nail_it',
+                        app_private.coords_to_geography(%s, %s)
+                    FROM app_private.pickup_market_signals pms
+                    JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                    JOIN app_private.driver_trip_state dts ON dts.driver_id = %s
+                    WHERE pms.offer_id = dts.current_offer_id::integer
+                      AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                      AND NOT EXISTS (
+                          SELECT 1 FROM public.community_offers co
+                          WHERE co.actual_pickup_lat = %s
+                            AND co.actual_pickup_lng = %s
+                            AND co.data_source = 'nail_it'
+                      )
+                """, (
+                    current_lat, current_lng,
+                    current_lat, current_lng,
+                    current_lat, current_lng,
+                    driver_id,
+                    current_lat, current_lng,
+                ))
+                # Update personal offer_history with GPS accuracy
+                cur.execute("""
+                    UPDATE app_private.offer_history
+                    SET actual_pickup_lat     = %s,
+                        actual_pickup_lng     = %s,
+                        actual_pickup_h3      = app_private.coords_to_h3(%s, %s),
+                        actual_pickup_at      = NOW() AT TIME ZONE 'America/Chicago',
+                        pickup_error_m        = %s,
+                        pickup_classification = %s,
+                        pickup_data_source    = 'nail_it'
+                    WHERE decision_log_id = (
+                        SELECT current_offer_id::integer
+                        FROM app_private.driver_trip_state
+                        WHERE driver_id = %s
+                    )
+                """, (current_lat, current_lng,
+                      current_lat, current_lng,
+                      new_error_m,
+                      classify(new_error_m),
+                      driver_id))
+                conn.commit()
+                logging.info(
+                    f"🌐 Auto Nail It → community radar: "
+                    f"({current_lat:.5f},{current_lng:.5f})"
+                )
+            except Exception as radar_err:
+                logging.warning(
+                    f"⚠️ Auto Nail It radar feed failed (non-fatal): {radar_err}"
+                )
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
         elif verdict == 'DROPOFF_NAIL':
             # IN_TRIP → UNCOMMITTED: nail dropoff, full coord reset
