@@ -182,7 +182,7 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                 reported, geocoded_miles, cur,
                 street_name=ep["pickup_address"],
                 gps_age_sec=ep["gps_age_sec"],
-                pre_geocoded=bool(ep.get("p_lat") and ep.get("p_lng")),
+                pre_geocoded=False,  # Uber never sends pickup coords; driver GPS is not a pre-geocode
             )
 
             # Resolve pickup lat/lng immediately -- before any DB write or patch
