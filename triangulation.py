@@ -108,6 +108,48 @@ TORTUOSITY_MIN = 1.0
 TORTUOSITY_MAX = 3.0
 
 
+def _normalize_address(address: str) -> str:
+    if not address:
+        return ""
+    cleaned = re.sub(r'[^\w\s]', ' ', address)
+    return ' '.join(cleaned.strip().lower().split())
+
+def _lookup_geocode_cache(address: str, cur) -> tuple | None:
+    if not address:
+        return None
+    norm = _normalize_address(address)
+    try:
+        cur.execute(
+            "SELECT lat, lng FROM app_private.geocode_cache WHERE address_text = %s",
+            (norm,)
+        )
+        row = cur.fetchone()
+        if row:
+            logging.info(f"[Geocode] CACHE HIT: '{address}'")
+            cur.execute(
+                "UPDATE app_private.geocode_cache SET last_used_at = NOW(), hit_count = hit_count + 1 WHERE address_text = %s",
+                (norm,)
+            )
+            return row['lat'], row['lng']
+    except Exception as e:
+        logging.warning(f"[Geocode] Cache lookup failed: {e}")
+    return None
+
+def _write_geocode_cache(address: str, lat: float, lng: float, cur):
+    if not address or lat is None or lng is None:
+        return
+    norm = _normalize_address(address)
+    try:
+        cur.execute("""
+            INSERT INTO app_private.geocode_cache (address_text, lat, lng)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (address_text) DO UPDATE
+            SET last_used_at = NOW(),
+                hit_count = geocode_cache.hit_count + 1
+        """, (norm, lat, lng))
+    except Exception as e:
+        logging.warning(f"[Geocode] Cache write failed for '{address}': {e}")
+
 def build_arc_donut(yolo_miles, geocoded_miles, safety_buffer_miles=0.2):
     if yolo_miles <= 0:
         return 0.1, 1.0
@@ -273,7 +315,11 @@ def triangulate_pickup(
     # Skipped when pickup coords already geocoded upstream (saves API call)
     if street_name and not pre_geocoded:
         logging.info(f"📡 [ORACLE] Querying Google for '{street_name}'...")
-        google_coords = _google_geocode(street_name)
+        google_coords = _lookup_geocode_cache(street_name, cur)
+        if google_coords is None:
+            google_coords = _google_geocode(street_name)
+            if google_coords:
+                _write_geocode_cache(street_name, google_coords[0], google_coords[1], cur)
         if google_coords:
             g_lat, g_lng = google_coords
             if True:  # Total Trust in Google Address
