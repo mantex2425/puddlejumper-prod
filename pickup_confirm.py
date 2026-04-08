@@ -1,6 +1,7 @@
 # backend/pickup_confirm.py
-# Ground Truth Validation — "Nail It" button endpoint
-# Records actual pickup location against triangulated estimate
+# Nail It — Pickup confirmation endpoint
+# Handles: offer lookup, ENROUTE→IN_TRIP transition, dropoff recalibration
+# Shared targeting logic: nail_it_core.py
 
 import logging
 from flask import Blueprint, request, jsonify
@@ -8,153 +9,196 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
+from state_machine import DriverStateMachine
+from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position
 
 pickup_confirm_bp = Blueprint('pickup_confirm', __name__)
 
-# ======================================================================
-# POST /api/v1/pickup/confirm
-# Called when driver taps "Nail It" at actual pickup location.
-# Finds most recent accepted offer for this driver, records actual
-# pickup coordinates, calculates triangulation error in meters.
-# ======================================================================
+
 @require_firebase_auth
 @pickup_confirm_bp.route("/pickup/confirm", methods=["POST"])
 def confirm_pickup():
     try:
         driver_id = verify_and_get_user_id(request)
         body = request.get_json()
-
         actual_lat = body.get("lat")
         actual_lng = body.get("lng")
-
         if actual_lat is None or actual_lng is None:
             return jsonify({"error": "lat and lng are required"}), 400
 
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Find the most recent accepted offer in pickup_market_signals
-        # for this driver that hasn't been confirmed yet
+        # ── Find active offer via current_offer_id ────────────────────
         cur.execute("""
-            SELECT 
+            SELECT
                 pms.id AS pms_id,
                 pms.offer_id,
                 pms.pickup_h3,
-                dl.created_at
-            FROM app_private.pickup_market_signals pms
-            JOIN app_private.decision_log dl ON dl.id = pms.offer_id
-            WHERE dl.driver_id = %s
-              AND pms.is_accepted = true
-              AND pms.actual_pickup_at IS NULL
-            ORDER BY dl.created_at DESC
-            LIMIT 1
+                pms.triangulation_error_m AS existing_error_m,
+                pms.actual_pickup_lat,
+                dl.dropoff_lat,
+                dl.dropoff_lng,
+                dl.trip_miles
+            FROM app_private.driver_trip_state dts
+            JOIN app_private.decision_log dl ON dl.id = dts.current_offer_id::integer
+            JOIN app_private.pickup_market_signals pms ON pms.offer_id = dl.id
+            WHERE dts.driver_id = %s
+              AND dts.state IN ('ENROUTE', 'IN_TRIP', 'STACKED')
+              AND dts.current_offer_id IS NOT NULL
         """, (driver_id,))
-
         row = cur.fetchone()
+
+        # Fallback: current_offer_id NULL (race condition on accept)
         if not row:
-            return jsonify({
-                "status": "no_match",
-                "message": "No unconfirmed accepted offer found"
-            }), 404
+            logging.info("⚠️ current_offer_id NULL — fallback to most recent accepted offer")
+            cur.execute("""
+                SELECT
+                    pms.id AS pms_id,
+                    pms.offer_id,
+                    pms.pickup_h3,
+                    pms.triangulation_error_m AS existing_error_m,
+                    pms.actual_pickup_lat,
+                    dl.dropoff_lat,
+                    dl.dropoff_lng,
+                    dl.trip_miles
+                FROM app_private.pickup_market_signals pms
+                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                WHERE dl.driver_id = %s
+                  AND pms.is_accepted = true
+                  AND pms.offer_status = 'pending'
+                  AND dl.created_at > NOW() - INTERVAL '2 hours'
+                ORDER BY dl.created_at DESC
+                LIMIT 1
+            """, (driver_id,))
+            row = cur.fetchone()
 
-        pms_id = row['pms_id']
+        if not row:
+            return jsonify({"status": "no_match", "message": "No active offer found"}), 404
+
+        pms_id         = row['pms_id']
+        offer_id       = row['offer_id']
         triangulated_h3 = row['pickup_h3']
+        existing_error = float(row['existing_error_m']) if row['existing_error_m'] else None
+        already_nailed = row['actual_pickup_lat'] is not None
 
-        # Compute actual H3 and error distance in one query
-        cur.execute("""
-            WITH actual AS (
-                SELECT 
-                    app_private.coords_to_h3(%s, %s) AS actual_h3,
-                    app_private.coords_to_geography(%s, %s) AS actual_point
-            ),
-            triangulated AS (
-                SELECT 
-                    app_private.coords_to_geography(
-                        app_private.h3_to_lat(%s),
-                        app_private.h3_to_lng(%s)
-                    ) AS tri_point
+        # ── Compute error and check refinement ────────────────────────
+        actual_h3, error_m = compute_error(cur, actual_lat, actual_lng, triangulated_h3)
+        classification = classify(error_m)
+        update_ok, improvement = should_refine(existing_error, error_m)
+
+        if not update_ok:
+            logging.info(
+                f"📍 Pickup refinement skipped — "
+                f"improvement={improvement:.0f}m < 50m threshold"
             )
-            SELECT 
-                actual.actual_h3::text,
-                round(ST_Distance(actual.actual_point, triangulated.tri_point)::numeric, 1) AS error_m
-            FROM actual, triangulated
-        """, (actual_lng, actual_lat, actual_lng, actual_lat,
-              triangulated_h3, triangulated_h3))
+            conn.commit()
+            return jsonify({
+                "status":         "confirmed",
+                "offerId":        offer_id,
+                "errorMeters":    error_m,
+                "classification": classification,
+                "refined":        False,
+                "driverState":    "IN_TRIP",
+                "voice":          f"Already confirmed. {int(error_m)} meters."
+            }), 200
 
-        geo_row = cur.fetchone()
-        actual_h3 = geo_row['actual_h3']
-        error_m = float(geo_row['error_m'])
+        if already_nailed and improvement:
+            logging.info(f"🎯 Pickup REFINED: {existing_error:.0f}m → {error_m:.0f}m (+{improvement:.0f}m)")
 
-        # Classify result
-        if error_m <= 400:
-            classification = "bullseye"
-        elif error_m <= 800:
-            classification = "on_target"
-        else:
-            classification = "miss"
-
-        # Update the shadow table row
+        # ── Update pickup_market_signals ──────────────────────────────
         cur.execute("""
             UPDATE app_private.pickup_market_signals
-            SET 
-                actual_pickup_lat     = %s,
+            SET actual_pickup_lat     = %s,
                 actual_pickup_lng     = %s,
                 actual_pickup_h3      = %s,
                 actual_pickup_at      = NOW(),
-                triangulation_error_m = %s
+                triangulation_error_m = %s,
+                offer_status          = 'completed'
             WHERE id = %s
         """, (actual_lat, actual_lng, actual_h3, error_m, pms_id))
 
-        # Calculate running accuracy stats for this driver
-        cur.execute("""
-            SELECT
-                COUNT(*) AS total_confirmed,
-                round(100.0 * COUNT(*) FILTER (WHERE triangulation_error_m <= 800)
-                    / NULLIF(COUNT(*), 0), 1) AS pct_on_target,
-                round(AVG(triangulation_error_m)::numeric, 0) AS avg_error_m
-            FROM app_private.pickup_market_signals pms
-            JOIN app_private.decision_log dl ON dl.id = pms.offer_id
-            WHERE dl.driver_id = %s
-              AND pms.actual_pickup_at IS NOT NULL
-        """, (driver_id,))
+        # ── State transition ──────────────────────────────────────────
+        current_state_row = DriverStateMachine.read(driver_id, cur)
+        current_state = current_state_row["state"] if current_state_row else "ENROUTE"
+        if current_state == "ENROUTE":
+            DriverStateMachine.transition(driver_id, 'pickup_confirmed', cur, conn,
+                offer_id=str(offer_id),
+                nailed_pickup_lat=actual_lat,
+                nailed_pickup_lng=actual_lng,
+            )
+        else:
+            logging.info(f"📍 Pickup Nail It: state={current_state} — coord refinement only")
 
-        stats = cur.fetchone()
+        # ── Write nailed pickup position ─────────────────────────────
+        try:
+            write_nailed_position(cur, driver_id, "pickup", actual_lat, actual_lng, error_m)
+        except Exception as nail_e:
+            logging.warning(f"⚠️ nailed_pickup write failed: {nail_e}")
+
+        # ── Recalibrate dropoff using confirmed pickup coords ─────────
+        try:
+            d_lat      = row.get('dropoff_lat')
+            d_lng      = row.get('dropoff_lng')
+            trip_miles = float(row.get('trip_miles') or 0)
+            if d_lat and d_lng and trip_miles > 0:
+                from triangulation import triangulate_dropoff, h3_to_coords
+                new_dropoff_h3 = triangulate_dropoff(
+                    actual_lat, actual_lng, d_lat, d_lng, trip_miles, cur
+                )
+                if new_dropoff_h3:
+                    dropoff_coords = h3_to_coords(new_dropoff_h3, cur)
+                    if dropoff_coords:
+                        cur.execute("""
+                            UPDATE app_private.driver_trip_state
+                            SET dropoff_h3  = %s,
+                                dropoff_lat = %s,
+                                dropoff_lng = %s
+                            WHERE driver_id = %s
+                        """, (new_dropoff_h3, dropoff_coords[0], dropoff_coords[1], driver_id))
+                        logging.info(f"🎯 Dropoff recalibrated: {new_dropoff_h3}")
+        except Exception as recal_e:
+            logging.warning(f"⚠️ Dropoff recalibration failed: {recal_e}")
+
+        # ── Update offer_history ──────────────────────────────────────
+        try:
+            cur.execute("""
+                UPDATE app_private.offer_history
+                SET actual_pickup_lat     = %s,
+                    actual_pickup_lng     = %s,
+                    actual_pickup_h3      = %s,
+                    actual_pickup_at      = NOW(),
+                    pickup_error_m        = %s,
+                    pickup_classification = %s,
+                    pickup_data_source    = 'nail_it'
+                WHERE decision_log_id = %s
+            """, (actual_lat, actual_lng, actual_h3, error_m, classification, offer_id))
+        except Exception as oh_err:
+            logging.warning(f"⚠️ Offer history pickup update failed: {oh_err}")
+
+        # ── Stats + response ──────────────────────────────────────────
+        stats = get_accuracy_stats(cur, driver_id, "pickup")
         conn.commit()
 
-        total = int(stats['total_confirmed'])
-        pct = float(stats['pct_on_target']) if stats['pct_on_target'] else 0.0
-        avg_err = float(stats['avg_error_m']) if stats['avg_error_m'] else 0.0
-
-        # Voice string for Android TTS
-        if total == 1:
-            voice = f"First confirmation. {int(error_m)} meters."
-        else:
-            voice = f"{total} confirmed. {pct:.0f}% on target. Average {int(avg_err)} meters."
-
-        logging.info(f"Pickup confirmed: offer={row['offer_id']} "
-                     f"error={error_m}m class={classification} "
-                     f"total={total} pct={pct}%")
+        voice = build_voice(stats['totalConfirmed'], error_m, "pickup")
+        logging.info(f"Pickup confirmed: offer={offer_id} error={error_m}m class={classification}")
 
         return jsonify({
-            "status": "confirmed",
-            "offerId": row['offer_id'],
-            "errorMeters": error_m,
+            "status":         "confirmed",
+            "offerId":        offer_id,
+            "errorMeters":    error_m,
             "classification": classification,
+            "refined":        already_nailed,
             "triangulatedH3": triangulated_h3,
-            "actualH3": actual_h3,
-            "stats": {
-                "totalConfirmed": total,
-                "pctOnTarget": pct,
-                "avgErrorMeters": avg_err
-            },
-            "voice": voice
+            "actualH3":       actual_h3,
+            "driverState":    "IN_TRIP",
+            "stats":          stats,
+            "voice":          voice
         }), 200
 
     except Exception as e:
         logging.exception("pickup confirm error")
-        if 'conn' in locals():
-            conn.rollback()
+        if 'conn' in locals(): conn.rollback()
         return jsonify({"error": str(e)}), 500
     finally:
-        if 'conn' in locals():
-            conn.close()
+        if 'conn' in locals(): conn.close()

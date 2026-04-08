@@ -379,7 +379,7 @@ def check_proximity():
           nearest_green AS (
               SELECT 
                   hex,
-                  h3_grid_distance((SELECT current_cell FROM user_location), hex) as dist
+                  h3_grid_distance((SELECT current_cell FROM user_location)::public.h3index, hex) as dist
               FROM active_green_hexes
               ORDER BY dist ASC
               LIMIT 1
@@ -387,7 +387,7 @@ def check_proximity():
           SELECT 
               EXISTS (
                   SELECT 1 FROM active_green_hexes 
-                  WHERE hex = (SELECT current_cell FROM user_location)
+                  WHERE hex = (SELECT current_cell FROM user_location)::public.h3index
               ) as is_in_active_green,
               COALESCE((SELECT dist FROM nearest_green), 999) as hex_distance,
               (SELECT app_private.h3_to_lat(hex::text) FROM nearest_green) as nearest_green_lat,
@@ -396,6 +396,15 @@ def check_proximity():
 
           cur.execute(query, (uid, float(lat), float(lng)))
           result = cur.fetchone()
+          cur.close()
+
+          if result is None:
+              return jsonify({
+                  "isInActiveGreen": False,
+                  "hexDistance": 999,
+                  "nearestGreenLat": None,
+                  "nearestGreenLng": None
+              }), 200
 
           return jsonify({
               "isInActiveGreen": result["is_in_active_green"],
@@ -405,7 +414,7 @@ def check_proximity():
           })
 
       except Exception as e:
-          print(f"POST /proximity-check error: {e}")
+          logging.exception(f"POST /proximity-check error: {e}")
           return jsonify({'error': str(e)}), 500
       finally:
           if 'conn' in locals():

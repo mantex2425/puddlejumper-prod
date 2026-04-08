@@ -7,6 +7,7 @@ import json
 import traceback
 import logging
 from arc_band import correct_dropoff, get_street_geometry
+from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords
 
 from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
@@ -152,391 +153,194 @@ def simulate_test_suite():
     finally:
         if 'conn' in locals(): conn.close()
 
-@require_firebase_auth
-@decisions_bp.route("/", methods=["POST"], strict_slashes=False)
-def make_decision():
-    try:
-        uid = verify_and_get_user_id(request)
-    except:
-        return jsonify({"error": "Auth failed"}), 403
+# decisions_pipeline.py
+# Pipeline stage functions for decisions.py refactor.
+# Inserted before make_decision() by patch_decisions.py.
+# VERSION: 9.0 - Pipeline architecture
 
-    p = request.get_json(silent=True) or {}
+# ── Pipeline sub-modules ──────────────────────────────────────────────
+from .engine                 import run_decision_engine
+from .logger                 import log_decision, patch_decision_log
+from .state_enricher         import enrich_with_state
+from .triangulation_enricher import enrich_with_triangulation
 
-    # Extract all parameters
-    fare = float(p.get("fare") or 0)
-    trip_miles = float(p.get("tripMiles") or 0)
-    trip_min = float(p.get("tripMinutes") or 0)
-    pickup_min = float(p.get("pickupMinutes") or 0)
-    pickup_miles = float(p.get("pickupMiles") or (pickup_min * 0.33))
 
-    # Sanity check: detect YOLO distance swap (trip/pickup fields swapped)
-    # Flag only — do NOT overwrite pickup_miles (highway pickups can exceed 45mph)
+# ======================================================================
+# PIPELINE STAGE 1 — parse_request
+# ======================================================================
+def parse_request(p, uid):
+    """Extract and type all request parameters. Never fails. Returns params dict."""
+    fare            = float(p.get("fare") or 0)
+    trip_miles      = float(p.get("tripMiles") or 0)
+    trip_min        = float(p.get("tripMinutes") or 0)
+    pickup_min      = float(p.get("pickupMinutes") or 0)
+    pickup_miles    = float(p.get("pickupMiles") or (pickup_min * 0.33))
+
     yolo_swap_suspected = False
     if pickup_min > 0 and pickup_miles > 0:
-        max_realistic_miles = pickup_min * 0.75  # 45mph threshold
+        max_realistic_miles = pickup_min * 0.75
         if pickup_miles > max_realistic_miles:
             yolo_swap_suspected = True
-            logging.warning(f"⚠️ YOLO swap suspected: {pickup_miles}mi in {pickup_min}min ({round(pickup_miles/pickup_min*60,1)}mph). Flagging only, not clamping.")
+            logging.warning(
+                f"[WARN] YOLO swap suspected: {pickup_miles}mi in {pickup_min}min "
+                f"({round(pickup_miles / pickup_min * 60, 1)}mph). Flagging only."
+            )
 
     d_lat = float(p.get("dropoffLat") or 0)
     d_lng = float(p.get("dropoffLng") or 0)
     p_lat = float(p.get("lat") or 0)
     p_lng = float(p.get("lng") or 0)
-    
-    # Driver's current GPS position
+
     current_lat = p.get("currentLat")
     current_lng = p.get("currentLng")
     if current_lat is not None: current_lat = float(current_lat)
     if current_lng is not None: current_lng = float(current_lng)
 
-    market_id = p.get("marketId")
+    gps_age_sec = p.get("gpsAgeSec")
+    if gps_age_sec is not None: gps_age_sec = float(gps_age_sec)
 
-    # Mode parameters
-    towards_active = bool(p.get("towardsActive", False))
-    towards_target_lat = p.get("towardsTargetLat")
-    towards_target_lng = p.get("towardsTargetLng")
-    towards_market_id = p.get("towardsMarketId")
-    is_puddle_jump = bool(p.get("isPuddleJumpMode", True))
+    market_id                   = p.get("marketId")
+    towards_active              = bool(p.get("towardsActive", False))
+    towards_target_lat          = p.get("towardsTargetLat")
+    towards_target_lng          = p.get("towardsTargetLng")
+    towards_market_id           = p.get("towardsMarketId")
+    is_puddle_jump              = bool(p.get("isPuddleJumpMode", True))
     towards_backtrack_tolerance = float(p.get("towardsBacktrackTolerance", 3.0))
 
     if towards_target_lat is not None: towards_target_lat = float(towards_target_lat)
     if towards_target_lng is not None: towards_target_lng = float(towards_target_lng)
 
-    # OCR confidence scores from YOLO pipeline (per-field)
-    ocr_confidence = p.get("ocrConfidence")
-
- # New: extract street names from Android OCR
-    pickup_address = p.get("pickupAddress")
+    ocr_confidence  = p.get("ocrConfidence")
+    pickup_address  = p.get("pickupAddress")
     dropoff_address = p.get("dropoffAddress")
+    ride_type       = p.get("rideType") or p.get("vehicleType")
+    is_surge        = bool(p.get("isSurge", False))
+    is_priority     = bool(p.get("isPriority", False))
+    is_reserve      = bool(p.get("isReserve", False))
 
-    # DEBUG LOGGING
-    logging.info(f"🔍 Decision Request - currentLat: {current_lat}, currentLng: {current_lng}, dropoff: {dropoff_address}")
+    if towards_active:
+        mode_name   = "TOWARDS"
+        market_name = p.get("marketName")
+    elif is_puddle_jump:
+        mode_name   = "PUDDLE_JUMP"
+        market_name = p.get("marketName")
+    else:
+        mode_name   = "FREESTYLE"
+        market_name = None
 
-    conn = get_db()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    return {
+        "fare": fare, "trip_miles": trip_miles, "trip_min": trip_min,
+        "pickup_min": pickup_min, "pickup_miles": pickup_miles,
+        "yolo_swap_suspected": yolo_swap_suspected,
+        "d_lat": d_lat, "d_lng": d_lng,
+        "p_lat": p_lat, "p_lng": p_lng,
+        "current_lat": current_lat, "current_lng": current_lng,
+        "gps_age_sec": gps_age_sec, "market_id": market_id,
+        "towards_active": towards_active,
+        "towards_target_lat": towards_target_lat,
+        "towards_target_lng": towards_target_lng,
+        "towards_market_id": towards_market_id,
+        "is_puddle_jump": is_puddle_jump,
+        "towards_backtrack_tolerance": towards_backtrack_tolerance,
+        "ocr_confidence": ocr_confidence,
+        "pickup_address": pickup_address, "dropoff_address": dropoff_address,
+        "ride_type": ride_type, "is_surge": is_surge,
+        "is_priority": is_priority, "is_reserve": is_reserve,
+        "mode_name": mode_name, "market_name": market_name,
+    }
 
+
+# ======================================================================
+# ROUTE -- /decisions/  (orchestrator only, no business logic)
+# ======================================================================
+@require_firebase_auth
+@decisions_bp.route("/", methods=["POST"], strict_slashes=False)
+def make_decision():
     import time
     _t0 = time.time()
 
+    # Auth
     try:
-        # ── ARC BAND GEOCODING CORRECTION ─────────────────────────
-        arc_band_trace = {}
-        _t_arc_start = time.time()
+        uid = verify_and_get_user_id(request)
+    except Exception:
+        return jsonify({"error": "Auth failed"}), 403
+
+    p = request.get_json(silent=True) or {}
+    logging.info(
+        f"[DECISION] Request -- "
+        f"currentLat: {p.get('currentLat')}, "
+        f"currentLng: {p.get('currentLng')}, "
+        f"dropoff: {p.get('dropoffAddress')}, "
+        f"gpsAgeSec: {p.get('gpsAgeSec')}"
+    )
+
+    # ── Stage 1: Parse request (never fails) ──────────────────────────
+    params = parse_request(p, uid)
+
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # ── Stage 2: Decision engine (raises on SQL failure -> 500) ────
+        result, arc_band_trace, ep = run_decision_engine(cur, conn, uid, params)
+
+        # ── Stage 3: Log decision (failure is non-fatal) ───────────────
+        decision_log_id = None
         try:
-            # Load driver's red zones
-            cur.execute("""
-                SELECT jsonb_array_elements_text(settings->'redZones') AS hex
-                FROM app_private.driver_settings_new
-                WHERE driver_id = %s
-            """, (uid,))
-            red_zone_set = {row['hex'] for row in cur.fetchall()}
-
-            # Load driver's green zones for active market
-            green_zone_set = set()
-            if market_id:
-                cur.execute("""
-                    SELECT jsonb_array_elements_text(elem->'greenZones')
-                    FROM app_private.driver_settings_new,
-                    jsonb_array_elements(settings->'markets') elem
-                    WHERE driver_id = %s
-                    AND elem->>'id' = %s
-                """, (uid, market_id))
-                green_zone_set = {row['jsonb_array_elements_text'] for row in cur.fetchall()}
-
-            correction = correct_dropoff(
-                pickup_lat=p_lat, pickup_lng=p_lng,
-                dropoff_lat=d_lat, dropoff_lng=d_lng,
-                trip_miles=trip_miles,
-                dropoff_address=dropoff_address,
-                red_zone_set=red_zone_set,
-                green_zone_set=green_zone_set,
-                is_puddle_jump=is_puddle_jump,
-                cur=cur, conn=conn
+            decision_log_id = log_decision(cur, conn, uid, params, ep, result)
+        except Exception as log_err:
+            logging.error(
+                f"[ERROR] log_decision failed (continuing): {log_err}", exc_info=True
             )
+            try:    conn.rollback()
+            except: pass
 
-            arc_band_trace = correction.get("trace", {})
-            arc_band_trace["arc_band_triggered"] = correction["arc_band_triggered"]
-            arc_band_trace["is_red_zone_risk"] = correction["is_red_zone_risk"]
-            arc_band_trace["use_ocr_distance"] = correction["use_ocr_distance"]
-            arc_band_trace["dropoff_address"] = dropoff_address
-            arc_band_trace["pickup_address"] = pickup_address
+        # ── Stage 4: Driver state + S04 (never fails) ─────────────────
+        result, driver_state = enrich_with_state(cur, conn, uid, ep, result)
 
-            # Apply corrections
-            if correction["corrected_lat"] != d_lat or correction["corrected_lng"] != d_lng:
-                arc_band_trace["original_dropoff"] = {"lat": d_lat, "lng": d_lng}
-                d_lat = correction["corrected_lat"]
-                d_lng = correction["corrected_lng"]
-                logging.info(f"📍 Dropoff corrected to {d_lat}, {d_lng}")
+        # ── Stage 5: Triangulation + shadow (never fails) ─────────────
+        result = enrich_with_triangulation(
+            cur, conn, uid, ep, result, driver_state, decision_log_id
+        )
 
-            if correction["use_ocr_distance"]:
-                logging.info(f"📏 Using OCR distance: {trip_miles} mi")
+        # ── Stage 6: Patch decision_log (never fails) ──────────────────
+        patch_decision_log(cur, conn, decision_log_id, result)
 
-            if correction["is_red_zone_risk"]:
-                logging.warning(f"🔴 Red zone risk detected for '{dropoff_address}'")
-
-        except Exception as arc_err:
-            logging.error(f"Arc band error (non-blocking): {arc_err}")
-            arc_band_trace["error"] = str(arc_err)
-        logging.info(f"⏱️ Arc band: {(time.time()-_t_arc_start)*1000:.0f}ms")
-
-        # GEOCODE HALLUCINATION GUARD: if geocoded pickup is >30mi from driver GPS,
-        # the geocoder returned garbage (e.g. "Main Terminal, Texas" -> west Texas).
-        # Null out the bad coords so the engine uses OCR pickup_miles instead.
-        geocode_guard_triggered = False
-        if current_lat and current_lng:
-            from math import radians, cos, sin, asin, sqrt
-            def _haversine_mi(lat1, lng1, lat2, lng2):
-                lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
-                dlat = lat2 - lat1
-                dlng = lng2 - lng1
-                a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
-                return 3956 * 2 * asin(sqrt(a))
-            geocode_dist = _haversine_mi(current_lat, current_lng, p_lat, p_lng)
-            arc_band_trace["geocode_distance_mi"] = round(geocode_dist, 2)
-            if geocode_dist > 30:
-                logging.warning(f"🚨 GEOCODE HALLUCINATION: pickup ({p_lat},{p_lng}) is {geocode_dist:.0f}mi from driver ({current_lat},{current_lng}). Nulling coords, using OCR pickup_miles={pickup_miles}")
-                arc_band_trace["geocode_hallucination"] = True
-                arc_band_trace["geocode_distance_mi"] = round(geocode_dist, 1)
-                arc_band_trace["original_pickup_lat"] = p_lat
-                arc_band_trace["original_pickup_lng"] = p_lng
-                p_lat = None
-                p_lng = None
-                geocode_guard_triggered = True
-
-        _t_sql_start = time.time()
-        # SINGLE SOURCE OF TRUTH: Call SQL decision engine
-        cur.execute("""
-            SELECT * FROM app_private.decision_engine_v2(
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s
-            )
-        """, (
-            uid, p_lat, p_lng, d_lat, d_lng, fare, trip_miles, trip_min,
-            pickup_min, pickup_miles, market_id,
-            towards_active, towards_target_lat, towards_target_lng, towards_market_id,
-            current_lat, current_lng, towards_backtrack_tolerance, is_puddle_jump
-        ))
-
-        row = cur.fetchone()
-        logging.info(f"⏱️ Decision engine SQL: {(time.time()-_t_sql_start)*1000:.0f}ms")
-        if not row: 
-            return jsonify({"error": "Engine returned no result"}), 500
-
-        # Build response
-        result = {
-            "verdict": row['verdict'],
-            "reason": row['reason'],
-            "netPay": float(row['net_pay'] or 0),
-            "hourlyRate": float(row['hourly_rate'] or 0),
-            "dollarsPerMile": float(row['dollars_per_mile'] or 0),
-            "deadheadMiles": float(row['deadhead_miles'] or 0),
-            "deadheadCost": float(row['deadhead_cost'] or 0),
-            "arrivalDetected": row['arrival_detected'],
-            "switchToMode": row['switch_to_mode'],
-            "switchToMarketId": row['switch_to_market_id'],
-            "thresholdSource": row['threshold_source']
-        }
-
-        # Persist the decision log
-        try:
-            # --- Determine mode and market name logic ---
-            if towards_active:
-                mode_name = "TOWARDS"
-                market_name = p.get("marketName")
-                
-            elif is_puddle_jump:
-                mode_name = "PUDDLE_JUMP"
-                market_name = p.get("marketName")
-            else:
-                mode_name = "FREESTYLE"
-                market_name = None
-            # --------------------------------------------
-
-            cur.execute("""
-                   INSERT INTO app_private.decision_log (
-                    driver_id, market_id, fare, pickup_minutes, trip_minutes,
-                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-                    decision_result, mode_at_decision, market_name,
-                    ocr_confidence, pickup_h3_index, dropoff_h3_index,
-                    trace_data, current_lat, current_lng,                   trip_miles, pickup_miles,
-                    ping_h3_index,
-                    towards_market_id, towards_target_lat, towards_target_lng,
-                    created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), app_private.safe_h3(%s, %s), %s, %s, %s, %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s, NOW()) RETURNING id           """, (
-                uid, market_id, fare, pickup_min, trip_min, 
-                p_lat, p_lng, d_lat, d_lng, json.dumps(result),
-                mode_name, market_name,
-                json.dumps(ocr_confidence) if ocr_confidence else None,
-                p_lat, p_lng,
-                d_lat, d_lng,
-                json.dumps({**(row['trace_data'] if row.get('trace_data') else {}), "arc_band": arc_band_trace}),
-                current_lat, current_lng,
-                trip_miles, pickup_miles,
-                current_lat, current_lng,
-                towards_market_id, towards_target_lat, towards_target_lng
-            ))
-            
-            result_row = cur.fetchone()
-            decision_log_id = result_row['id'] if result_row else None
-            conn.commit()
-            logging.info(f"✅ Decision logged - verdict: {result['verdict']}, ocr_confidence: {'yes' if ocr_confidence else 'no'}")
-
-            # ================================================================
-            # SHADOW TABLE: pickup_market_signals
-            # ================================================================
-            try:
-                if current_lat and current_lng:
-                    reported = pickup_miles or 0
-
-                    if p_lat and p_lng:
-                        cur.execute(
-                            "SELECT app_private.distance_miles(%s, %s, %s, %s) AS dist",
-                            (current_lng, current_lat, p_lng, p_lat)
-                        )
-                        geo_row = cur.fetchone()
-                        geocoded_miles = float(geo_row['dist']) if geo_row else None
-
-                        if geocoded_miles is not None and reported > 0:
-                            raw_delta = abs(geocoded_miles - reported) / reported
-                            if reported < 3:
-                                is_validated = abs(geocoded_miles - reported) < 1.5
-                            else:
-                                is_validated = raw_delta < 0.60
-                            delta_pct = raw_delta
-                        else:
-                            delta_pct = 1.0
-                            is_validated = False
-
-                        cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (p_lat, p_lng))
-                        r = cur.fetchone()
-                        pickup_h3 = r['h3'] if r else None
-
-                        # Triangulation: only if geocode is plausible (within 2x YOLO distance)
-                        triangulated_h3 = None
-                        if geocoded_miles is not None and reported > 0 and geocoded_miles <= (reported * 2.0):
-                            try:
-                                cur.execute("""
-                                    WITH params AS (
-                                        SELECT 
-                                            app_private.coords_to_point(%s, %s) AS driver_gps,
-                                            app_private.coords_to_point(%s, %s) AS geo_pickup,
-                                            %s AS yolo_dist_mi
-                                    ),
-                                    geometry_prep AS (
-                                        SELECT driver_gps, geo_pickup, yolo_dist_mi,
-                                            ST_Difference(
-                                                ST_Buffer(driver_gps::geography, (yolo_dist_mi * 1.2) * 1609.34)::geometry,
-                                                ST_Buffer(driver_gps::geography, (yolo_dist_mi * 0.8) * 1609.34)::geometry
-                                            ) AS distance_arc,
-                                            ST_Azimuth(driver_gps, geo_pickup) AS bearing_rad
-                                        FROM params
-                                    ),
-                                    wedge AS (
-                                        SELECT driver_gps, geo_pickup,
-                                            ST_Intersection(
-                                                distance_arc,
-                                                ST_MakePolygon(ST_MakeLine(ARRAY[
-                                                    driver_gps,
-                                                    ST_Project(driver_gps::geography, (yolo_dist_mi * 1.5) * 1609.34, bearing_rad - radians(45))::geometry,
-                                                    ST_Project(driver_gps::geography, (yolo_dist_mi * 1.5) * 1609.34, bearing_rad + radians(45))::geometry,
-                                                    driver_gps
-                                                ]))
-                                            ) AS search_area
-                                        FROM geometry_prep
-                                    )
-                                    SELECT app_private.coords_to_h3(
-                                        ST_Y(ST_ClosestPoint(s.geometry, w.driver_gps)),
-                                        ST_X(ST_ClosestPoint(s.geometry, w.driver_gps))
-                                    ) AS h3
-                                    FROM app_private.street_network s, wedge w
-                                    WHERE ST_Intersects(s.geometry, w.search_area)
-                                      AND GeometryType(s.geometry) = 'LINESTRING'
-                                      AND s.highway_type NOT IN ('motorway','motorway_link','trunk','trunk_link')
-                                    ORDER BY ST_Distance(s.geometry, w.geo_pickup) ASC
-                                    LIMIT 1
-                                """, (current_lng, current_lat, p_lng, p_lat, reported))
-                                tri_row = cur.fetchone()
-                                if tri_row and tri_row['h3']:
-                                    triangulated_h3 = tri_row['h3']
-                                    logging.info(f"✅ Triangulation succeeded: {triangulated_h3}")
-                            except Exception as tri_e:
-                                logging.warning(f"⚠️ Triangulation failed: {tri_e}")
-                        elif geocoded_miles is not None and reported > 0:
-                            logging.info(f"⚠️ Skipping triangulation: hallucination ({geocoded_miles:.1f}mi geocode vs {reported}mi YOLO)")
-
-                    else:
-                        geocoded_miles = None
-                        delta_pct = 1.0
-                        is_validated = False
-                        pickup_h3 = None
-                        triangulated_h3 = None
-
-                    cur.execute("SELECT app_private.safe_h3(%s, %s)::text AS h3", (current_lat, current_lng))
-                    r = cur.fetchone()
-                    driver_h3 = r['h3'] if r else None
-
-                    if driver_h3:
-                        final_pickup_h3 = triangulated_h3 if triangulated_h3 else pickup_h3
-                        if triangulated_h3:
-                            data_source = 'triangulated'
-                        elif pickup_h3:
-                            data_source = 'geocode'
-                        else:
-                            data_source = 'unresolved'
-                        cur.execute(
-                            "INSERT INTO app_private.pickup_market_signals "
-                            "(offer_id, driver_h3, pickup_h3, reported_miles, geocoded_miles, "
-                            "distance_delta_pct, is_validated, hourly_rate_offered, "
-                            "dollars_per_mile, day_of_week, hour_of_day, is_accepted, data_source) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                            "EXTRACT(DOW FROM NOW() AT TIME ZONE 'America/Chicago')::integer, "
-                            "EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::integer, %s, %s)",
-                            (decision_log_id, driver_h3, final_pickup_h3, reported, geocoded_miles, delta_pct,
-                             is_validated, result.get('hourlyRate'), result.get('dollarsPerMile'),
-                             result['verdict'] == 'ACCEPT', data_source)
-                        )
-                        conn.commit()
-                        logging.info(f"✅ Shadow signal logged — validated: {is_validated}, accepted: {result['verdict'] == 'ACCEPT'}")
-            except Exception as shadow_e:
-                logging.warning(f"⚠️ Shadow table insert failed (non-fatal): {shadow_e}")
+        # ── Background: pre-warm street geometry cache ─────────────────
+        if ep["d_lat"] and ep["d_lng"]:
+            def _cache_street(addr, lat, lng):
+                _c = _cr = None
                 try:
-                    conn.rollback()
-                except:
-                    pass
+                    from db import get_db as _get_db
+                    _c  = _get_db()
+                    _cr = _c.cursor()
+                    get_street_geometry(
+                        addr or f"{lat},{lng}", lat, lng, _cr, _c, bbox_margin=0.03
+                    )
+                    logging.info(f"[CACHE] Street geometry cached for '{addr}'")
+                except Exception as _e:
+                    logging.warning(f"[WARN] Street cache pre-warm failed: {_e}")
+                finally:
+                    if _cr: _cr.close()
+                    if _c:  _c.close()
+            executor.submit(
+                _cache_street, ep["dropoff_address"], ep["d_lat"], ep["d_lng"]
+            )
 
-            # Background cache: pre-warm street geometry for future hallucination recovery
-            if d_lat and d_lng:
-                def _cache_street(addr, lat, lng):
-                    c = None
-                    cr = None
-                    try:
-                        from db import get_db
-                        c = get_db()
-                        cr = c.cursor()
-                        get_street_geometry(addr or f"{lat},{lng}", lat, lng, cr, c, bbox_margin=0.03)
-                        logging.info(f"✅ Street geometry cached for '{addr}'")
-                    except Exception as e:
-                        logging.warning(f"Street cache pre-warm failed: {e}")
-                    finally:
-                        if cr: cr.close()
-                        if c: c.close()
-                executor.submit(_cache_street, dropoff_address, d_lat, d_lng)
+        logging.info(f"[TIMER] TOTAL decision time: {(time.time()-_t0)*1000:.0f}ms")
 
-
-        except Exception as db_e:
-            logging.error(f"❌ Logging failed: {db_e}")
-            conn.rollback()
-
-        logging.info(f"⏱️ TOTAL decision time: {(time.time()-_t0)*1000:.0f}ms")
+        # ── Stage 7: Always return ─────────────────────────────────────
         return jsonify(result), 200
 
     except Exception as e:
-        logging.error(f"❌ Decision engine error: {e}")
+        logging.error(f"[ERROR] Decision engine error: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
         conn.close()
+        
+
 
 # ======================================================================
 # HARVEST: Async offer data collection (fire-and-forget)
@@ -584,8 +388,11 @@ def validate_offer(fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes,
 @decisions_bp.route("/harvest", methods=["POST"])
 def harvest_offer():
     """
-    Fire-and-forget endpoint to store offer data for crowdsourced pricing database.
+    Fire-and-forget endpoint to store anonymous offer data for crowdsourced pricing database.
     Called by Android AFTER decision is made and announced.
+
+    Privacy: NO driver_id, NO lat/lng coordinates, NO addresses stored.
+    Only anonymized market signals: H3 hexes, pricing, timing, platform.
     """
     try:
         uid = verify_and_get_user_id(request)
@@ -600,52 +407,41 @@ def harvest_offer():
     trip_minutes = p.get("tripMinutes")
     pickup_miles = p.get("pickupMiles")
     pickup_minutes = p.get("pickupMinutes")
-    
-    # Locations
-    driver_lat = p.get("driverLat") or p.get("currentLat")
-    driver_lng = p.get("driverLng") or p.get("currentLng")
+
+    # Locations — H3 only, no lat/lng stored in community table
     pickup_lat = p.get("pickupLat") or p.get("lat")
     pickup_lng = p.get("pickupLng") or p.get("lng")
     dropoff_lat = p.get("dropoffLat")
     dropoff_lng = p.get("dropoffLng")
-    
-    pickup_address = p.get("pickupAddress")
-    dropoff_address = p.get("dropoffAddress")
-    
+    driver_lat = p.get("driverLat") or p.get("currentLat")
+    driver_lng = p.get("driverLng") or p.get("currentLng")
+
     # Offer details
     ride_type = p.get("rideType") or p.get("vehicleType")
     is_surge = bool(p.get("isSurge", False))
-    is_priority = bool(p.get("isPriority", False))
-    is_reserve = bool(p.get("isReserve", False))
-    
+    platform = p.get("platform") or "uber"
+    market_id = p.get("marketId")
+
     # Calculated metrics
     effective_hourly_rate = p.get("hourlyRate")
     dollars_per_mile = p.get("dollarsPerMile")
-    
-    # Decision context
-    confidence_score = p.get("confidenceScore")
-    app_verdict = p.get("verdict")
-    app_reason = p.get("reason")
-    mode_at_decision = p.get("modeAtDecision")
-    market_name = p.get("marketName")
 
     # Convert to proper types
     if fare is not None: fare = float(fare)
     if trip_miles is not None: trip_miles = float(trip_miles)
-    if trip_minutes is not None: trip_minutes = float(trip_minutes)
+    if trip_minutes is not None: trip_minutes = int(float(trip_minutes))
     if pickup_miles is not None: pickup_miles = float(pickup_miles)
-    if pickup_minutes is not None: pickup_minutes = float(pickup_minutes)
-    if driver_lat is not None: driver_lat = float(driver_lat)
-    if driver_lng is not None: driver_lng = float(driver_lng)
+    if pickup_minutes is not None: pickup_minutes = int(float(pickup_minutes))
     if pickup_lat is not None: pickup_lat = float(pickup_lat)
     if pickup_lng is not None: pickup_lng = float(pickup_lng)
     if dropoff_lat is not None: dropoff_lat = float(dropoff_lat)
     if dropoff_lng is not None: dropoff_lng = float(dropoff_lng)
+    if driver_lat is not None: driver_lat = float(driver_lat)
+    if driver_lng is not None: driver_lng = float(driver_lng)
     if effective_hourly_rate is not None: effective_hourly_rate = float(effective_hourly_rate)
     if dollars_per_mile is not None: dollars_per_mile = float(dollars_per_mile)
-    if confidence_score is not None: confidence_score = float(confidence_score)
 
-    # GEOCODE HALLUCINATION GUARD (same as make_decision)
+    # GEOCODE HALLUCINATION GUARD
     if driver_lat and driver_lng and pickup_lat and pickup_lng:
         from math import radians, cos, sin, asin, sqrt
         def _hav(lat1, lng1, lat2, lng2):
@@ -656,19 +452,9 @@ def harvest_offer():
             return 3956 * 2 * asin(sqrt(a))
         geo_dist = _hav(driver_lat, driver_lng, pickup_lat, pickup_lng)
         if geo_dist > 30:
-            logging.warning(f"🚨 HARVEST GEOCODE HALLUCINATION: pickup ({pickup_lat},{pickup_lng}) is {geo_dist:.0f}mi from driver ({driver_lat},{driver_lng}). Nulling pickup coords.")
+            logging.warning(f"HARVEST GEOCODE HALLUCINATION: {geo_dist:.0f}mi. Nulling pickup coords.")
             pickup_lat = None
             pickup_lng = None
-
-    # H3 computed in SQL instead
-    driver_h3 = None
-    pickup_h3 = None
-    dropoff_h3 = None
-
-    # Sanity Gatekeeper
-    is_validated, validation_flags = validate_offer(
-        fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes, effective_hourly_rate
-    )
 
     # Compute time breakdowns in driver's local timezone
     from datetime import datetime
@@ -683,6 +469,7 @@ def harvest_offer():
     driver_tz_str = tz_row.get('timezone') if tz_row and tz_row.get('timezone') else 'America/Chicago'
     driver_tz = ZoneInfo(driver_tz_str)
     cur_tz.close()
+    conn_tz.close()
     now = datetime.now(driver_tz)
     day_of_year = now.timetuple().tm_yday
 
@@ -691,49 +478,54 @@ def harvest_offer():
 
     try:
         cur.execute("SET LOCAL app.driver_tz = %s", (driver_tz_str,))
+
+        # Write anonymous market signal to public community table
+        # NO driver_id, NO lat/lng, NO addresses -- H3 hexes only
         cur.execute("""
-            INSERT INTO app_private.offer_history (
-                created_at, day_of_year,
-                driver_lat, driver_lng, driver_h3,
-                pickup_lat, pickup_lng, pickup_h3, pickup_address, pickup_miles, pickup_minutes,
-                dropoff_lat, dropoff_lng, dropoff_h3, dropoff_address, trip_miles, trip_minutes,
-                fare, ride_type, is_surge, is_priority, is_reserve,
-                effective_hourly_rate, dollars_per_mile,
-                confidence_score, is_validated, validation_flags,
-                app_verdict, app_reason, mode_at_decision, market_name
+            INSERT INTO public.community_offers (
+                created_at, day_of_year, day_of_week, hour_of_day,
+                market_id, platform,
+                pickup_h3, dropoff_h3,
+                fare, trip_miles, trip_minutes,
+                pickup_miles, pickup_minutes,
+                dollars_per_mile, effective_hourly_rate,
+                is_surge, ride_type
             ) VALUES (
-                NOW(), %s,
-                %s, %s, app_private.safe_h3(%s, %s),
-                %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
-                %s, %s, app_private.safe_h3(%s, %s), %s, %s, %s,
-                %s, %s, %s, %s, %s,
+                NOW(),
+                %s,
+                EXTRACT(DOW FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
                 %s, %s,
+                app_private.safe_h3(%s, %s),
+                app_private.safe_h3(%s, %s),
                 %s, %s, %s,
-                %s, %s, %s, %s
+                %s, %s,
+                %s, %s,
+                %s, %s
             )
         """, (
             day_of_year,
-            driver_lat, driver_lng, driver_lat, driver_lng,
-            pickup_lat, pickup_lng, pickup_lat, pickup_lng, pickup_address, pickup_miles, pickup_minutes,
-            dropoff_lat, dropoff_lng, dropoff_lat, dropoff_lng, dropoff_address, trip_miles, trip_minutes,
-            fare, ride_type, is_surge, is_priority, is_reserve,
-            effective_hourly_rate, dollars_per_mile,
-            confidence_score, is_validated, validation_flags,
-            app_verdict, app_reason, mode_at_decision, market_name
+            market_id, platform,
+            pickup_lat, pickup_lng,
+            dropoff_lat, dropoff_lng,
+            fare, trip_miles, trip_minutes,
+            pickup_miles, pickup_minutes,
+            dollars_per_mile, effective_hourly_rate,
+            is_surge, ride_type
         ))
-        
+
         conn.commit()
 
-                # --- Referral offer count increment ---
+        # Referral offer count increment (per-driver, separate from community data)
         try:
             cur2 = conn.cursor()
             cur2.execute("""
-                UPDATE referrals 
+                UPDATE referrals
                 SET offer_count = offer_count + 1,
                     updated_at = NOW(),
-                    status = CASE 
+                    status = CASE
                         WHEN offer_count + 1 >= 100 THEN 'PENDING_PAYMENT'::referral_status
-                        ELSE status 
+                        ELSE status
                     END
                 WHERE referee_id = %s AND status = 'PENDING_WORK'
             """, (uid,))
@@ -741,22 +533,19 @@ def harvest_offer():
             cur2.close()
         except Exception as ref_err:
             logging.error(f"Referral count update failed (non-blocking): {ref_err}")
-        # --- End referral increment ---
-        
-        logging.info(f"📊 Offer harvested - validated: {is_validated}, flags: {validation_flags}")
-        
-        return jsonify({"status": "harvested", "validated": is_validated}), 200
+
+        logging.info(f"Community offer harvested — platform: {platform} market: {market_id}")
+
+        return jsonify({"status": "harvested"}), 200
 
     except Exception as e:
-        logging.error(f"❌ Harvest failed: {e}")
+        logging.error(f"Harvest failed: {e}")
         traceback.print_exc()
         conn.rollback()
-        # Still return 200 - don't block the app
         return jsonify({"status": "failed", "error": str(e)}), 200
     finally:
         cur.close()
         conn.close()
-        
 @require_firebase_auth
 @decisions_bp.route("/optimize", methods=["GET"])
 def get_optimization_recommendations():

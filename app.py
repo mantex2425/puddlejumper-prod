@@ -34,7 +34,12 @@ from active_market import active_market_bp
 from auth import auth_bp
 from superpower_geo import superpower_geo_bp
 from decisions import decisions_bp
+from driver_status import driver_status_bp
+from driver_heartbeat import driver_heartbeat_bp
 from pickup_confirm import pickup_confirm_bp
+from dropoff_confirm import dropoff_confirm_bp
+from driver_state_reset import driver_state_reset_bp
+from monitor import run_monitor
 from chat_ai import chat_ai_bp
 from puddles_brain import puddles_bp
 from account import account_bp
@@ -52,7 +57,17 @@ app.register_blueprint(active_market_bp, url_prefix="")
 app.register_blueprint(auth_bp)
 app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
+app.register_blueprint(driver_status_bp, url_prefix='/api/v1')
+app.register_blueprint(driver_heartbeat_bp, url_prefix='/api/v1')
 app.register_blueprint(pickup_confirm_bp, url_prefix='/api/v1')
+app.register_blueprint(dropoff_confirm_bp, url_prefix='/api/v1')
+app.register_blueprint(driver_state_reset_bp, url_prefix='/api/v1')
+
+@app.route('/internal/monitor', methods=['POST'])
+def monitor_endpoint():
+    """Called by Cloud Scheduler every 10 minutes."""
+    run_monitor()
+    return 'OK', 200
 app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(puddles_bp, url_prefix="/api/v1")
 app.register_blueprint(account_bp, url_prefix='/api/v1/account')
@@ -76,6 +91,7 @@ def require_auth_globally():
         "/api/v1/health",
         "/api/v1/account/request-deletion",
         "/.well-known/apple-app-site-association",
+        "/internal/monitor",
     }
     
     if request.method == "OPTIONS" or request.path in public_paths or request.path.startswith("/h/"):

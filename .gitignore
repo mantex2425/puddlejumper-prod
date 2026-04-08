@@ -2,3 +2,17 @@ venv/
 .env
 __pycache__/
 *.pyc
+
+# Vim/editor swap files
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.bak.*
+*.prerestructure
+
+# Accidental shell output / scratch files
+audit.txt
+locationtests

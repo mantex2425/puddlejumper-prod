@@ -446,57 +446,21 @@ BEGIN
 
         IF NOT is_puddle_jump_mode THEN
             v_return_miles := 0;
-            -- Freestyle: hex cache first, manual as fallback
-            IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
-                DECLARE
-                    v_fs_hourly  numeric;
-                    v_fs_mileage numeric;
-                    v_fs_source  text;
-                BEGIN
-                    SELECT f.threshold_hourly, f.threshold_mileage, f.source
-                    INTO v_fs_hourly, v_fs_mileage, v_fs_source
-                    FROM app_private.get_freestyle_thresholds(
-                        current_lat_in, current_lng_in,
-                        COALESCE(v_settings->>'freestyleStrategy', 'ai'), user_id_in
-                    ) f;
-
-                    IF v_fs_source IS NOT NULL AND v_fs_source != 'global_default' THEN
-                        v_threshold_per_hour := v_fs_hourly;
-                        v_threshold_per_mile := v_fs_mileage;
-                        v_threshold_source := v_fs_source;
-                     ELSE
-                        v_threshold_per_hour := COALESCE(
-                            v_market_hourly,
-                            (v_settings->>'dignity_hourly')::numeric,
-                            v_global_per_hour
-                        );
-                        v_threshold_per_mile := COALESCE(
-                            v_market_mileage,
-                            (v_settings->>'dignity_mileage')::numeric,
-                            v_global_per_mile
-                        );
-                        v_threshold_source := CASE
-                            WHEN v_market_hourly IS NOT NULL THEN 'market_rate'
-                            ELSE 'dignity_floor'
-                        END;
-                    END IF;
-                END;
-            ELSE
-                v_threshold_per_hour := COALESCE(
-                    v_market_hourly,
-                    (v_settings->>'dignity_hourly')::numeric,
-                    v_global_per_hour
-                );
-                v_threshold_per_mile := COALESCE(
-                    v_market_mileage,
-                    (v_settings->>'dignity_mileage')::numeric,
-                    v_global_per_mile
-                );
-                v_threshold_source := CASE
-                    WHEN v_market_hourly IS NOT NULL THEN 'market_rate'
-                    ELSE 'dignity_floor'
-                END;
-            END IF;
+            -- Freestyle: pure market rate (hex+time), dignity floor fallback
+            v_threshold_per_hour := COALESCE(
+                v_market_hourly,
+                (v_settings->>'dignity_hourly')::numeric,
+                v_global_per_hour
+            );
+            v_threshold_per_mile := COALESCE(
+                v_market_mileage,
+                (v_settings->>'dignity_mileage')::numeric,
+                v_global_per_mile
+            );
+            v_threshold_source := CASE
+                WHEN v_market_hourly IS NOT NULL THEN 'market_rate'
+                ELSE 'dignity_floor'
+            END;
 
         -- ================================================================
         -- PJ: DROPOFF STAYS IN CURRENT MARKET
@@ -504,32 +468,12 @@ BEGIN
         ELSIF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
             v_return_miles := 0;
 
-            -- TRY HEX CACHE FIRST
-            IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
-                DECLARE
-                    v_hc_hourly  numeric;
-                    v_hc_mileage numeric;
-                    v_hc_source  text;
-                    v_hc_samples integer;
-                BEGIN
-                    SELECT f.threshold_hourly, f.threshold_mileage, f.source, f.sample_count
-                    INTO v_hc_hourly, v_hc_mileage, v_hc_source, v_hc_samples
-                    FROM app_private.get_freestyle_thresholds(
-                        current_lat_in, current_lng_in,
-                        COALESCE(v_settings->>'freestyleStrategy', 'ai'), user_id_in
-                    ) f;
-
-                    v_hex_cache_samples := COALESCE(v_hc_samples, 0);
-
-                    IF v_hc_samples >= 10
-                       AND v_hc_source IS NOT NULL
-                       AND v_hc_source != 'global_default' THEN
-                        v_threshold_per_hour := v_hc_hourly;
-                        v_threshold_per_mile := v_hc_mileage;
-                        v_threshold_source := v_hc_source;
-                        v_hex_cache_applied := TRUE;
-                    END IF;
-                END;
+            -- TRY MARKET RATE FIRST
+            IF v_market_hourly IS NOT NULL THEN
+                v_threshold_per_hour := v_market_hourly;
+                v_threshold_per_mile := v_market_mileage;
+                v_threshold_source   := 'market_rate';
+                v_hex_cache_applied  := TRUE;
             END IF;
 
             -- FALLBACK: dignity floor if cache was too thin
@@ -559,32 +503,12 @@ BEGIN
                     v_other_market_id := v_other_market->>'id';
                     v_return_miles := 0;
 
-                    -- TRY HEX CACHE FIRST
-                    IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
-                        DECLARE
-                            v_hc_hourly  numeric;
-                            v_hc_mileage numeric;
-                            v_hc_source  text;
-                            v_hc_samples integer;
-                        BEGIN
-                            SELECT f.threshold_hourly, f.threshold_mileage, f.source, f.sample_count
-                            INTO v_hc_hourly, v_hc_mileage, v_hc_source, v_hc_samples
-                            FROM app_private.get_freestyle_thresholds(
-                                current_lat_in, current_lng_in,
-                                COALESCE(v_settings->>'freestyleStrategy', 'ai'), user_id_in
-                            ) f;
-
-                            v_hex_cache_samples := COALESCE(v_hc_samples, 0);
-
-                            IF v_hc_samples >= 10
-                               AND v_hc_source IS NOT NULL
-                               AND v_hc_source != 'global_default' THEN
-                                v_threshold_per_hour := v_hc_hourly;
-                                v_threshold_per_mile := v_hc_mileage;
-                                v_threshold_source := v_hc_source;
-                                v_hex_cache_applied := TRUE;
-                            END IF;
-                        END;
+                    -- TRY MARKET RATE FIRST
+                    IF v_market_hourly IS NOT NULL THEN
+                        v_threshold_per_hour := v_market_hourly;
+                        v_threshold_per_mile := v_market_mileage;
+                        v_threshold_source   := 'market_rate';
+                        v_hex_cache_applied  := TRUE;
                     END IF;
 
                     -- FALLBACK: dignity floor if cache was too thin
@@ -660,28 +584,12 @@ BEGIN
            AND v_threshold_source NOT LIKE '%manual%'
            AND is_puddle_jump_mode
            AND NOT v_hex_cache_applied THEN
-            DECLARE
-                v_cache_hourly  numeric;
-                v_cache_mileage numeric;
-                v_cache_source  text;
-                v_cache_samples integer;
-            BEGIN
-                SELECT f.threshold_hourly, f.threshold_mileage, f.source, f.sample_count
-                INTO v_cache_hourly, v_cache_mileage, v_cache_source, v_cache_samples
-                FROM app_private.get_freestyle_thresholds(
-                    current_lat_in, current_lng_in,
-                    COALESCE(v_settings->>'freestyleStrategy', 'ai'), user_id_in
-                ) f;
-
-                v_hex_cache_samples := COALESCE(v_cache_samples, 0);
-
-                IF v_cache_source IS NOT NULL AND v_cache_source != 'global_default' THEN
-                    v_threshold_per_hour := v_cache_hourly;
-                    v_threshold_per_mile := v_cache_mileage;
-                    v_threshold_source := v_threshold_source || '+' || v_cache_source;
-                    v_hex_cache_applied := TRUE;
-                END IF;
-            END;
+            IF v_market_hourly IS NOT NULL THEN
+                v_threshold_per_hour := v_market_hourly;
+                v_threshold_per_mile := v_market_mileage;
+                v_threshold_source   := v_threshold_source || '+market_rate';
+                v_hex_cache_applied  := TRUE;
+            END IF;
         END IF;
         -- ================================================================
 

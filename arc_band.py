@@ -253,54 +253,55 @@ def get_street_geometry(street_name: str, center_lat: float, center_lng: float,
         logging.info(f"🗺️ Cache hit for '{street_name}' in region {region_h3}")
         return cached
 
-    # Try street_network table first (5ms vs 500ms+ Overpass)
+    # houston_ways exact name match (1M+ edges, GiST indexed, already used for pickup)
     try:
         cur.execute("""
-            SELECT ST_AsGeoJSON(geometry)
-            FROM app_private.street_network
-            WHERE street_name = %s
-            AND ST_DWithin(geometry::geography,
-                           app_private.coords_to_geography(%s, %s),
-                           10000)
+            SELECT ST_AsGeoJSON(the_geom) AS geojson
+            FROM routing.houston_ways
+            WHERE lower(name) = lower(%s)
+              AND ST_DWithin(the_geom::geography,
+                             app_private.coords_to_geography(%s, %s),
+                             10000)
+              AND the_geom IS NOT NULL
             LIMIT 100
         """, (_normalize_street_name(street_name), center_lat, center_lng))
         rows = cur.fetchall()
         if rows:
             segments = [
-                [[coord[1], coord[0]] for coord in json.loads(row[0] if isinstance(row, tuple) else row['st_asgeojson'])['coordinates']]
+                [[coord[1], coord[0]] for coord in
+                 json.loads(row[0] if isinstance(row, tuple) else row['geojson'])['coordinates']]
                 for row in rows
             ]
-            logging.info(f"🏙️ street_network hit for '{street_name}' — {len(segments)} segments")
+            logging.info(f"🏙️ houston_ways hit for '{street_name}' — {len(segments)} segments")
             _store_in_cache(street_name, region_h3, segments, [], cur, conn)
             return segments
     except Exception as e:
-        logging.warning(f"street_network lookup failed: {e}")
+        logging.warning(f"houston_ways exact lookup failed: {e}")
 
-    # Tier 3: street_network proximity (handles POIs, airports, full address strings)
+    # houston_ways proximity fallback (replaces street_network proximity)
     try:
         cur.execute("""
-            SELECT ST_AsGeoJSON(geometry)
-            FROM app_private.street_network
-            WHERE ST_DWithin(geometry,
-                             app_private.coords_to_point(%s, %s),
-                             0.018)
-            AND ST_GeometryType(geometry) = 'ST_LineString'
-            AND highway_type IN ('motorway', 'trunk', 'primary', 'secondary',
-                                 'tertiary', 'residential', 'unclassified')
-            ORDER BY geometry <-> app_private.coords_to_point(%s, %s)
+            SELECT ST_AsGeoJSON(the_geom) AS geojson
+            FROM routing.houston_ways
+            WHERE ST_DWithin(the_geom::geography,
+                             app_private.coords_to_geography(%s, %s),
+                             2000)
+              AND the_geom IS NOT NULL
+            ORDER BY the_geom::geography <-> app_private.coords_to_geography(%s, %s)
             LIMIT 50
         """, (center_lat, center_lng, center_lat, center_lng))
         rows = cur.fetchall()
         if rows:
             segments = [
-                [[coord[1], coord[0]] for coord in json.loads(row[0] if isinstance(row, tuple) else row['st_asgeojson'])['coordinates']]
+                [[coord[1], coord[0]] for coord in
+                 json.loads(row[0] if isinstance(row, tuple) else row['geojson'])['coordinates']]
                 for row in rows
             ]
-            logging.info(f"📍 street_network proximity hit for '{street_name}' — {len(segments)} segments")
+            logging.info(f"📍 houston_ways proximity hit — {len(segments)} segments")
             _store_in_cache(street_name, region_h3, segments, [], cur, conn)
             return segments
     except Exception as e:
-        logging.warning(f"street_network proximity lookup failed: {e}")
+        logging.warning(f"houston_ways proximity lookup failed: {e}")
 
     # Fetch from Overpass
     logging.info(f"🌐 Cache miss for '{street_name}' — fetching from Overpass")
@@ -328,8 +329,8 @@ def get_street_geometry(street_name: str, center_lat: float, center_lng: float,
 # ======================================================================
 
 def sweep_arc_band(
-    pickup_lat: float, pickup_lng: float,
-    trip_miles: float,
+    arc_center_lat: float, arc_center_lng: float,
+    distance_miles: float,
     segments: List,
     red_zone_set: set
 ) -> Dict:
@@ -337,8 +338,9 @@ def sweep_arc_band(
     Sweep the arc band along street geometry and check for red zone hits.
 
     Args:
-        pickup_lat/lng: Pickup coordinates
-        trip_miles: OCR-extracted trip distance
+        arc_center_lat/lng: Arc center point. Pass driver GPS for pickup triangulation,
+            triangulated pickup coords for dropoff triangulation.
+        distance_miles: Arc radius. Pass YOLO pickup_miles for pickup, trip_miles for dropoff.
         segments: Street geometry from cache/Overpass
         red_zone_set: Set of red zone H3 hex strings
 
@@ -348,8 +350,8 @@ def sweep_arc_band(
         - best_guess: (lat, lng) closest band point to geometric center
         - any_red: bool
     """
-    arc_inner = trip_miles / TORT_MAX
-    arc_outer = trip_miles / TORT_MIN
+    arc_inner = distance_miles / TORT_MAX
+    arc_outer = distance_miles / TORT_MIN
 
     band_points = []
 
@@ -362,7 +364,7 @@ def sweep_arc_band(
                 t = s / SAMPLES_PER_SEGMENT
                 plat = lat1 + t * (lat2 - lat1)
                 plng = lng1 + t * (lng2 - lng1)
-                dist = haversine(pickup_lat, pickup_lng, plat, plng)
+                dist = haversine(arc_center_lat, arc_center_lng, plat, plng)
 
                 if arc_inner <= dist <= arc_outer:
                     band_points.append((plat, plng, dist))
