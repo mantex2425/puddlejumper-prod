@@ -180,6 +180,55 @@ def confirm_pickup():
         stats = get_accuracy_stats(cur, driver_id, "pickup")
         conn.commit()
 
+        # ── Community radar feed (fire-and-forget) ────────────────────
+        try:
+            cur.execute("""
+                INSERT INTO public.community_offers (
+                    created_at, day_of_year, day_of_week, hour_of_day,
+                    platform, metroplex_id,
+                    pickup_h3, dropoff_h3,
+                    actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                    fare, trip_miles,
+                    dollars_per_mile, effective_hourly_rate,
+                    data_source, geog
+                )
+                SELECT
+                    NOW(),
+                    EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    'uber', 1,
+                    pms.pickup_h3, dl.dropoff_h3_index,
+                    %s, %s, %s,
+                    dl.fare, dl.trip_miles,
+                    pms.dollars_per_mile, pms.hourly_rate_offered,
+                    'nail_it',
+                    app_private.coords_to_geography(%s, %s)
+                FROM app_private.pickup_market_signals pms
+                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                WHERE pms.offer_id = %s
+                  AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.community_offers co
+                      WHERE co.actual_pickup_lat = %s
+                        AND co.actual_pickup_lng = %s
+                        AND co.data_source = 'nail_it'
+                  )
+            """, (
+                actual_lat, actual_lng, actual_h3,
+                actual_lat, actual_lng,
+                offer_id,
+                actual_lat, actual_lng,
+            ))
+            conn.commit()
+            logging.info(f"🌐 Community radar feed written: offer={offer_id} ({actual_lat:.5f}, {actual_lng:.5f})")
+        except Exception as community_err:
+            logging.warning(f"⚠️ Community radar INSERT failed (non-fatal): {community_err}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
         voice = build_voice(stats['totalConfirmed'], error_m, "pickup")
         logging.info(f"Pickup confirmed: offer={offer_id} error={error_m}m class={classification}")
 
