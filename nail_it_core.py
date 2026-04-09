@@ -158,10 +158,39 @@ ABORT_RADIUS_M         = 1200   # divergence threshold (S30)
 ABORT_SPEED_MPH        = 25     # must be moving to abort
 ABORT_MIN_DURATION_S   = 60     # grace period for U-turns
 REFINE_SPEED_MPH       = 15     # must be slow to refine
+# ── NEW: Dual-Watchdog + Elastic Net for Dropoff ─────────────────────────────
+ARMED_RADIUS_NORMAL_M  = 400    # intersections, businesses
+ARMED_RADIUS_VAGUE_M   = 800    # highways, vague linear addresses
+WATCHDOG_A_SPEED_MPH   = 3.0    # Duration Fuse
+WATCHDOG_A_DURATION_S  = 10
+WATCHDOG_B_SPEED_MPH   = 5.0    # Displacement Fuse micro-stop
+WATCHDOG_B_MIN_S       = 3
+WATCHDOG_B_MAX_S       = 8
+DEPARTURE_DISTANCE_M   = 300
+DEPARTURE_SPEED_MPH    = 15.0
+VAGUE_KEYWORDS = {
+    'hwy', 'highway', 'pkwy', 'parkway', 'fwy', 'freeway',
+    'beltway', 'tollway', 'loop', 'expressway',
+    'motorway', 'autobahn', 'autoroute', 'autopista', 'autostrada',
+    'ring road', 'orbital', 'bypass', 'skyway', 'causeway',
+    'service road', 'frontage road', 'i-', 'us-', 'sr-', 'cr-'
+}
+def is_vague_address(address: str) -> bool:
+    """Return True if address looks like a vague highway/linear feature."""
+    if not address:
+        return False
+    lower = address.lower()
+    return any(kw in lower for kw in VAGUE_KEYWORDS)
+def get_armed_radius(address: str) -> int:
+    """Return armed zone radius based on address type."""
+    if is_vague_address(address):
+        return ARMED_RADIUS_VAGUE_M
+    return ARMED_RADIUS_NORMAL_M
 
 
 def check_convergence(driver_id, current_lat, current_lng,
-                      current_speed_mph, state_row, cur):
+                      current_speed_mph, state_row, cur,
+                      stopped_seconds=0, candidate_lat=None, candidate_lng=None):
     import logging
 
     state = state_row.get('state')
@@ -274,7 +303,11 @@ def check_convergence(driver_id, current_lat, current_lng,
     if state == 'IN_TRIP' and current_speed_mph < REFINE_SPEED_MPH:
         effective_error = current_error if current_error is not None else 9999.0
 
-        # Continuous pickup refinement — while still near nailed pickup, keep improving
+        # ── NEW: Dual-Watchdog + Elastic Net for Dropoff ─────────────────────
+        dropoff_address = state_row.get('dropoff_address') or ""
+        armed_radius = get_armed_radius(dropoff_address)
+
+        # Continuous pickup refinement (unchanged)
         nailed_pickup_error_m = state_row.get('nailed_pickup_error_m') if state_row else None
         nailed_pickup_lat = state_row.get('nailed_pickup_lat') if state_row else None
         nailed_pickup_lng = state_row.get('nailed_pickup_lng') if state_row else None
@@ -292,34 +325,60 @@ def check_convergence(driver_id, current_lat, current_lng,
                 )
                 return ('REFINE_PICKUP', 'IN_TRIP', dist_to_pickup_m)
 
-        if dist_m < NAIL_CONFIRM_RADIUS_M:
-            # Inner confirm zone — hard lock only if slow
-            if current_speed_mph < NAIL_CONFIRM_SPEED_MPH:
+        # ── Dual-Watchdog Logic (NEW) ───────────────────────────────────────
+        if dist_m < armed_radius:
+            # Inner confirm zone — hard lock regardless of stopped_seconds (preserves S15)
+            if dist_m < NAIL_CONFIRM_RADIUS_M and current_speed_mph < NAIL_CONFIRM_SPEED_MPH:
                 logging.info(
-                    f"check_convergence: DROPOFF_NAIL — {dist_m:.0f}m "
-                    f"at {current_speed_mph:.1f}mph (confirmed)"
-                )
-                return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m)
-            else:
-                logging.debug(
-                    f"check_convergence: HOLD (fast through dropoff confirm) — "
+                    f"check_convergence: DROPOFF_NAIL (inner confirm) — "
                     f"{dist_m:.0f}m at {current_speed_mph:.1f}mph"
                 )
-                return ('HOLD', 'IN_TRIP', dist_m)
+                return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m)
 
-        elif dist_m < ARMED_RADIUS_M:
-            # Armed zone — aggressive continuous refinement, no speed gate
+            # Watchdog A — Duration Fuse (normal drops + hot swaps)
+            if (current_speed_mph < WATCHDOG_A_SPEED_MPH and
+                    stopped_seconds >= WATCHDOG_A_DURATION_S):
+                logging.info(
+                    f"check_convergence: DROPOFF_NAIL (Watchdog A) — "
+                    f"{dist_m:.0f}m stopped {stopped_seconds}s at {current_speed_mph:.1f}mph"
+                )
+                return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m)
+
+            # Watchdog B — record micro-stop candidate
+            if (WATCHDOG_B_MIN_S <= stopped_seconds <= WATCHDOG_B_MAX_S and
+                    current_speed_mph < WATCHDOG_B_SPEED_MPH):
+                logging.info(
+                    f"check_convergence: SET_CANDIDATE (Watchdog B) — "
+                    f"{current_lat:.5f},{current_lng:.5f} stopped {stopped_seconds}s"
+                )
+                return ('SET_CANDIDATE', 'IN_TRIP', dist_m, (current_lat, current_lng))
+
+            # Existing armed-zone refinement (kept for compatibility)
             if dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
                 logging.info(
                     f"check_convergence: REFINE_DROPOFF (armed) — {dist_m:.0f}m "
                     f"(was {effective_error:.0f}m) at {current_speed_mph:.1f}mph"
                 )
                 return ('REFINE_DROPOFF', 'IN_TRIP', dist_m)
-            return ('HOLD', 'IN_TRIP', dist_m)
 
         else:
-            # Outside armed zone — refine if improving
             if dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
                 return ('REFINE', 'IN_TRIP', dist_m)
+
+        # Watchdog B — departure detection (checked regardless of armed radius)
+        if candidate_lat is not None and candidate_lng is not None:
+            cur.execute(
+                "SELECT app_private.distance_miles(%s,%s,%s,%s) * 1609.34 AS dist_m",
+                (current_lat, current_lng, candidate_lat, candidate_lng)
+            )
+            dist_from_candidate_m = float(cur.fetchone()['dist_m'])
+            if (dist_from_candidate_m > DEPARTURE_DISTANCE_M and
+                    current_speed_mph > DEPARTURE_SPEED_MPH):
+                logging.info(
+                    f"check_convergence: DROPOFF_NAIL_B (Watchdog B departure) — "
+                    f"retroactive nail at candidate, {dist_from_candidate_m:.0f}m departed"
+                )
+                return ('DROPOFF_NAIL_B', 'UNCOMMITTED', dist_from_candidate_m,
+                        (candidate_lat, candidate_lng))
 
     return ('HOLD', state, None)

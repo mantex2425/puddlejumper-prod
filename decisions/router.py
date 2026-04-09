@@ -7,7 +7,7 @@ import json
 import traceback
 import logging
 from arc_band import correct_dropoff, get_street_geometry
-from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords
+from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords, _write_geocode_cache
 
 from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
@@ -383,7 +383,23 @@ def make_decision():
 
         logging.info(f"[TIMER] TOTAL decision time: {(time.time()-_t0)*1000:.0f}ms")
 
-        # ── Stage 7: Always return ─────────────────────────────────────
+        # ── Stage 7: Seed geocode cache with Android coords (free, non-blocking) ──
+        try:
+            pickup_address  = ep.get("pickup_address")
+            dropoff_address = ep.get("dropoff_address")
+            p_lat = ep.get("p_lat")
+            p_lng = ep.get("p_lng")
+            d_lat = ep.get("d_lat")
+            d_lng = ep.get("d_lng")
+            if pickup_address and p_lat and p_lng:
+                _write_geocode_cache(pickup_address, p_lat, p_lng, cur)
+            if dropoff_address and d_lat and d_lng:
+                _write_geocode_cache(dropoff_address, d_lat, d_lng, cur)
+            conn.commit()
+        except Exception as _ce:
+            logging.warning(f"[CACHE] Geocode seed failed (non-fatal): {_ce}")
+
+        # ── Stage 8: Always return ─────────────────────────────────────
         return jsonify(result), 200
 
     except Exception as e:
@@ -567,6 +583,15 @@ def harvest_offer():
             dollars_per_mile, effective_hourly_rate,
             is_surge, ride_type
         ))
+
+        # Seed geocode cache with Android-supplied coords (free data, guaranteed commit)
+        try:
+            if pickup_address and pickup_lat and pickup_lng:
+                _write_geocode_cache(pickup_address, pickup_lat, pickup_lng, cur)
+            if dropoff_address and dropoff_lat and dropoff_lng:
+                _write_geocode_cache(dropoff_address, dropoff_lat, dropoff_lng, cur)
+        except Exception as _cache_err:
+            logging.warning(f"[CACHE] Geocode seed failed (non-fatal): {_cache_err}")
 
         conn.commit()
 

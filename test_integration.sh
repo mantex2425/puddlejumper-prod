@@ -15,6 +15,20 @@ FAIL="❌ FAIL"
 FAILURES=0
 TOTAL=0
 
+# ── Reset test driver state before every run ──────────────────────────────────
+$DB -c "
+UPDATE app_private.driver_trip_state
+SET state = 'UNCOMMITTED',
+    pickup_lat = NULL, pickup_lng = NULL,
+    dropoff_lat = NULL, dropoff_lng = NULL,
+    nailed_pickup_lat = NULL, nailed_pickup_lng = NULL,
+    nailed_pickup_error_m = NULL,
+    nailed_dropoff_lat = NULL, nailed_dropoff_lng = NULL,
+    nailed_dropoff_error_m = NULL,
+    current_offer_id = NULL
+WHERE driver_id = '$DRIVER';" > /dev/null 2>&1
+echo "🔄 Test driver state reset to UNCOMMITTED"
+
 # Houston test coordinates
 PICKUP_LAT="29.76303018910312"
 PICKUP_LNG="-95.37312533793694"

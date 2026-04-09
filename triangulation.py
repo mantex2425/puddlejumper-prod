@@ -320,6 +320,10 @@ def triangulate_pickup(
             google_coords = _google_geocode(street_name)
             if google_coords:
                 _write_geocode_cache(street_name, google_coords[0], google_coords[1], cur)
+                try:
+                    cur.connection.commit()
+                except Exception as _commit_err:
+                    logging.warning(f"[CACHE] Geocode cache commit failed: {_commit_err}")
         if google_coords:
             g_lat, g_lng = google_coords
             if True:  # Total Trust in Google Address

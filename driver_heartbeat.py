@@ -22,6 +22,20 @@ driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
 # ── Module-level executor — one instance, never recreated per heartbeat ────────
 _refine_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
+# ── Dual-Watchdog state tracking (module-level, reset on restart) ─────────────
+_stopped_since   = None   # datetime when speed dropped below threshold
+_candidate_lat   = None   # most recent micro-stop lat
+_candidate_lng   = None   # most recent micro-stop lng
+_candidate_at    = None   # timestamp of micro-stop
+
+def _reset_watchdog_state():
+    """Clear candidate and stopped timer. Call on transition to UNCOMMITTED."""
+    global _stopped_since, _candidate_lat, _candidate_lng, _candidate_at
+    _stopped_since = None
+    _candidate_lat = None
+    _candidate_lng = None
+    _candidate_at  = None
+
 
 def _queue_refine(driver_id, plat, plng, dlat, dlng, trip_miles, label):
     """Submit a background dropoff refinement. Never raises."""
@@ -57,6 +71,7 @@ def _get_trip_miles(driver_id, cur):
 @require_firebase_auth
 @driver_heartbeat_bp.route("/driver/heartbeat", methods=["POST"])
 def post_heartbeat():
+    global _candidate_lat, _candidate_lng, _candidate_at, _stopped_since
     try:
         driver_id = verify_and_get_user_id(request)
         body = request.get_json(silent=True) or {}
@@ -109,15 +124,20 @@ def post_heartbeat():
             return jsonify({"status": "ok", "driverState": driverState}), 200
 
         cur.execute("""
-            SELECT state, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-                   nailed_pickup_lat, nailed_pickup_lng,
-                   nailed_pickup_error_m, nailed_dropoff_error_m,
-                   state_updated_at,
+            SELECT dts.state, dts.pickup_lat, dts.pickup_lng, dts.dropoff_lat, dts.dropoff_lng,
+                   dts.nailed_pickup_lat, dts.nailed_pickup_lng,
+                   dts.nailed_pickup_error_m, dts.nailed_dropoff_error_m,
+                   dts.state_updated_at,
                    EXTRACT(EPOCH FROM (
-                       NOW() - state_updated_at
-                   ))::integer AS state_seconds
-            FROM app_private.driver_trip_state
-            WHERE driver_id = %s
+                       NOW() - dts.state_updated_at
+                   ))::integer AS state_seconds,
+                   oh.dropoff_address
+            FROM app_private.driver_trip_state dts
+            LEFT JOIN app_private.decision_log dl
+                   ON dl.id = dts.current_offer_id::integer
+            LEFT JOIN app_private.offer_history oh
+                   ON oh.decision_log_id = dl.id
+            WHERE dts.driver_id = %s
         """, (driver_id,))
         state_row = cur.fetchone()
 
@@ -152,10 +172,18 @@ def post_heartbeat():
                               _dlat, _dlng, tm, 'IN_TRIP')
 
         # ── Convergence check ──────────────────────────────────────────────────
-        verdict, new_state, new_error_m = check_convergence(
+        _raw = check_convergence(
             driver_id, current_lat, current_lng,
-            speed_mph, state_row, cur
+            speed_mph, state_row, cur,
+            stopped_seconds=stopped_seconds or 0,
+            candidate_lat=_candidate_lat,
+            candidate_lng=_candidate_lng,
         )
+        if len(_raw) == 4:
+            verdict, new_state, new_error_m, _extra = _raw
+        else:
+            verdict, new_state, new_error_m = _raw
+            _extra = None
         logging.info(
             f"[HEARTBEAT] convergence verdict={verdict} "
             f"state={_s}->new={new_state} error={new_error_m}"
@@ -163,6 +191,9 @@ def post_heartbeat():
 
         # ── Apply verdict — all transitions use _write_state_transition ────────
         _just_nailed_pickup = False  # set True when INITIAL_NAIL fires this heartbeat
+        if new_state == 'UNCOMMITTED':
+            _reset_watchdog_state()
+            logging.info("[WATCHDOG] State reset to UNCOMMITTED — cleared candidate stack")
         if verdict == 'INITIAL_NAIL':
             # ENROUTE → IN_TRIP: nail pickup, transition state
             write_nailed_position(cur, driver_id, 'pickup',
@@ -280,6 +311,21 @@ def post_heartbeat():
                 clear_coords=True,
             )
             logging.warning(f"S31 DROPOFF_NAIL: IN_TRIP->UNCOMMITTED at {new_error_m or 0:.0f}m")
+            driverState = "UNCOMMITTED"
+
+        elif verdict == 'SET_CANDIDATE':
+            # Watchdog B: record micro-stop position
+            _candidate_lat, _candidate_lng = _extra
+            logging.info(f"[WATCHDOG_B] Candidate recorded at {_candidate_lat:.5f},{_candidate_lng:.5f}")
+
+        elif verdict == 'DROPOFF_NAIL_B':
+            # Watchdog B retroactive: nail at candidate coords, not current position
+            nail_lat, nail_lng = _extra
+            write_nailed_position(cur, driver_id, 'dropoff', nail_lat, nail_lng, new_error_m)
+            DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                clear_coords=True,
+            )
+            logging.warning(f"S31 DROPOFF_NAIL_B (retroactive): IN_TRIP->UNCOMMITTED at {new_error_m or 0:.0f}m")
             driverState = "UNCOMMITTED"
 
         elif verdict == 'REFINE_PICKUP':
