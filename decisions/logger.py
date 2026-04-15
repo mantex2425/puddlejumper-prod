@@ -139,13 +139,18 @@ def patch_decision_log(cur, conn, decision_log_id, result):
     if not decision_log_id:
         return
     try:
-        enriched = {k: result.get(k) for k in (
+        potential_keys = (
             "driverState",
             "confidenceTier",         "confidenceRadius",
             "odometerFloor",          "odometerCeiling",
             "triangulatedPickupLat",  "triangulatedPickupLng",
             "triangulatedDropoffLat", "triangulatedDropoffLng",
-        )}
+            "radarHourly",            "radarMileage",
+            "radarPointCount",        "radarAvgDistM",
+            "radarConfidence",        "radarLatencyMs",
+            "radarVsHexDelta",
+        )
+        enriched = {k: result.get(k) for k in potential_keys if result.get(k) is not None}
         cur.execute("""
             UPDATE app_private.decision_log
             SET decision_result = decision_result || %s::jsonb

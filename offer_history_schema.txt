@@ -1,0 +1,64 @@
+                                                Table "app_private.offer_history"
+         Column         |           Type           | Collation | Nullable |                        Default                        
+------------------------+--------------------------+-----------+----------+-------------------------------------------------------
+ id                     | bigint                   |           | not null | nextval('app_private.offer_history_id_seq'::regclass)
+ created_at             | timestamp with time zone |           |          | now()
+ day_of_year            | smallint                 |           |          | 
+ day_of_week            | smallint                 |           |          | 
+ hour_of_day            | smallint                 |           |          | 
+ driver_lat             | double precision         |           |          | 
+ driver_lng             | double precision         |           |          | 
+ driver_h3              | text                     |           |          | 
+ pickup_lat             | double precision         |           |          | 
+ pickup_lng             | double precision         |           |          | 
+ pickup_h3              | text                     |           |          | 
+ pickup_address         | text                     |           |          | 
+ pickup_miles           | numeric(5,2)             |           |          | 
+ pickup_minutes         | smallint                 |           |          | 
+ dropoff_lat            | double precision         |           |          | 
+ dropoff_lng            | double precision         |           |          | 
+ dropoff_h3             | text                     |           |          | 
+ dropoff_address        | text                     |           |          | 
+ trip_miles             | numeric(5,2)             |           |          | 
+ trip_minutes           | smallint                 |           |          | 
+ fare                   | numeric(10,2)            |           |          | 
+ ride_type              | character varying(50)    |           |          | 
+ is_surge               | boolean                  |           |          | false
+ is_priority            | boolean                  |           |          | false
+ is_reserve             | boolean                  |           |          | false
+ effective_hourly_rate  | numeric(10,2)            |           |          | 
+ dollars_per_mile       | numeric(10,2)            |           |          | 
+ confidence_score       | double precision         |           |          | 
+ is_validated           | boolean                  |           |          | true
+ validation_flags       | text[]                   |           |          | 
+ app_verdict            | character varying(10)    |           |          | 
+ app_reason             | text                     |           |          | 
+ mode_at_decision       | character varying(20)    |           |          | 
+ market_name            | character varying(100)   |           |          | 
+ actual_pickup_lat      | double precision         |           |          | 
+ actual_pickup_lng      | double precision         |           |          | 
+ actual_pickup_h3       | text                     |           |          | 
+ actual_pickup_at       | timestamp with time zone |           |          | 
+ pickup_error_m         | double precision         |           |          | 
+ pickup_classification  | text                     |           |          | 
+ actual_dropoff_lat     | double precision         |           |          | 
+ actual_dropoff_lng     | double precision         |           |          | 
+ actual_dropoff_h3      | text                     |           |          | 
+ actual_dropoff_at      | timestamp with time zone |           |          | 
+ dropoff_error_m        | double precision         |           |          | 
+ dropoff_classification | text                     |           |          | 
+ pickup_data_source     | text                     |           |          | 
+ decision_log_id        | integer                  |           |          | 
+Indexes:
+    "offer_history_pkey" PRIMARY KEY, btree (id)
+    "idx_offer_history_decision_log_id" btree (decision_log_id)
+    "idx_offer_history_dow_hour" btree (day_of_week, hour_of_day) WHERE is_validated = true
+    "idx_oh_created" btree (created_at DESC)
+    "idx_oh_dropoff_h3" btree (dropoff_h3)
+    "idx_oh_pickup_h3_time" btree (pickup_h3, day_of_week, hour_of_day)
+    "idx_oh_validated" btree (is_validated) WHERE is_validated
+Foreign-key constraints:
+    "offer_history_decision_log_id_fkey" FOREIGN KEY (decision_log_id) REFERENCES app_private.decision_log(id)
+Triggers:
+    trg_offer_history_time_fields BEFORE INSERT ON app_private.offer_history FOR EACH ROW EXECUTE FUNCTION app_private.set_offer_history_time_fields()
+

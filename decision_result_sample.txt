@@ -1,0 +1,48 @@
+  id  |                   jsonb_pretty                   
+------+--------------------------------------------------
+ 5376 | {                                               +
+      |     "netPay": 5.47,                             +
+      |     "reason": "Rates met",                      +
+      |     "verdict": "ACCEPT",                        +
+      |     "hourlyRate": 21.88,                        +
+      |     "driverState": "UNCOMMITTED",               +
+      |     "deadheadCost": 0.0,                        +
+      |     "switchToMode": null,                       +
+      |     "deadheadMiles": 0.0,                       +
+      |     "odometerFloor": 0.92,                      +
+      |     "confidenceTier": "high",                   +
+      |     "dollarsPerMile": 0.97,                     +
+      |     "arrivalDetected": false,                   +
+      |     "odometerCeiling": 1.4,                     +
+      |     "thresholdSource": "market_rate",           +
+      |     "confidenceRadius": 400,                    +
+      |     "switchToMarketId": null,                   +
+      |     "triangulatedPickupLat": 29.53157179806369, +
+      |     "triangulatedPickupLng": -95.7794413013327, +
+      |     "triangulatedDropoffLat": 29.50951478950542,+
+      |     "triangulatedDropoffLng": -95.73323649900769+
+      | }
+ 5380 | {                                               +
+      |     "netPay": 19.69,                            +
+      |     "reason": "Rates met",                      +
+      |     "verdict": "ACCEPT",                        +
+      |     "hourlyRate": 25.14,                        +
+      |     "driverState": "UNCOMMITTED",               +
+      |     "deadheadCost": 0.0,                        +
+      |     "switchToMode": null,                       +
+      |     "deadheadMiles": 0.0,                       +
+      |     "odometerFloor": 0.92,                      +
+      |     "confidenceTier": "high",                   +
+      |     "dollarsPerMile": 0.78,                     +
+      |     "arrivalDetected": false,                   +
+      |     "odometerCeiling": 1.4,                     +
+      |     "thresholdSource": "dignity_floor",         +
+      |     "confidenceRadius": 400,                    +
+      |     "switchToMarketId": null,                   +
+      |     "triangulatedPickupLat": 29.563896191390576,+
+      |     "triangulatedPickupLng": -95.71063289646426,+
+      |     "triangulatedDropoffLat": 29.47696230300658,+
+      |     "triangulatedDropoffLng": -95.45599752202666+
+      | }
+(2 rows)
+
