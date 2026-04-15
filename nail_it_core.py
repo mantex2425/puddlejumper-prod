@@ -393,15 +393,35 @@ def check_convergence(driver_id, current_lat, current_lng,
             if (WATCHDOG_B_MIN_S <= stopped_seconds <= WATCHDOG_B_MAX_S and
                     current_speed_mph < WATCHDOG_B_SPEED_MPH):
                 if dist_m <= 500.0:
-                    logging.info(
-                        f"check_convergence: SET_CANDIDATE (Watchdog B) — "
-                        f"{current_lat:.5f},{current_lng:.5f} stopped {stopped_seconds}s dist={dist_m:.0f}m"
-                    )
+                    # ── High Score promotion logging ──────────────────────────
+                    if candidate_lat is not None and candidate_lng is not None:
+                        cur.execute(
+                            "SELECT app_private.distance_miles(%s,%s,%s,%s) * 1609.34 AS prev_dist_m",
+                            (candidate_lat, candidate_lng,
+                             state_row.get('dropoff_lat'), state_row.get('dropoff_lng'))
+                        )
+                        _prev = cur.fetchone()
+                        _prev_dist = float(_prev['prev_dist_m']) if _prev and _prev['prev_dist_m'] else 9999.0
+                        if dist_m < _prev_dist:
+                            logging.info(
+                                f"[HIGH_SCORE] 🏆 PROMOTED: {dist_m:.0f}m beats previous {_prev_dist:.0f}m — "
+                                f"new candidate {current_lat:.5f},{current_lng:.5f}"
+                            )
+                        else:
+                            logging.info(
+                                f"[HIGH_SCORE] ⚪ IGNORED: {dist_m:.0f}m worse than current best {_prev_dist:.0f}m — "
+                                f"keeping existing candidate"
+                            )
+                            return ('HOLD', state, None)
+                    else:
+                        logging.info(
+                            f"[HIGH_SCORE] 🎯 FIRST CANDIDATE: {dist_m:.0f}m from pin — "
+                            f"{current_lat:.5f},{current_lng:.5f} stopped {stopped_seconds}s"
+                        )
                     return ('SET_CANDIDATE', 'IN_TRIP', dist_m, (current_lat, current_lng))
                 else:
                     logging.info(
-                        f"check_convergence: CANDIDATE REJECTED (Watchdog B) — "
-                        f"stop at {dist_m:.0f}m exceeds 500m proximity gate"
+                        f"[HIGH_SCORE] ❌ REJECTED: stop at {dist_m:.0f}m exceeds 500m proximity gate"
                     )
 
             # Existing armed-zone refinement (kept for compatibility)
