@@ -179,7 +179,13 @@ def is_vague_address(address: str) -> bool:
     lower = address.lower()
     return any(kw in lower for kw in VAGUE_KEYWORDS)
 def get_pickup_confirm_radius(address: str) -> int:
-    """Return pickup confirm radius based on address type."""
+    """Return pickup confirm radius based on address type.
+    null address  → 1000m (triangulation only, max uncertainty)
+    vague address → 800m  (road/highway centroid)
+    precise       → 200m  (hard lock)
+    """
+    if not address:
+        return 1000
     if is_vague_address(address):
         return 800
     return 200
