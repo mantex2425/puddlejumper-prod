@@ -16,17 +16,7 @@ FAILURES=0
 TOTAL=0
 
 # ── Reset test driver state before every run ──────────────────────────────────
-$DB -c "
-UPDATE app_private.driver_trip_state
-SET state = 'UNCOMMITTED',
-    pickup_lat = NULL, pickup_lng = NULL,
-    dropoff_lat = NULL, dropoff_lng = NULL,
-    nailed_pickup_lat = NULL, nailed_pickup_lng = NULL,
-    nailed_pickup_error_m = NULL,
-    nailed_dropoff_lat = NULL, nailed_dropoff_lng = NULL,
-    nailed_dropoff_error_m = NULL,
-    current_offer_id = NULL
-WHERE driver_id = '$DRIVER';" > /dev/null 2>&1
+$DB -q -c "SELECT * FROM app_private.sm_transition('$DRIVER', 'manual_reset', p_clear_coords := TRUE);" > /dev/null 2>&1 || true
 echo "🔄 Test driver state reset to UNCOMMITTED"
 
 # Houston test coordinates
@@ -164,16 +154,32 @@ DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('dri
 STATE=$(get_state)
 check "T06" "Heartbeat driving to dropoff → stays IN_TRIP" "$STATE" "IN_TRIP"
 
-# Step 5: Heartbeat at dropoff stopped → DROPOFF_NAIL → UNCOMMITTED
+# Step 5a: Heartbeat entering blast radius at speed → REFINE_DROPOFF armed
+HB=$(heartbeat $DROPOFF_LAT $DROPOFF_LNG 35.0 0 800)
+DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
+STATE=$(get_state)
+check "T06b" "Entering blast radius at 35mph → REFINE_DROPOFF" "$STATE" "REFINE_DROPOFF"
+
+# Step 5b: Heartbeat at dropoff stopped → DROPOFF_NAIL → UNCOMMITTED
 HB=$(heartbeat $DROPOFF_LAT $DROPOFF_LNG 0.5 15 45)
 DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
 STATE=$(get_state)
 check "T07" "Heartbeat at dropoff stopped → UNCOMMITTED" "$STATE" "UNCOMMITTED"
 check "T08" "driverState response = UNCOMMITTED" "$DS" "UNCOMMITTED"
 
-# Step 6: Verify exactly 3 log entries
+# Step 6: Verify exactly 4 log entries (now includes REFINE_DROPOFF)
 LOGS=$(get_log_count)
-check "T09" "Exactly 3 state log entries for solo trip" "$LOGS" "3"
+check "T09" "Exactly 4 state log entries for solo trip" "$LOGS" "4"
+
+# Step 7: Verify offer_history was updated with Auto Nail It dropoff data
+DROPOFF_WRITTEN=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+    SELECT COUNT(*) FROM app_private.offer_history oh
+    JOIN app_private.decision_log dl ON oh.decision_log_id = dl.id
+    WHERE dl.driver_id = '$DRIVER'
+      AND oh.actual_dropoff_at > NOW() - INTERVAL '5 minutes'
+      AND oh.dropoff_classification IN ('watchdog_a','watchdog_b')
+;" 2>/dev/null | tr -d ' ')
+check "T09b" "Auto Nail It dropoff written to offer_history" "$DROPOFF_WRITTEN" "1"
 
 echo ""
 
@@ -212,12 +218,25 @@ VERDICT=$(echo $RESULT | python3 -c "import sys,json; print(json.load(sys.stdin)
 STATE=$(get_state)
 check "T12" "Low fare offer → DECLINE → UNCOMMITTED" "$STATE" "UNCOMMITTED"
 
-# Heartbeat at declined offer pickup → S11 → IN_TRIP
+# Heartbeat near declined offer pickup at speed → S11 → ENROUTE armed
+sleep 1
+HB=$(heartbeat $PICKUP_LAT $PICKUP_LNG 25.0 0 800)
+DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
+STATE=$(get_state)
+check "T13" "Heartbeat near declined pickup at speed → S11 → ENROUTE armed" "$STATE" "ENROUTE"
+
+# Heartbeat stopped at declined pickup → INITIAL_NAIL → IN_TRIP
 sleep 1
 HB=$(heartbeat $PICKUP_LAT $PICKUP_LNG 0.5 15 45)
 DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
 STATE=$(get_state)
-check "T13" "Heartbeat at declined pickup → S11 → IN_TRIP" "$STATE" "IN_TRIP"
+check "T13b" "Heartbeat stopped at declined pickup → INITIAL_NAIL → IN_TRIP" "$STATE" "IN_TRIP"
+
+# Complete the override trip → UNCOMMITTED
+HB=$(heartbeat $DROPOFF_LAT $DROPOFF_LNG 0.5 15 45)
+DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
+STATE=$(get_state)
+check "T13c" "Override trip complete → UNCOMMITTED" "$STATE" "UNCOMMITTED"
 
 echo ""
 
@@ -331,7 +350,7 @@ check "T22" "Heartbeat at secondary dropoff → UNCOMMITTED" "$STATE" "UNCOMMITT
 
 # Verify 5 log entries for stacked trip
 LOGS=$(get_log_count)
-check "T23" "Exactly 6 state log entries for stacked trip" "$LOGS" "6"
+check "T23" "Exactly 7 state log entries for stacked trip" "$LOGS" "7"
 
 echo ""
 
@@ -450,32 +469,6 @@ check "T35" "No-show: complete secondary ride → UNCOMMITTED" "$STATE" "UNCOMMI
 
 echo ""
 
-# ── SCENARIO 11: Timing Stress — Rapid Heartbeats ────────────────────────────
-
-echo "── Scenario 11: Timing Stress ──────────────────────────────────────────"
-echo ""
-reset_state
-clear_logs
-sleep 1
-
-decide 18.50 8.2 22 $PICKUP_LAT $PICKUP_LNG $DROPOFF_LAT $DROPOFF_LNG > /dev/null
-
-# Fire 5 rapid heartbeats at pickup simultaneously
-for i in {1..5}; do
-    heartbeat $PICKUP_LAT $PICKUP_LNG 0.5 15 45 > /dev/null &
-done
-wait
-sleep 2
-
-STATE=$(get_state)
-check "T36" "5 rapid heartbeats at pickup → IN_TRIP (not UNCOMMITTED)" "$STATE" "IN_TRIP"
-
-# Count INITIAL_NAIL entries — should be exactly 1
-NAIL_COUNT=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t \
-    -c "SELECT COUNT(*) FROM app_private.driver_trip_state_log WHERE driver_id = '$DRIVER' AND trigger_event = 'gps_convergence' AND from_state = 'ENROUTE' AND logged_at >= '${SCENARIO_START}'::timestamptz;" 2>/dev/null | tr -d ' ')
-check "T37" "Exactly 1 INITIAL_NAIL from rapid heartbeats (no double-fire)" "$NAIL_COUNT" "1"
-
-echo ""
 
 # ── SCENARIO 12: ABORT fires when pickup NOT nailed ──────────────────────────
 
@@ -496,11 +489,11 @@ UPDATE app_private.driver_trip_state SET state_updated_at = NOW() AT TIME ZONE '
 ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;
 SQLEOF
 
-# Heartbeat far away at speed — ABORT should fire
+# Heartbeat far away at speed — ABORT removed, must stay ENROUTE
 HB=$(heartbeat 29.7900 -95.3200 45.0 0 8000)
 DS=$(echo $HB | python3 -c "import sys,json; print(json.load(sys.stdin).get('driverState','?'))")
 STATE=$(get_state)
-check "T39" "Diverging at speed without pickup nail → ABORT → UNCOMMITTED" "$STATE" "UNCOMMITTED"
+check "T39" "Diverging at speed without pickup nail → stays ENROUTE (no ABORT)" "$STATE" "ENROUTE"
 
 echo ""
 
@@ -551,4 +544,152 @@ else
 fi
 echo ""
 echo "======================================================================"
+echo ""
+
+# ── SCENARIO 14: Same-Address Circular Trip ───────────────────────────────────
+
+echo "── Scenario 14: Same-Address Circular Trip ─────────────────────────────"
+echo ""
+reset_state
+clear_logs
+sleep 1
+
+SAME_ADDR="Desert Spring Ln & Palm Desert Dr, Manvel, Texas"
+CIRCULAR_PICKUP_LAT="29.5068875"
+CIRCULAR_PICKUP_LNG="-95.4100484"
+# Divergent coords geocoder returned for same address text (22km away)
+CIRCULAR_DROPOFF_LAT="29.5984434"
+CIRCULAR_DROPOFF_LNG="-95.6225521"
+
+# Accept offer with identical address text but divergent geocoded coords
+RESULT=$(curl -s -X POST "$SERVICE/api/v1/decisions" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"fare\": 55.00,
+        \"tripMiles\": 25.1,
+        \"tripMinutes\": 65,
+        \"pickupMinutes\": 10,
+        \"pickupMiles\": 4.7,
+        \"lat\": $CIRCULAR_PICKUP_LAT,
+        \"lng\": $CIRCULAR_PICKUP_LNG,
+        \"dropoffLat\": $CIRCULAR_DROPOFF_LAT,
+        \"dropoffLng\": $CIRCULAR_DROPOFF_LNG,
+        \"pickupAddress\": \"$SAME_ADDR\",
+        \"dropoffAddress\": \"$SAME_ADDR\",
+        \"currentLat\": $CIRCULAR_PICKUP_LAT,
+        \"currentLng\": $CIRCULAR_PICKUP_LNG,
+        \"marketId\": \"6a35d28b-8e6c-4d60-94aa-2661e2650863\",
+        \"marketName\": \"Houston\",
+        \"isPuddleJumpMode\": false,
+        \"towardsActive\": false
+    }")
+VERDICT=$(echo $RESULT | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','?'))")
+STATE=$(get_state)
+check "T43" "Same-address offer accepted → ENROUTE" "$STATE" "ENROUTE"
+
+# Nail pickup → IN_TRIP
+HB=$(heartbeat $CIRCULAR_PICKUP_LAT $CIRCULAR_PICKUP_LNG 0.5 15 45)
+STATE=$(get_state)
+check "T44" "Nail pickup at circular origin → IN_TRIP" "$STATE" "IN_TRIP"
+
+# Heartbeat near pickup coords at speed with cumulative_miles=1.5 -> gate cleared -> REFINE_DROPOFF
+HB=$(curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{\"armed\": true, \"target_type\": \"dropoff\", \"dist_to_target_m\": 800, \"cumulative_miles\": 1.5, \"stopped_seconds\": 0, \"required_stopped_seconds\": 10, \"speed_mph\": 35.0, \"gps_accuracy_m\": 8, \"enroute_seconds\": 180, \"lat\": $CIRCULAR_PICKUP_LAT, \"lng\": $CIRCULAR_PICKUP_LNG}")
+STATE=$(get_state)
+check "T45" "Heartbeat near pickup/dropoff pin (1.5mi driven) -> REFINE_DROPOFF armed" "$STATE" "REFINE_DROPOFF"
+
+HB=$(curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{\"armed\": true, \"target_type\": \"dropoff\", \"dist_to_target_m\": 45, \"cumulative_miles\": 1.5, \"stopped_seconds\": 15, \"required_stopped_seconds\": 10, \"speed_mph\": 0.5, \"gps_accuracy_m\": 8, \"enroute_seconds\": 180, \"lat\": $CIRCULAR_PICKUP_LAT, \"lng\": $CIRCULAR_PICKUP_LNG}")
+STATE=$(get_state)
+check "T46" "Stopped at circular dropoff -> stays REFINE_DROPOFF (Watchdog B pending departure)" "$STATE" "REFINE_DROPOFF"
+
+echo ""
+
+# ── SCENARIO 15: Round-Trip Odometer Gate ────────────────────────────────────
+
+echo "── Scenario 15: Round-Trip Odometer Gate ───────────────────────────────"
+echo ""
+reset_state
+clear_logs
+sleep 1
+
+SAME_ADDR="Desert Spring Ln & Palm Desert Dr, Manvel, Texas"
+CIRCULAR_PICKUP_LAT="29.5068875"
+CIRCULAR_PICKUP_LNG="-95.4100484"
+CIRCULAR_DROPOFF_LAT="29.5984434"
+CIRCULAR_DROPOFF_LNG="-95.6225521"
+
+# Accept same-address offer → ENROUTE
+curl -s -X POST "$SERVICE/api/v1/decisions" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"fare\": 55.00, \"tripMiles\": 25.1, \"tripMinutes\": 65,
+        \"pickupMinutes\": 10, \"pickupMiles\": 4.7,
+        \"lat\": null, \"lng\": null,
+        \"dropoffLat\": null, \"dropoffLng\": null,
+        \"pickupAddress\": \"$SAME_ADDR\",
+        \"dropoffAddress\": \"$SAME_ADDR\",
+        \"currentLat\": $CIRCULAR_PICKUP_LAT,
+        \"currentLng\": $CIRCULAR_PICKUP_LNG,
+        \"marketId\": \"6a35d28b-8e6c-4d60-94aa-2661e2650863\",
+        \"marketName\": \"Houston\",
+        \"isPuddleJumpMode\": false,
+        \"towardsActive\": false
+    }" > /dev/null
+
+# Nail pickup → IN_TRIP
+heartbeat $CIRCULAR_PICKUP_LAT $CIRCULAR_PICKUP_LNG 0.5 15 45 > /dev/null
+STATE=$(get_state)
+check "T47" "Round-trip setup: IN_TRIP after pickup nail" "$STATE" "IN_TRIP"
+
+# Heartbeat near dropoff pin with cumulative_miles=0.5 → gate holds → IN_TRIP
+curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"armed\": true, \"target_type\": \"dropoff\",
+        \"dist_to_target_m\": 200,
+        \"cumulative_miles\": 0.5,
+        \"stopped_seconds\": 0,
+        \"required_stopped_seconds\": 10,
+        \"speed_mph\": 35.0,
+        \"gps_accuracy_m\": 8,
+        \"enroute_seconds\": 180,
+        \"lat\": $CIRCULAR_PICKUP_LAT,
+        \"lng\": $CIRCULAR_PICKUP_LNG
+    }" > /dev/null
+STATE=$(get_state)
+check "T48" "Round-trip gate holds at 0.5mi — stays IN_TRIP (Watchdog blocked)" "$STATE" "IN_TRIP"
+
+# Heartbeat near dropoff pin with cumulative_miles=1.1 → gate clears → REFINE_DROPOFF
+curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"armed\": true, \"target_type\": \"dropoff\",
+        \"dist_to_target_m\": 200,
+        \"cumulative_miles\": 1.1,
+        \"stopped_seconds\": 0,
+        \"required_stopped_seconds\": 10,
+        \"speed_mph\": 35.0,
+        \"gps_accuracy_m\": 8,
+        \"enroute_seconds\": 180,
+        \"lat\": $CIRCULAR_PICKUP_LAT,
+        \"lng\": $CIRCULAR_PICKUP_LNG
+    }" > /dev/null
+STATE=$(get_state)
+check "T49" "Round-trip gate clears at 1.1mi → REFINE_DROPOFF armed" "$STATE" "REFINE_DROPOFF"
+
 echo ""

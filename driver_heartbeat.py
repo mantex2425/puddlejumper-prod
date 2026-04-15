@@ -109,6 +109,8 @@ def post_heartbeat():
                 "speed_mph":                speed_mph,
                 "gps_accuracy_m":           gps_accuracy_m,
                 "enroute_seconds":          enroute_seconds,
+                "lat":                      current_lat,
+                "lng":                      current_lng,
                 "received_at":              datetime.datetime.now().isoformat(),
             }),
             driver_id
@@ -120,18 +122,24 @@ def post_heartbeat():
         driverState = "UNCOMMITTED"
 
         if current_lat is None or current_lng is None or speed_mph is None:
-            logging.info("[HEARTBEAT] Missing GPS or speed — skipping convergence")
+            # Read real state from DB before returning — don't lie to Android
+            _state_check = DriverStateMachine.read(driver_id, cur)
+            if _state_check:
+                driverState = _state_check["state"]
+            logging.info(f"[HEARTBEAT] Missing GPS or speed — skipping convergence (state={driverState})")
             return jsonify({"status": "ok", "driverState": driverState}), 200
 
         cur.execute("""
             SELECT dts.state, dts.pickup_lat, dts.pickup_lng, dts.dropoff_lat, dts.dropoff_lng,
                    dts.nailed_pickup_lat, dts.nailed_pickup_lng,
                    dts.nailed_pickup_error_m, dts.nailed_dropoff_error_m,
+                   dts.current_offer_id,
                    dts.state_updated_at,
                    EXTRACT(EPOCH FROM (
                        NOW() - dts.state_updated_at
                    ))::integer AS state_seconds,
-                   oh.dropoff_address
+                   oh.dropoff_address,
+                   oh.pickup_address
             FROM app_private.driver_trip_state dts
             LEFT JOIN app_private.decision_log dl
                    ON dl.id = dts.current_offer_id::integer
@@ -178,6 +186,7 @@ def post_heartbeat():
             stopped_seconds=stopped_seconds or 0,
             candidate_lat=_candidate_lat,
             candidate_lng=_candidate_lng,
+            cumulative_miles=cumulative_miles,
         )
         if len(_raw) == 4:
             verdict, new_state, new_error_m, _extra = _raw
@@ -304,14 +313,89 @@ def post_heartbeat():
                     pass
 
         elif verdict == 'DROPOFF_NAIL':
-            # IN_TRIP → UNCOMMITTED: nail dropoff, full coord reset
+            # IN_TRIP → REFINE_DROPOFF → UNCOMMITTED: enforce linear path
             write_nailed_position(cur, driver_id, 'dropoff',
                                   current_lat, current_lng, new_error_m)
-            DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
-                clear_coords=True,
-            )
-            logging.warning(f"S31 DROPOFF_NAIL: IN_TRIP->UNCOMMITTED at {new_error_m or 0:.0f}m")
-            driverState = "UNCOMMITTED"
+            # ── Box 4: Close the audit loop ───────────────────────────
+            _offer_id = state_row.get('current_offer_id')
+            # For STACKED rides, current_offer_id points to the secondary offer.
+            # Find the primary offer (pickup confirmed, dropoff not yet confirmed).
+            _audit_id = _offer_id
+            if _s == 'STACKED':
+                try:
+                    cur.execute("""
+                        SELECT oh.decision_log_id
+                        FROM app_private.offer_history oh
+                        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                        WHERE dl.driver_id = %s
+                          AND oh.actual_pickup_at IS NOT NULL
+                          AND oh.actual_dropoff_at IS NULL
+                        ORDER BY oh.actual_pickup_at DESC
+                        LIMIT 1
+                    """, (driver_id,))
+                    _primary = cur.fetchone()
+                    if _primary:
+                        _audit_id = _primary['decision_log_id']
+                        logging.info(f"[S17] Audit lock: primary offer={_audit_id} (state had {_offer_id})")
+                except Exception as _al_err:
+                    logging.warning(f"[S17] Audit lock failed, falling back to {_offer_id}: {_al_err}")
+            if _audit_id:
+                try:
+                    cur.execute("SELECT app_private.safe_h3(%s,%s)::text AS h3",
+                                (current_lat, current_lng))
+                    _h3r = cur.fetchone()
+                    _actual_h3 = _h3r['h3'] if _h3r else None
+                    cur.execute("""
+                        UPDATE app_private.offer_history
+                        SET actual_dropoff_lat     = %s,
+                            actual_dropoff_lng     = %s,
+                            actual_dropoff_h3      = %s,
+                            actual_dropoff_at      = NOW(),
+                            dropoff_error_m        = %s,
+                            dropoff_classification = %s
+                        WHERE decision_log_id = %s::integer
+                    """, (current_lat, current_lng, _actual_h3,
+                          new_error_m, 'watchdog_a', _audit_id))
+                    logging.info(f"[HEARTBEAT] offer_history dropoff updated (watchdog_a) offer={_audit_id}")
+                except Exception as _oh_err:
+                    logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
+            if _s == 'STACKED':
+                # Atomic buffer swap — fetch secondary ride coords
+                _sec_dlat = _sec_dlng = _sec_dh3 = None
+                if _offer_id:
+                    cur.execute("""
+                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
+                        FROM app_private.offer_history
+                        WHERE decision_log_id = (
+                            SELECT id FROM app_private.decision_log
+                            WHERE driver_id = %s
+                            ORDER BY created_at DESC LIMIT 1
+                        ) LIMIT 1
+                    """, (driver_id,))
+                    _sec = cur.fetchone()
+                    if _sec:
+                        _sec_dlat = _sec["dropoff_lat"]
+                        _sec_dlng = _sec["dropoff_lng"]
+                        _sec_dh3  = _sec["dropoff_h3"]
+                        logging.info(f"[S17] Atomic buffer swap: secondary dropoff ({_sec_dlat:.4f},{_sec_dlng:.4f})")
+                DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    dropoff_lat=_sec_dlat,
+                    dropoff_lng=_sec_dlng,
+                    dropoff_h3=_sec_dh3,
+                )
+                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete")
+                driverState = "ENROUTE"
+                _s = "ENROUTE"
+            else:
+                if _s == 'IN_TRIP':
+                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                    _s = 'REFINE_DROPOFF'
+                    logging.warning(f"S31 DROPOFF_NAIL: IN_TRIP→REFINE_DROPOFF (arm+nail same heartbeat)")
+                DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    clear_coords=True,
+                )
+                logging.warning(f"S31 DROPOFF_NAIL: REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
+                driverState = "UNCOMMITTED"
 
         elif verdict == 'SET_CANDIDATE':
             # Watchdog B: record micro-stop position
@@ -319,14 +403,89 @@ def post_heartbeat():
             logging.info(f"[WATCHDOG_B] Candidate recorded at {_candidate_lat:.5f},{_candidate_lng:.5f}")
 
         elif verdict == 'DROPOFF_NAIL_B':
-            # Watchdog B retroactive: nail at candidate coords, not current position
+            # Watchdog B retroactive: nail at candidate coords, enforce linear path
             nail_lat, nail_lng = _extra
             write_nailed_position(cur, driver_id, 'dropoff', nail_lat, nail_lng, new_error_m)
-            DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
-                clear_coords=True,
-            )
-            logging.warning(f"S31 DROPOFF_NAIL_B (retroactive): IN_TRIP->UNCOMMITTED at {new_error_m or 0:.0f}m")
-            driverState = "UNCOMMITTED"
+            # ── Box 4: Close the audit loop ───────────────────────────
+            _offer_id = state_row.get('current_offer_id')
+            # For STACKED rides, current_offer_id points to the secondary offer.
+            # Find the primary offer (pickup confirmed, dropoff not yet confirmed).
+            _audit_id = _offer_id
+            if _s == 'STACKED':
+                try:
+                    cur.execute("""
+                        SELECT oh.decision_log_id
+                        FROM app_private.offer_history oh
+                        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                        WHERE dl.driver_id = %s
+                          AND oh.actual_pickup_at IS NOT NULL
+                          AND oh.actual_dropoff_at IS NULL
+                        ORDER BY oh.actual_pickup_at DESC
+                        LIMIT 1
+                    """, (driver_id,))
+                    _primary = cur.fetchone()
+                    if _primary:
+                        _audit_id = _primary['decision_log_id']
+                        logging.info(f"[S17] Audit lock (B): primary offer={_audit_id} (state had {_offer_id})")
+                except Exception as _al_err:
+                    logging.warning(f"[S17] Audit lock (B) failed, falling back to {_offer_id}: {_al_err}")
+            if _audit_id:
+                try:
+                    cur.execute("SELECT app_private.safe_h3(%s,%s)::text AS h3",
+                                (nail_lat, nail_lng))
+                    _h3r = cur.fetchone()
+                    _actual_h3 = _h3r['h3'] if _h3r else None
+                    cur.execute("""
+                        UPDATE app_private.offer_history
+                        SET actual_dropoff_lat     = %s,
+                            actual_dropoff_lng     = %s,
+                            actual_dropoff_h3      = %s,
+                            actual_dropoff_at      = NOW(),
+                            dropoff_error_m        = %s,
+                            dropoff_classification = %s
+                        WHERE decision_log_id = %s::integer
+                    """, (nail_lat, nail_lng, _actual_h3,
+                          new_error_m, 'watchdog_b', _audit_id))
+                    logging.info(f"[HEARTBEAT] offer_history dropoff updated (watchdog_b) offer={_audit_id}")
+                except Exception as _oh_err:
+                    logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
+            if _s == 'STACKED':
+                # Atomic buffer swap — fetch secondary ride coords
+                _sec_dlat = _sec_dlng = _sec_dh3 = None
+                if _offer_id:
+                    cur.execute("""
+                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
+                        FROM app_private.offer_history
+                        WHERE decision_log_id = (
+                            SELECT id FROM app_private.decision_log
+                            WHERE driver_id = %s
+                            ORDER BY created_at DESC LIMIT 1
+                        ) LIMIT 1
+                    """, (driver_id,))
+                    _sec = cur.fetchone()
+                    if _sec:
+                        _sec_dlat = _sec["dropoff_lat"]
+                        _sec_dlng = _sec["dropoff_lng"]
+                        _sec_dh3  = _sec["dropoff_h3"]
+                        logging.info(f"[S17] Atomic buffer swap (B): secondary dropoff ({_sec_dlat:.4f},{_sec_dlng:.4f})")
+                DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    dropoff_lat=_sec_dlat,
+                    dropoff_lng=_sec_dlng,
+                    dropoff_h3=_sec_dh3,
+                )
+                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b)")
+                driverState = "ENROUTE"
+                _s = "ENROUTE"
+            else:
+                if _s == 'IN_TRIP':
+                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                    _s = 'REFINE_DROPOFF'
+                    logging.warning(f"S31 DROPOFF_NAIL_B: IN_TRIP→REFINE_DROPOFF (arm+nail same heartbeat)")
+                DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    clear_coords=True,
+                )
+                logging.warning(f"S31 DROPOFF_NAIL_B (retroactive): REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
+                driverState = "UNCOMMITTED"
 
         elif verdict == 'REFINE_PICKUP':
             write_nailed_position(cur, driver_id, 'pickup',
@@ -337,8 +496,20 @@ def post_heartbeat():
         elif verdict == 'REFINE_DROPOFF':
             write_nailed_position(cur, driver_id, 'dropoff',
                                   current_lat, current_lng, new_error_m)
-            logging.info(f"[HEARTBEAT] REFINE_DROPOFF: improved to {new_error_m:.0f}m")
-            # driverState already set to real state above
+            if _s == 'IN_TRIP':
+                DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                driverState = 'REFINE_DROPOFF'
+                logging.warning(
+                    f"[REFINE_DROPOFF ARMED] "
+                    f"dropoff_lat={state_row.get('dropoff_lat')} "
+                    f"dropoff_lng={state_row.get('dropoff_lng')} "
+                    f"dropoff_h3={state_row.get('dropoff_h3')} "
+                    f"current_offer_id={state_row.get('current_offer_id')} "
+                    f"driver_lat={current_lat} driver_lng={current_lng} "
+                    f"dist_m={new_error_m:.0f}"
+                )
+            else:
+                logging.info(f"[HEARTBEAT] REFINE_DROPOFF: improved to {new_error_m:.0f}m")
 
         elif verdict == 'REFINE':
             target = 'pickup' if _s == 'ENROUTE' else 'dropoff'
@@ -373,10 +544,10 @@ def post_heartbeat():
             nearby = cur.fetchone()
             if nearby:
                 logging.info(
-                    f"[S11] GPS convergence at declined offer pickup "
-                    f"(dist={nearby['dist_miles']:.2f}mi, offer={nearby['offer_id']}) → IN_TRIP"
+                    f"[S11] Near declined offer pickup — arming ENROUTE "
+                    f"(dist={nearby['dist_miles']:.2f}mi, offer={nearby['offer_id']})"
                 )
-                DriverStateMachine.transition(driver_id, 'gps_convergence', cur, conn,
+                DriverStateMachine.transition(driver_id, 'offer_accepted', cur, conn,
                     offer_id=str(nearby['offer_id']),
                     pickup_lat=nearby['pickup_lat'],
                     pickup_lng=nearby['pickup_lng'],
@@ -385,48 +556,8 @@ def post_heartbeat():
                     dropoff_lng=nearby['dropoff_lng'],
                     dropoff_h3=nearby['dropoff_h3'],
                 )
-                driverState = "IN_TRIP"
-                _s = "IN_TRIP"
-
-        # ── S17: STACKED + GPS near primary dropoff → ENROUTE (buffer swap) ───
-        elif _s == "STACKED":
-            _state_row = DriverStateMachine.read(driver_id, cur)
-            _dlat = _state_row.get("dropoff_lat")
-            _dlng = _state_row.get("dropoff_lng")
-            if _dlat and _dlng:
-                cur.execute(
-                    "SELECT app_private.distance_miles(%s, %s, %s, %s) AS dist",
-                    (current_lat, current_lng, _dlat, _dlng)
-                )
-                _dist = cur.fetchone()["dist"]
-                if _dist <= 0.31:
-                    # Buffer swap: fetch secondary ride dropoff
-                    _sec_dlat = _sec_dlng = _sec_dh3 = None
-                    cur.execute("""
-                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
-                        FROM app_private.offer_history
-                        WHERE decision_log_id = (
-                            SELECT id FROM app_private.decision_log
-                            WHERE driver_id = %s
-                            ORDER BY created_at DESC LIMIT 1
-                        ) LIMIT 1
-                    """, (driver_id,))
-                    _sec = cur.fetchone()
-                    if _sec:
-                        _sec_dlat = _sec["dropoff_lat"]
-                        _sec_dlng = _sec["dropoff_lng"]
-                        _sec_dh3  = _sec["dropoff_h3"]
-                        logging.info(
-                            f"[S17] Buffer swap: secondary dropoff "
-                            f"({_sec_dlat:.4f},{_sec_dlng:.4f})"
-                        )
-                    DriverStateMachine.transition(driver_id, 'gps_convergence', cur, conn,
-                        dropoff_lat=_sec_dlat,
-                        dropoff_lng=_sec_dlng,
-                        dropoff_h3=_sec_dh3,
-                    )
-                    driverState = "ENROUTE"
-                    _s = "ENROUTE"
+                driverState = "ENROUTE"
+                _s = "ENROUTE"
 
         # ── S12: IN_TRIP or STACKED + GPS near unexpected pickup ──────────────
         # Primary ride cancelled — promote secondary to primary

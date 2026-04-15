@@ -19,6 +19,48 @@ def run_decision_engine(cur, conn, uid, params):
     ep             = dict(params)   # effective params — mutable coordinate copy
     arc_band_trace = {}
 
+    # ── Phase 1: Server-side geocoding consolidation ──────────────────
+    # Android now sends null coords. Server geocodes all addresses using
+    # driver GPS as location bias. Cache key = normalized address text only.
+    from triangulation import _lookup_geocode_cache, _google_geocode, _write_geocode_cache
+
+    def _server_geocode(addr, bias_lat, bias_lng, fallback_lat, fallback_lng):
+        if not addr:
+            return fallback_lat or 0.0, fallback_lng or 0.0
+        cached = _lookup_geocode_cache(addr, cur)
+        if cached:
+            logging.info(f"[GEO] Cache hit: {addr!r} → {cached[0]:.5f},{cached[1]:.5f}")
+            return cached[0], cached[1]
+        coords = _google_geocode(addr, bias_lat=bias_lat, bias_lng=bias_lng)
+        if coords:
+            _write_geocode_cache(addr, coords[0], coords[1], cur)
+            logging.info(f"[GEO] Server geocode: {addr!r} → {coords[0]:.5f},{coords[1]:.5f}")
+            return coords[0], coords[1]
+        logging.warning(f"[GEO] Geocode failed for {addr!r} — using fallback coords")
+        return fallback_lat or 0.0, fallback_lng or 0.0
+
+    _bias_lat     = ep.get("current_lat")
+    _bias_lng     = ep.get("current_lng")
+    _pickup_addr  = ep.get("pickup_address")
+    _dropoff_addr = ep.get("dropoff_address")
+    _same_addr    = bool(
+        _pickup_addr and _dropoff_addr and
+        _pickup_addr.strip().lower() == _dropoff_addr.strip().lower()
+    )
+
+    ep["p_lat"], ep["p_lng"] = _server_geocode(
+        _pickup_addr, _bias_lat, _bias_lng,
+        ep.get("p_lat"), ep.get("p_lng")
+    )
+    if _same_addr:
+        ep["d_lat"], ep["d_lng"] = ep["p_lat"], ep["p_lng"]
+        logging.info(f"[GEO] Same-address errand — mirroring pickup to dropoff")
+    else:
+        ep["d_lat"], ep["d_lng"] = _server_geocode(
+            _dropoff_addr, _bias_lat, _bias_lng,
+            ep.get("d_lat"), ep.get("d_lng")
+        )
+
     # ── Arc band correction ───────────────────────────────────────────
     _t_arc = time.time()
     try:

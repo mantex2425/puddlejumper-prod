@@ -29,7 +29,8 @@ def confirm_pickup():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # ── Find active offer via current_offer_id ────────────────────
+        # ── GPS-First Offer Resolution ────────────────────────────────
+        # Step 1: Try current_offer_id (happy path)
         cur.execute("""
             SELECT
                 pms.id AS pms_id,
@@ -51,31 +52,54 @@ def confirm_pickup():
         """, (driver_id,))
         row = cur.fetchone()
 
-        # Fallback: current_offer_id NULL (race condition on accept)
-        if not row:
-            logging.info("⚠️ current_offer_id NULL — fallback to most recent accepted offer")
-            cur.execute("""
-                SELECT
-                    pms.id AS pms_id,
-                    pms.offer_id,
-                    pms.pickup_h3,
-                    pms.triangulation_error_m AS existing_error_m,
-                    pms.actual_pickup_lat,
-                    dl.dropoff_lat,
-                    dl.dropoff_lng,
-                    dl.trip_miles,
-                    oh.pickup_address
-                FROM app_private.pickup_market_signals pms
-                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
-                LEFT JOIN app_private.offer_history oh ON oh.decision_log_id = dl.id
-                WHERE dl.driver_id = %s
-                  AND pms.is_accepted = true
-                  AND pms.offer_status = 'pending'
-                  AND dl.created_at > NOW() - INTERVAL '2 hours'
-                ORDER BY dl.created_at DESC
-                LIMIT 1
-            """, (driver_id,))
-            row = cur.fetchone()
+        # Step 2: GPS-first resolution — find offer by proximity to actual nail position
+        # Handles: match offer race condition, S11 override (declined offer driven anyway)
+        # Does NOT filter by app_verdict — DECLINE overrides must be found too
+        cur.execute("""
+            SELECT
+                pms.id AS pms_id,
+                pms.offer_id,
+                pms.pickup_h3,
+                pms.triangulation_error_m AS existing_error_m,
+                pms.actual_pickup_lat,
+                dl.dropoff_lat,
+                dl.dropoff_lng,
+                dl.trip_miles,
+                oh.pickup_address,
+                app_private.distance_miles(%s, %s, oh.pickup_lat, oh.pickup_lng)
+                    * 1609.34 AS dist_m
+            FROM app_private.offer_history oh
+            JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+            JOIN app_private.pickup_market_signals pms ON pms.offer_id = dl.id
+            WHERE dl.driver_id = %s
+              AND oh.created_at > NOW() - INTERVAL '10 minutes'
+              AND oh.pickup_lat IS NOT NULL
+              AND oh.pickup_lng IS NOT NULL
+            ORDER BY dist_m ASC, oh.created_at DESC
+            LIMIT 1
+        """, (actual_lat, actual_lng, driver_id,))
+        gps_row = cur.fetchone()
+
+        if gps_row and float(gps_row['dist_m']) < 500:
+            if not row:
+                logging.warning(
+                    f"[OFFER RESOLUTION] current_offer_id NULL — "
+                    f"resolved to offer={gps_row['offer_id']} "
+                    f"by GPS proximity ({gps_row['dist_m']:.0f}m)"
+                )
+                row = gps_row
+            elif str(gps_row['offer_id']) != str(row['offer_id']):
+                logging.warning(
+                    f"[OFFER RESOLUTION] current_offer_id={row['offer_id']} "
+                    f"overridden by GPS proximity → offer={gps_row['offer_id']} "
+                    f"({gps_row['dist_m']:.0f}m from nail position)"
+                )
+                row = gps_row
+            else:
+                logging.info(
+                    f"[OFFER RESOLUTION] GPS confirms current_offer_id={row['offer_id']} "
+                    f"({gps_row['dist_m']:.0f}m) ✅"
+                )
 
         if not row:
             return jsonify({"status": "no_match", "message": "No active offer found"}), 404

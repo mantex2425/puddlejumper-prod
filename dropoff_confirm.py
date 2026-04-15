@@ -44,6 +44,29 @@ def confirm_dropoff():
         offer_id        = row['current_offer_id']
         current_state   = row['state']
 
+        # ── Audit lock: for STACKED rides, find the primary offer ─────
+        # current_offer_id points to the secondary (stacked) offer.
+        # The primary is the one with a confirmed pickup but no dropoff yet.
+        _audit_offer_id = offer_id
+        if current_state == 'STACKED':
+            try:
+                cur.execute("""
+                    SELECT oh.decision_log_id
+                    FROM app_private.offer_history oh
+                    JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                    WHERE dl.driver_id = %s
+                      AND oh.actual_pickup_at IS NOT NULL
+                      AND oh.actual_dropoff_at IS NULL
+                    ORDER BY oh.actual_pickup_at DESC
+                    LIMIT 1
+                """, (driver_id,))
+                _primary = cur.fetchone()
+                if _primary:
+                    _audit_offer_id = _primary['decision_log_id']
+                    logging.info(f"[DROPOFF_CONFIRM] Audit lock: primary offer={_audit_offer_id} (state had {offer_id})")
+            except Exception as _al_err:
+                logging.warning(f"[DROPOFF_CONFIRM] Audit lock failed, falling back to {offer_id}: {_al_err}")
+
         if not triangulated_h3:
             logging.info("⚠️ No triangulated dropoff — accepting with actual GPS")
 
@@ -62,7 +85,22 @@ def confirm_dropoff():
                 already_nailed = True
 
         # ── Compute error and check refinement ────────────────────────
-        actual_h3, error_m = compute_error(cur, actual_lat, actual_lng, triangulated_h3)
+        # For STACKED rides, use the primary offer's dropoff_h3 for error calculation
+        # driver_trip_state.dropoff_h3 has already been swapped to secondary coords
+        _triangulated_h3 = triangulated_h3
+        if current_state == 'STACKED' and _audit_offer_id:
+            try:
+                cur.execute(
+                    "SELECT dropoff_h3 FROM app_private.offer_history "
+                    "WHERE decision_log_id = %s::integer",
+                    (_audit_offer_id,))
+                _oh_pin = cur.fetchone()
+                if _oh_pin and _oh_pin['dropoff_h3']:
+                    _triangulated_h3 = _oh_pin['dropoff_h3']
+                    logging.info(f"[DROPOFF_CONFIRM] Using primary pin h3 for error calc: offer={_audit_offer_id}")
+            except Exception as _ph_err:
+                logging.warning(f"[DROPOFF_CONFIRM] Primary pin fetch failed: {_ph_err}")
+        actual_h3, error_m = compute_error(cur, actual_lat, actual_lng, _triangulated_h3)
         if not triangulated_h3:
             triangulated_h3 = actual_h3
         classification = classify(error_m)
@@ -88,7 +126,7 @@ def confirm_dropoff():
             logging.info(f"🎯 Dropoff REFINED: {existing_error:.0f}m → {error_m:.0f}m (+{improvement:.0f}m)")
 
         # ── State transition ──────────────────────────────────────────
-        if current_state in ("IN_TRIP", "STACKED"):
+        if current_state in ("IN_TRIP", "STACKED", "REFINE_DROPOFF"):
             # ── Buffer swap logic (was confirm_dropoff_arrival in trip_state) ──
             _state_row    = DriverStateMachine.read(driver_id, cur)
             _current_state = _state_row["state"] if _state_row else "IN_TRIP"
@@ -123,7 +161,10 @@ def confirm_dropoff():
                     dropoff_h3=_sec_dh3,
                 )
             else:
-                # Solo ride completed — full reset
+                # Solo ride completed — enforce linear path via REFINE_DROPOFF
+                if _current_state == 'IN_TRIP':
+                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                    logging.warning(f"[DROPOFF_CONFIRM] IN_TRIP→REFINE_DROPOFF (arm+nail same call)")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
                     nailed_dropoff_lat=actual_lat,
                     nailed_dropoff_lng=actual_lng,
@@ -200,7 +241,7 @@ def confirm_dropoff():
 
         # ── Update offer_history ──────────────────────────────────────
         try:
-            if offer_id:
+            if _audit_offer_id:
                 cur.execute("""
                     UPDATE app_private.offer_history
                     SET actual_dropoff_lat     = %s,
@@ -211,7 +252,8 @@ def confirm_dropoff():
                         dropoff_classification = %s
                     WHERE decision_log_id = %s::integer
                 """, (actual_lat, actual_lng, actual_h3,
-                      error_m, classification, offer_id))
+                      error_m, classification, _audit_offer_id))
+                logging.info(f"✅ Offer history dropoff updated: offer={_audit_offer_id}")
         except Exception as oh_err:
             logging.warning(f"⚠️ Offer history dropoff update failed: {oh_err}")
 

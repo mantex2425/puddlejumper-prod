@@ -54,7 +54,7 @@ def setup(cur, conn):
     """, (TEST_DRIVER,))
     conn.commit()
     cur.execute(
-        "SELECT * FROM app_private.sm_transition(%s, 'replay_harness', NULL, NULL, 'UNCOMMITTED', p_clear_coords := TRUE)",
+        "SELECT * FROM app_private.sm_transition(%s, 'replay_harness', NULL, NULL, NULL, 'UNCOMMITTED', p_clear_coords := TRUE)",
         (TEST_DRIVER,)
     )
     conn.commit()
@@ -73,19 +73,21 @@ def force_state(cur, conn, state, offer_id=None,
     cur.execute("""
         SELECT * FROM app_private.sm_transition(
             %s, 'replay_harness',
+            %s,
             %s, %s, %s,
             %s, %s, %s,
             %s, %s, %s,
             %s, %s, %s,
-            %s, %s
+            %s
         )
     """, (
         TEST_DRIVER,
+        offer_id,
         pickup_lat, pickup_lng, state,
         dropoff_lat, dropoff_lng, dropoff_h3,
         nailed_pickup_lat, nailed_pickup_lng, nailed_pickup_error_m,
         nailed_dropoff_lat, nailed_dropoff_lng, nailed_dropoff_error_m,
-        offer_id, False,
+        False,
     ))
     conn.commit()
     if potential_cancellation:
@@ -127,13 +129,14 @@ def get_sm_read(cur):
     return cur.fetchone()
 
 
-def seed_offer_history(cur, conn, offer_id, plat, plng, ph3, dlat, dlng, dh3):
+def seed_offer_history(cur, conn, offer_id, plat, plng, ph3, dlat, dlng, dh3, verdict=None):
     """Seed offer_history + decision_log for S11/S12 nearby scan tests."""
-    cur.execute("""
+    verdict = verdict if verdict else 'DECLINE'
+    cur.execute(f"""
         INSERT INTO app_private.decision_log
             (driver_id, fare, pickup_minutes, trip_minutes, pickup_lat, pickup_lng,
              dropoff_lat, dropoff_lng, decision_result, created_at)
-        VALUES (%s, 10.0, 3, 15, %s, %s, %s, %s, '{"verdict":"DECLINE"}'::jsonb,
+        VALUES (%s, 10.0, 3, 15, %s, %s, %s, %s, '{{"verdict":"{verdict}"}}'::jsonb,
                 NOW())
         RETURNING id
     """, (TEST_DRIVER, plat, plng, dlat, dlng))
@@ -142,9 +145,9 @@ def seed_offer_history(cur, conn, offer_id, plat, plng, ph3, dlat, dlng, dh3):
         INSERT INTO app_private.offer_history
             (decision_log_id, pickup_lat, pickup_lng, pickup_h3,
              dropoff_lat, dropoff_lng, dropoff_h3, app_verdict, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 'DECLINE',
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                 NOW())
-    """, (dl_id, plat, plng, ph3, dlat, dlng, dh3))
+    """, (dl_id, plat, plng, ph3, dlat, dlng, dh3, verdict))
     conn.commit()
     return dl_id
 
@@ -284,13 +287,14 @@ def run_tests():
             dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG,
             nailed_pickup_lat=PICKUP_LAT, nailed_pickup_lng=PICKUP_LNG,
             nailed_pickup_error_m=50.0)
+        trans("approaching_dropoff")
         r = trans("dropoff_confirmed",
             nailed_dropoff_lat=DROPOFF_LAT, nailed_dropoff_lng=DROPOFF_LNG,
             nailed_dropoff_error_m=40.0,
             clear_coords=True)
         row = get_row(cur)
         ok = r["success"] and row["state"] == "UNCOMMITTED" and row["pickup_lat"] is None
-        T("S08", "IN_TRIP + dropoff_confirmed solo → UNCOMMITTED (coords cleared)", ok,
+        T("S08", "IN_TRIP→REFINE_DROPOFF→UNCOMMITTED (coords cleared)", ok,
           f"state={row['state']} pickup_lat={row['pickup_lat']}")
         rsp()
 
@@ -500,33 +504,18 @@ def run_tests():
           f"state={get_row(cur)['state']} verdict={verdict29d}")
         rsp()
 
-        # S30 — ABORT via heartbeat
+        # S30 — ABORT removed: diverging at speed must stay ENROUTE
         sp()
         force_state(cur, conn, "ENROUTE",
             pickup_lat=PICKUP_LAT, pickup_lng=PICKUP_LNG,
             dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG)
-        # Backdate state_updated_at so 60s grace period is satisfied
-        # Must use SET LOCAL app.skip_timestamp_trigger to bypass tr_set_state_timestamp
-        cur.execute("SET LOCAL app.skip_timestamp_trigger = 'true'")
-        cur.execute("""
-            UPDATE app_private.driver_trip_state
-            SET state_updated_at = NOW() - INTERVAL '90 seconds'
-            WHERE driver_id = %s
-        """, (TEST_DRIVER,))
-        conn.commit()
         state_row = get_row(cur)
-        # Driver far away at speed — must exceed ABORT_RADIUS_M (1200m = ~0.75mi)
         far_lat = PICKUP_LAT + 0.015  # ~1.0 mile north
         verdict, _, _ = check_convergence(
             TEST_DRIVER, far_lat, PICKUP_LNG, 35.0, state_row, cur
         )
-        if verdict == "ABORT":
-            r = trans("gps_divergence", clear_coords=True)
-            row = get_row(cur)
-            ok = r["success"] and row["state"] == "UNCOMMITTED"
-        else:
-            ok = False
-        T("S30", f"ENROUTE + GPS diverging at speed → ABORT → UNCOMMITTED (verdict={verdict})",
+        ok = verdict != 'ABORT' and get_row(cur)["state"] == "ENROUTE"
+        T("S30", f"ENROUTE + GPS diverging at speed → stays ENROUTE (no ABORT) (verdict={verdict})",
           ok, f"state={get_row(cur)['state']}")
         rsp()
 
@@ -567,6 +556,7 @@ def run_tests():
             TEST_DRIVER, DROPOFF_LAT, DROPOFF_LNG, 1.0, state_row, cur
         )
         if verdict == "DROPOFF_NAIL":
+            trans("approaching_dropoff")
             r = trans("dropoff_confirmed",
                 nailed_dropoff_lat=DROPOFF_LAT, nailed_dropoff_lng=DROPOFF_LNG,
                 nailed_dropoff_error_m=error_m,
@@ -575,8 +565,49 @@ def run_tests():
             ok = r["success"] and row["state"] == "UNCOMMITTED"
         else:
             ok = False
-        T("S15", f"IN_TRIP + GPS at dropoff → DROPOFF_NAIL → UNCOMMITTED (verdict={verdict})",
+        T("S15", f"IN_TRIP→REFINE_DROPOFF→UNCOMMITTED via DROPOFF_NAIL (verdict={verdict})",
           ok, f"state={get_row(cur)['state']}")
+        rsp()
+
+        # S15a — IN_TRIP + GPS inside blast radius at HIGH speed → REFINE_DROPOFF armed
+        sp()
+        force_state(cur, conn, 'IN_TRIP',
+            pickup_lat=PICKUP_LAT, pickup_lng=PICKUP_LNG,
+            dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG,
+            nailed_pickup_lat=PICKUP_LAT, nailed_pickup_lng=PICKUP_LNG,
+            nailed_pickup_error_m=50.0)
+        state_row = get_row(cur)
+        # Simulate inside blast radius at 25mph — should arm regardless of speed
+        verdict15a, _, error_m15a = check_convergence(
+            TEST_DRIVER, DROPOFF_LAT, DROPOFF_LNG, 25.0, state_row, cur
+        )
+        ok = verdict15a == 'REFINE_DROPOFF'
+        T('S15a', f'IN_TRIP + GPS at dropoff at 25mph → REFINE_DROPOFF armed (verdict={verdict15a})',
+          ok, f'verdict={verdict15a}')
+        rsp()
+
+        # S15b — REFINE_DROPOFF + low speed at dropoff → DROPOFF_NAIL → UNCOMMITTED
+        sp()
+        force_state(cur, conn, 'REFINE_DROPOFF',
+            pickup_lat=PICKUP_LAT, pickup_lng=PICKUP_LNG,
+            dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG,
+            nailed_pickup_lat=PICKUP_LAT, nailed_pickup_lng=PICKUP_LNG,
+            nailed_pickup_error_m=50.0)
+        state_row = get_row(cur)
+        verdict15b, _, error_m15b = check_convergence(
+            TEST_DRIVER, DROPOFF_LAT, DROPOFF_LNG, 1.0, state_row, cur
+        )
+        if verdict15b == 'DROPOFF_NAIL':
+            r = trans('dropoff_confirmed',
+                nailed_dropoff_lat=DROPOFF_LAT, nailed_dropoff_lng=DROPOFF_LNG,
+                nailed_dropoff_error_m=error_m15b,
+                clear_coords=True)
+            row = get_row(cur)
+            ok = r['success'] and row['state'] == 'UNCOMMITTED'
+        else:
+            ok = False
+        T('S15b', f'REFINE_DROPOFF + GPS at dropoff at 1mph → DROPOFF_NAIL → UNCOMMITTED (verdict={verdict15b})',
+          ok, f'state={get_row(cur)["state"]}')
         rsp()
 
         # S17 — STACKED + GPS at primary dropoff → ENROUTE
@@ -646,18 +677,60 @@ def run_tests():
         )
         nearby = cur.fetchone()
         if nearby:
-            r = trans("gps_convergence",
+            r = trans("offer_accepted",
                 offer_id=str(nearby["offer_id"]),
                 pickup_lat=nearby["pickup_lat"], pickup_lng=nearby["pickup_lng"],
                 pickup_h3=nearby["pickup_h3"],
                 dropoff_lat=nearby["dropoff_lat"], dropoff_lng=nearby["dropoff_lng"],
                 dropoff_h3=nearby["dropoff_h3"])
             row = get_row(cur)
-            ok = r["success"] and row["state"] == "IN_TRIP"
+            ok = r["success"] and row["state"] == "ENROUTE"
         else:
             ok = False
-        T("S11", "UNCOMMITTED + GPS at declined offer pickup → IN_TRIP (S11 override)", ok,
+        T("S11", "UNCOMMITTED + GPS near declined offer pickup → ENROUTE armed (not IN_TRIP)", ok,
           f"state={get_row(cur)['state']} nearby={'yes' if nearby else 'no'}")
+        rsp()
+
+        # S11a — Drive-by test: ACCEPT offer nearby should NOT trigger S11
+        sp()
+        seed_offer_history(cur, conn,
+            "test_s11a", PICKUP_LAT, PICKUP_LNG, PICKUP_H3,
+            DROPOFF_LAT, DROPOFF_LNG, DROPOFF_H3,
+            verdict="ACCEPT")
+        cur.execute(
+            "SELECT * FROM app_private.sm_find_nearby_offer(%s, %s, %s)",
+            (TEST_DRIVER, PICKUP_LAT, PICKUP_LNG)
+        )
+        nearby_accept = cur.fetchone()
+        ok = nearby_accept is None
+        T("S11a", "UNCOMMITTED + GPS near ACCEPTED offer pickup → no S11 trigger (stays UNCOMMITTED)",
+          ok, f"nearby={'yes' if nearby_accept else 'no'}")
+        rsp()
+
+        # S11b — Missouri City drive-by: near declined pickup but should go ENROUTE not IN_TRIP
+        sp()
+        seed_offer_history(cur, conn,
+            "test_s11b", PICKUP_LAT, PICKUP_LNG, PICKUP_H3,
+            DROPOFF_LAT, DROPOFF_LNG, DROPOFF_H3,
+            verdict="DECLINE")
+        cur.execute(
+            "SELECT * FROM app_private.sm_find_nearby_offer(%s, %s, %s)",
+            (TEST_DRIVER, PICKUP_LAT, PICKUP_LNG)
+        )
+        nearby_decline = cur.fetchone()
+        if nearby_decline:
+            r = trans("offer_accepted",
+                offer_id=str(nearby_decline["offer_id"]),
+                pickup_lat=nearby_decline["pickup_lat"], pickup_lng=nearby_decline["pickup_lng"],
+                pickup_h3=nearby_decline["pickup_h3"],
+                dropoff_lat=nearby_decline["dropoff_lat"], dropoff_lng=nearby_decline["dropoff_lng"],
+                dropoff_h3=nearby_decline["dropoff_h3"])
+            row = get_row(cur)
+            ok = r["success"] and row["state"] == "ENROUTE"
+        else:
+            ok = False
+        T("S11b", "Missouri City drive-by: near declined pickup → ENROUTE armed (not IN_TRIP)",
+          ok, f"state={get_row(cur)['state']}")
         rsp()
 
         # S12 — IN_TRIP + GPS at unexpected pickup
@@ -674,9 +747,8 @@ def run_tests():
         )
         nearby = cur.fetchone()
         if nearby:
-            # gps_convergence from IN_TRIP → UNCOMMITTED (per transition table)
-            # then S11 logic in heartbeat re-evaluates and promotes to IN_TRIP
-            # Here we test the stored proc behavior only: transition fires correctly
+            # S11 only fires when UNCOMMITTED — IN_TRIP must stay IN_TRIP
+            # gps_convergence from IN_TRIP is now illegal (deleted from valid_state_transitions)
             r = trans("gps_convergence",
                 offer_id=str(nearby["offer_id"]),
                 pickup_lat=nearby["pickup_lat"], pickup_lng=nearby["pickup_lng"],
@@ -684,11 +756,11 @@ def run_tests():
                 dropoff_lat=nearby["dropoff_lat"], dropoff_lng=nearby["dropoff_lng"],
                 dropoff_h3=nearby["dropoff_h3"])
             row = get_row(cur)
-            # UNCOMMITTED is correct — heartbeat S11 scan fires next to promote IN_TRIP
-            ok = r["success"] and row["state"] == "UNCOMMITTED"
+            # IN_TRIP must stay IN_TRIP — S11 does not fire mid-trip
+            ok = not r["success"] and row["state"] == "IN_TRIP"
         else:
             ok = False
-        T("S12", "IN_TRIP + gps_convergence → UNCOMMITTED (heartbeat S11 promotes next)", ok,
+        T("S12", "IN_TRIP + gps_convergence near declined pickup → stays IN_TRIP (S11 blocked mid-trip)", ok,
           f"state={get_row(cur)['state']} nearby={'yes' if nearby else 'no'}")
         rsp()
 
@@ -839,14 +911,15 @@ def run_tests():
         trans("gps_convergence",
             nailed_pickup_lat=PICKUP_LAT, nailed_pickup_lng=PICKUP_LNG,
             nailed_pickup_error_m=50.0)
+        trans("approaching_dropoff")
         trans("dropoff_confirmed",
             nailed_dropoff_lat=DROPOFF_LAT, nailed_dropoff_lng=DROPOFF_LNG,
             nailed_dropoff_error_m=40.0,
             clear_coords=True)
         after = get_log_count(cur)
         row = get_row(cur)
-        ok = after == before + 3 and row["state"] == "UNCOMMITTED"
-        T("L03", "Full solo trip: 3 transitions → 3 log entries → UNCOMMITTED", ok,
+        ok = after == before + 4 and row["state"] == "UNCOMMITTED"
+        T("L03", "Full solo trip: 4 transitions → 4 log entries → UNCOMMITTED", ok,
           f"log_delta={after-before} state={row['state']}")
         rsp()
 
@@ -861,6 +934,7 @@ def run_tests():
             dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG, dropoff_h3=DROPOFF_H3,
             nailed_pickup_lat=PICKUP_LAT, nailed_pickup_lng=PICKUP_LNG,
             nailed_pickup_error_m=50.0)
+        trans("approaching_dropoff")
         trans("dropoff_confirmed", clear_coords=True)
         row = get_row(cur)
         coord_cols = [
@@ -908,11 +982,12 @@ def run_tests():
         r4 = trans("pickup_confirmed",
             nailed_pickup_lat=PICKUP2_LAT, nailed_pickup_lng=PICKUP2_LNG,
             nailed_pickup_error_m=30.0)
-        # IN_TRIP → UNCOMMITTED
+        # IN_TRIP → REFINE_DROPOFF → UNCOMMITTED
+        trans("approaching_dropoff")
         r5 = trans("dropoff_confirmed", clear_coords=True)
         row = get_row(cur)
         ok = all(r["success"] for r in [r1,r2,r3,r4,r5]) and row["state"] == "UNCOMMITTED"
-        T("SEQ1", "Full stacked trip: UNCOMMITTED→ENROUTE→IN_TRIP→STACKED→IN_TRIP→UNCOMMITTED",
+        T("SEQ1", "Full stacked trip: UNCOMMITTED→ENROUTE→IN_TRIP→STACKED→IN_TRIP→REFINE_DROPOFF→UNCOMMITTED",
           ok, f"state={row['state']} all_success={ok}")
         rsp()
 

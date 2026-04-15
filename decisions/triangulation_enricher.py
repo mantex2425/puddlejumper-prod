@@ -192,8 +192,18 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     triangulated_pickup_lat = pickup_coords[0]
                     triangulated_pickup_lng = pickup_coords[1]
 
+            # Same-address guard: circular trip / errand detection
+            p_addr = (ep.get("pickup_address") or "").strip().lower()
+            d_addr = (ep.get("dropoff_address") or "").strip().lower()
+            _same_address = bool(p_addr and d_addr and p_addr == d_addr)
+            if _same_address:
+                logging.info(f"[TRI] Same-address errand detected ({p_addr}) — mirroring pickup coords")
+                triangulated_dropoff_lat = triangulated_pickup_lat or ep.get("p_lat")
+                triangulated_dropoff_lng = triangulated_pickup_lng or ep.get("p_lng")
+                triangulated_dropoff_h3  = triangulated_h3
+
             # Triangulate dropoff (uses resolved pickup coords, not raw h3)
-            if (triangulated_h3 and triangulated_pickup_lat and triangulated_pickup_lng
+            if (not _same_address and triangulated_h3 and triangulated_pickup_lat and triangulated_pickup_lng
                     and ep["d_lat"] and ep["d_lng"] and ep["trip_miles"]):
                 triangulated_dropoff_h3 = triangulate_dropoff(
                     triangulated_pickup_lat, triangulated_pickup_lng,
@@ -311,7 +321,7 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     dropoff_lat=_dropoff_lat, dropoff_lng=_dropoff_lng,
                     dropoff_h3=triangulated_dropoff_h3,
                 )
-            elif _verdict == "ACCEPT" and _current_state == "IN_TRIP":
+            elif _verdict == "ACCEPT" and _current_state in ("IN_TRIP", "REFINE_DROPOFF"):
                 DriverStateMachine.transition(
                     uid, "offer_accepted", cur, conn,
                     offer_id=str(decision_log_id) if decision_log_id else None,

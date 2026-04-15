@@ -122,14 +122,16 @@ class DriverStateMachine:
             cur.execute("""
                 SELECT * FROM app_private.sm_transition(
                     %s, %s,
+                    %s,
                     %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s
+                    %s
                 )
             """, (
                 driver_id, trigger,
+                coords.get('offer_id'),
                 coords.get('pickup_lat'),
                 coords.get('pickup_lng'),
                 coords.get('pickup_h3'),
@@ -142,7 +144,6 @@ class DriverStateMachine:
                 coords.get('nailed_dropoff_lat'),
                 coords.get('nailed_dropoff_lng'),
                 coords.get('nailed_dropoff_error_m'),
-                coords.get('offer_id'),
                 coords.get('clear_coords', False),
             ))
             result = dict(cur.fetchone())

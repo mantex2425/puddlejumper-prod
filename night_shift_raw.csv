@@ -1,0 +1,7 @@
+timestamp,text_payload
+2026-04-15T05:55:31.205100Z,"2026-04-15 05:55:31,205 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_b) offer=5397"
+2026-04-15T05:43:44.921072Z,"2026-04-15 05:43:44,921 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_a) offer=5397"
+2026-04-15T04:15:47.095457Z,"2026-04-15 04:15:47,096 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_b) offer=5380"
+2026-04-15T03:09:29.251060Z,"2026-04-15 03:09:29,251 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_b) offer=5378"
+2026-04-15T02:46:31.473235Z,"2026-04-15 02:46:31,473 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_b) offer=5377"
+2026-04-15T02:15:31.523197Z,"2026-04-15 02:15:31,523 - INFO - [HEARTBEAT] offer_history dropoff updated (watchdog_b) offer=5376"

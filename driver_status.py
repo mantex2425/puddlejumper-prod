@@ -139,8 +139,8 @@ def get_driver_status():
             "heartbeat_age_sec":        round((datetime.datetime.now(datetime.timezone.utc) - state_row["heartbeat_at"]).total_seconds()) if state_row and state_row.get("heartbeat_at") else None,
 
             # GPS — heartbeat first, fallback to last decision
-            "gps_lat":        hb.get("gps_lat") or (f(ld["current_lat"]) if ld else None),
-            "gps_lng":        hb.get("gps_lng") or (f(ld["current_lng"]) if ld else None),
+            "gps_lat":        hb.get("lat") or (f(ld["current_lat"]) if ld else None),
+            "gps_lng":        hb.get("lng") or (f(ld["current_lng"]) if ld else None),
             "gps_age_sec":    f(ld["gps_age_sec"]) if ld else None,
             "speed_mph":      hb.get("speed_mph"),
             "gps_accuracy_m": hb.get("gps_accuracy_m"),

@@ -35,13 +35,17 @@ TORT_MIN = 0.9
 TORT_MAX = 2.5
 
 
-def _google_geocode(address: str) -> tuple | None:
+def _google_geocode(address: str, bias_lat: float = None, bias_lng: float = None) -> tuple | None:
     if not GOOGLE_MAPS_API_KEY or not address:
         return None
     try:
+        params = {"address": address, "key": GOOGLE_MAPS_API_KEY}
+        if bias_lat is not None and bias_lng is not None:
+            params["location"] = f"{bias_lat},{bias_lng}"
+            params["radius"] = "50000"
         r = requests.get(
             "https://maps.googleapis.com/maps/api/geocode/json",
-            params={"address": address, "key": GOOGLE_MAPS_API_KEY},
+            params=params,
             timeout=2.0
         )
         data = r.json()

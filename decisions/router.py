@@ -391,10 +391,11 @@ def make_decision():
             p_lng = ep.get("p_lng")
             d_lat = ep.get("d_lat")
             d_lng = ep.get("d_lng")
-            if pickup_address and p_lat and p_lng:
-                _write_geocode_cache(pickup_address, p_lat, p_lng, cur)
-            if dropoff_address and d_lat and d_lng:
-                _write_geocode_cache(dropoff_address, d_lat, d_lng, cur)
+            # [PHASE 1] Cache writes removed — server geocode already wrote correct coords
+            # if pickup_address and p_lat and p_lng:
+            #     _write_geocode_cache(pickup_address, p_lat, p_lng, cur)
+            # if dropoff_address and d_lat and d_lng:
+            #     _write_geocode_cache(dropoff_address, d_lat, d_lng, cur)
             conn.commit()
         except Exception as _ce:
             logging.warning(f"[CACHE] Geocode seed failed (non-fatal): {_ce}")
@@ -584,14 +585,14 @@ def harvest_offer():
             is_surge, ride_type
         ))
 
-        # Seed geocode cache with Android-supplied coords (free data, guaranteed commit)
-        try:
-            if pickup_address and pickup_lat and pickup_lng:
-                _write_geocode_cache(pickup_address, pickup_lat, pickup_lng, cur)
-            if dropoff_address and dropoff_lat and dropoff_lng:
-                _write_geocode_cache(dropoff_address, dropoff_lat, dropoff_lng, cur)
-        except Exception as _cache_err:
-            logging.warning(f"[CACHE] Geocode seed failed (non-fatal): {_cache_err}")
+        # [PHASE 1] Android coord cache writes removed — server geocode is sole cache writer
+        # try:
+        #     if pickup_address and pickup_lat and pickup_lng:
+        #         _write_geocode_cache(pickup_address, pickup_lat, pickup_lng, cur)
+        #     if dropoff_address and dropoff_lat and dropoff_lng:
+        #         _write_geocode_cache(dropoff_address, dropoff_lat, dropoff_lng, cur)
+        # except Exception as _cache_err:
+        #     logging.warning(f"[CACHE] Geocode seed failed (non-fatal): {_cache_err}")
 
         conn.commit()
 
