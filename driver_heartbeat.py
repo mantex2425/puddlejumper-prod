@@ -28,13 +28,26 @@ _candidate_lat   = None   # most recent micro-stop lat
 _candidate_lng   = None   # most recent micro-stop lng
 _candidate_at    = None   # timestamp of micro-stop
 
-def _reset_watchdog_state():
+def _reset_watchdog_state(cur=None, conn=None, driver_id=None):
     """Clear candidate and stopped timer. Call on transition to UNCOMMITTED."""
     global _stopped_since, _candidate_lat, _candidate_lng, _candidate_at
     _stopped_since = None
     _candidate_lat = None
     _candidate_lng = None
     _candidate_at  = None
+    if cur and conn and driver_id:
+        try:
+            cur.execute(
+                """
+                UPDATE app_private.driver_trip_state
+                SET candidate_lat = NULL, candidate_lng = NULL, candidate_at = NULL
+                WHERE driver_id = %s
+                """,
+                (driver_id,)
+            )
+            conn.commit()
+        except Exception as _e:
+            logging.warning(f"[WATCHDOG] Failed to clear candidate in DB: {_e}")
 
 
 def _queue_refine(driver_id, plat, plng, dlat, dlng, trip_miles, label):
@@ -134,6 +147,7 @@ def post_heartbeat():
                    dts.nailed_pickup_lat, dts.nailed_pickup_lng,
                    dts.nailed_pickup_error_m, dts.nailed_dropoff_error_m,
                    dts.current_offer_id,
+                   dts.candidate_lat, dts.candidate_lng, dts.candidate_at,
                    dts.state_updated_at,
                    EXTRACT(EPOCH FROM (
                        NOW() - dts.state_updated_at
@@ -184,8 +198,8 @@ def post_heartbeat():
             driver_id, current_lat, current_lng,
             speed_mph, state_row, cur,
             stopped_seconds=stopped_seconds or 0,
-            candidate_lat=_candidate_lat,
-            candidate_lng=_candidate_lng,
+            candidate_lat=state_row.get("candidate_lat"),
+            candidate_lng=state_row.get("candidate_lng"),
             cumulative_miles=cumulative_miles,
         )
         if len(_raw) == 4:
@@ -201,7 +215,7 @@ def post_heartbeat():
         # ── Apply verdict — all transitions use _write_state_transition ────────
         _just_nailed_pickup = False  # set True when INITIAL_NAIL fires this heartbeat
         if new_state == 'UNCOMMITTED':
-            _reset_watchdog_state()
+            _reset_watchdog_state(cur=cur, conn=conn, driver_id=driver_id)
             logging.info("[WATCHDOG] State reset to UNCOMMITTED — cleared candidate stack")
         if verdict == 'INITIAL_NAIL':
             # ENROUTE → IN_TRIP: nail pickup, transition state
@@ -399,8 +413,17 @@ def post_heartbeat():
 
         elif verdict == 'SET_CANDIDATE':
             # Watchdog B: record micro-stop position
-            _candidate_lat, _candidate_lng = _extra
-            logging.info(f"[WATCHDOG_B] Candidate recorded at {_candidate_lat:.5f},{_candidate_lng:.5f}")
+            _cand_lat, _cand_lng = _extra
+            cur.execute(
+                """
+                UPDATE app_private.driver_trip_state
+                SET candidate_lat = %s, candidate_lng = %s, candidate_at = NOW()
+                WHERE driver_id = %s
+                """,
+                (_cand_lat, _cand_lng, driver_id)
+            )
+            conn.commit()
+            logging.info(f"[WATCHDOG_B] Candidate persisted to DB at {_cand_lat:.5f},{_cand_lng:.5f}")
 
         elif verdict == 'DROPOFF_NAIL_B':
             # Watchdog B retroactive: nail at candidate coords, enforce linear path

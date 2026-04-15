@@ -1,0 +1,202 @@
+🔄 Test driver state reset to UNCOMMITTED
+
+======================================================================
+  🐸 PuddleJumper Integration Test Suite
+  Service: https://puddlejumper-api-152974241923.us-central1.run.app
+  Driver:  UjT1hE9eBXh2q95a...
+======================================================================
+
+── Scenario 1: Full Solo Trip ──────────────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T01  Accept offer → ENROUTE  (ENROUTE)
+  ✅ PASS  T02  Decision verdict = ACCEPT  (ACCEPT)
+  ✅ PASS  T03  Heartbeat far from pickup → stays ENROUTE  (ENROUTE)
+  ✅ PASS  T04  Heartbeat at pickup stopped → IN_TRIP  (IN_TRIP)
+  ✅ PASS  T05  driverState response = IN_TRIP  (IN_TRIP)
+  ✅ PASS  T06  Heartbeat driving to dropoff → stays IN_TRIP  (IN_TRIP)
+  ✅ PASS  T06b  Entering blast radius at 35mph → REFINE_DROPOFF  (REFINE_DROPOFF)
+  ✅ PASS  T07  Heartbeat at dropoff stopped → UNCOMMITTED  (UNCOMMITTED)
+  ✅ PASS  T08  driverState response = UNCOMMITTED  (UNCOMMITTED)
+  ✅ PASS  T09  Exactly 4 state log entries for solo trip  (4)
+  ✅ PASS  T09b  Auto Nail It dropoff written to offer_history  (1)
+
+── Scenario 2: Implicit Cancel S04 ────────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T10  First offer accepted → ENROUTE  (ENROUTE)
+  ✅ PASS  T11  New offer while ENROUTE → S04 implicit cancel  (ENROUTE)
+
+── Scenario 3: S11 Driver Override ────────────────────────────────────
+
+ success | from_state |  to_state   | message 
+---------+------------+-------------+---------
+ t       | ENROUTE    | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T12  Low fare offer → DECLINE → UNCOMMITTED  (UNCOMMITTED)
+  ✅ PASS  T13  Heartbeat near declined pickup at speed → S11 → ENROUTE armed  (ENROUTE)
+  ✅ PASS  T13b  Heartbeat stopped at declined pickup → INITIAL_NAIL → IN_TRIP  (IN_TRIP)
+  ✅ PASS  T13c  Override trip complete → UNCOMMITTED  (UNCOMMITTED)
+
+── Scenario 4: Manual Reset ────────────────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T14  Setup: reached IN_TRIP  (IN_TRIP)
+  ✅ PASS  T15  Manual reset → UNCOMMITTED  (UNCOMMITTED)
+
+── Scenario 5: ABORT Guard ─────────────────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T16  Setup: IN_TRIP with nailed pickup  (IN_TRIP)
+  ✅ PASS  T17  Driving at speed after pickup nail → stays IN_TRIP (ABORT blocked)  (IN_TRIP)
+
+────────────────────────────────────────────────────────────────────────
+
+  ✅  21/21 passed | 0 failed — READY TO DRIVE 🐸
+
+======================================================================
+
+── Scenario 6: Full Stacked Trip ──────────────────────────────────────
+
+ success | from_state |  to_state   | message 
+---------+------------+-------------+---------
+ t       | IN_TRIP    | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T18  Stacked setup: IN_TRIP after pickup nail  (IN_TRIP)
+  ✅ PASS  T19  Stack offer accepted → STACKED  (STACKED)
+  ✅ PASS  T20  Heartbeat at primary dropoff → ENROUTE (buffer swap)  (ENROUTE)
+  ✅ PASS  T21  Heartbeat at secondary pickup → IN_TRIP  (IN_TRIP)
+  ✅ PASS  T22  Heartbeat at secondary dropoff → UNCOMMITTED  (UNCOMMITTED)
+  ✅ PASS  T23  Exactly 7 state log entries for stacked trip  (7)
+
+── Scenario 7: GPS Jitter at Pickup ───────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T24  GPS 500m from pickup → HOLD → stays ENROUTE  (ENROUTE)
+  ✅ PASS  T25  GPS 200m from pickup moving → HOLD → stays ENROUTE  (ENROUTE)
+  ✅ PASS  T26  GPS at pickup stopped → INITIAL_NAIL → IN_TRIP  (IN_TRIP)
+
+── Scenario 8: Duplicate Offer S26 ────────────────────────────────────
+
+ success | from_state |  to_state   | message 
+---------+------------+-------------+---------
+ t       | IN_TRIP    | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T27  First offer → ENROUTE  (ENROUTE)
+  ✅ PASS  T28  Duplicate offer → stays ENROUTE (not double-accepted)  (ENROUTE)
+  ❌ FAIL  T29  Duplicate offer → still exactly 1 log entry  (got=3 expected=1)
+
+── Scenario 9: Watchdog Auto-Reset ────────────────────────────────────
+
+ success | from_state |  to_state   | message 
+---------+------------+-------------+---------
+ t       | ENROUTE    | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T30  Watchdog setup: IN_TRIP  (IN_TRIP)
+  ✅ PASS  T31  Watchdog fires after 95min IN_TRIP → UNCOMMITTED  (UNCOMMITTED)
+
+── Scenario 10: No-Show Resolution ────────────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T32  No-show setup: IN_TRIP after pickup nail  (IN_TRIP)
+  ✅ PASS  T33  No-show: new offer accepted → STACKED  (STACKED)
+  ✅ PASS  T34  No-show: GPS at primary dropoff → ENROUTE (buffer swap)  (ENROUTE)
+  ✅ PASS  T34b  No-show: GPS at secondary pickup → IN_TRIP  (IN_TRIP)
+  ✅ PASS  T35  No-show: complete secondary ride → UNCOMMITTED  (UNCOMMITTED)
+
+── Scenario 12: ABORT fires without pickup nail ────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T38  ABORT setup: ENROUTE, pickup not nailed  (ENROUTE)
+  ✅ PASS  T39  Diverging at speed without pickup nail → stays ENROUTE (no ABORT)  (ENROUTE)
+
+── Scenario 13: Manual Reset from Each State ───────────────────────────
+
+ success | from_state |  to_state   | message 
+---------+------------+-------------+---------
+ t       | ENROUTE    | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T40  Manual reset from ENROUTE → UNCOMMITTED  (UNCOMMITTED)
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T41  Manual reset from STACKED → UNCOMMITTED  (UNCOMMITTED)
+  ✅ PASS  T42  Coords cleared after manual reset  ()
+
+────────────────────────────────────────────────────────────────────────
+
+  ❌  44/45 passed | 1 failed — DO NOT DRIVE
+
+======================================================================
+
+── Scenario 14: Same-Address Circular Trip ─────────────────────────────
+
+ success | from_state  |  to_state   | message 
+---------+-------------+-------------+---------
+ t       | UNCOMMITTED | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T43  Same-address offer accepted → ENROUTE  (ENROUTE)
+  ✅ PASS  T44  Nail pickup at circular origin → IN_TRIP  (IN_TRIP)
+  ✅ PASS  T45  Heartbeat near pickup/dropoff pin (1.5mi driven) -> REFINE_DROPOFF armed  (REFINE_DROPOFF)
+  ✅ PASS  T46  Stopped at circular dropoff -> stays REFINE_DROPOFF (Watchdog B pending departure)  (REFINE_DROPOFF)
+
+── Scenario 15: Round-Trip Odometer Gate ───────────────────────────────
+
+ success |   from_state   |  to_state   | message 
+---------+----------------+-------------+---------
+ t       | REFINE_DROPOFF | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T47  Round-trip setup: IN_TRIP after pickup nail  (IN_TRIP)
+  ✅ PASS  T48  Round-trip gate holds at 0.5mi — stays IN_TRIP (Watchdog blocked)  (IN_TRIP)
+  ✅ PASS  T49  Round-trip gate clears at 1.1mi → REFINE_DROPOFF armed  (REFINE_DROPOFF)
+
+── Scenario 16: Watchdog B + STACKED Atomic Swap ──────────────────────
+
+ success |   from_state   |  to_state   | message 
+---------+----------------+-------------+---------
+ t       | REFINE_DROPOFF | UNCOMMITTED | 
+(1 row)
+
+  ✅ PASS  T50a  Stacked+WatchdogB setup: IN_TRIP after pickup nail  (IN_TRIP)
+  ✅ PASS  T50b  Stack accepted while IN_TRIP → STACKED  (STACKED)
+  ❌ FAIL  T50c  Micro-stop at primary dropoff → candidate set, stays STACKED  (got=ENROUTE expected=STACKED)
+  ✅ PASS  T50d  Departure 400m at speed → Watchdog B fires → STACKED atomic swap → ENROUTE  (ENROUTE)
+  ❌ FAIL  T50e  Primary offer audit record has dropoff written (not poisoned)  (got=17 expected=1)
+

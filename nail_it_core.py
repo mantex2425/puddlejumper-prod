@@ -342,6 +342,24 @@ def check_convergence(driver_id, current_lat, current_lng,
                 )
                 return ('REFINE_PICKUP', 'IN_TRIP', dist_to_pickup_m)
 
+        # ── Watchdog B departure detection — HIGHEST PRIORITY ────────────
+        # Must run before armed-radius block to prevent REFINE_DROPOFF early return
+        # from hijacking departure detection when candidate exists.
+        if candidate_lat is not None and candidate_lng is not None:
+            cur.execute(
+                "SELECT app_private.distance_miles(%s,%s,%s,%s) * 1609.34 AS dist_m",
+                (current_lat, current_lng, candidate_lat, candidate_lng)
+            )
+            dist_from_candidate_m = float(cur.fetchone()['dist_m'])
+            if (dist_from_candidate_m > DEPARTURE_DISTANCE_M and
+                    current_speed_mph > DEPARTURE_SPEED_MPH):
+                logging.info(
+                    f"check_convergence: DROPOFF_NAIL_B (Watchdog B departure) — "
+                    f"retroactive nail at candidate, {dist_from_candidate_m:.0f}m departed"
+                )
+                return ('DROPOFF_NAIL_B', 'UNCOMMITTED', dist_from_candidate_m,
+                        (candidate_lat, candidate_lng))
+
         # ── Dual-Watchdog Logic (NEW) ───────────────────────────────────────
         if dist_m < armed_radius:
             # Inner confirm zone — hard lock regardless of stopped_seconds (preserves S15)
@@ -381,7 +399,8 @@ def check_convergence(driver_id, current_lat, current_lng,
                     )
 
             # Existing armed-zone refinement (kept for compatibility)
-            if dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
+            # STACKED excluded — dropoff_lat points to secondary ride, refinement is nonsensical
+            if state != 'STACKED' and dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
                 logging.info(
                     f"check_convergence: REFINE_DROPOFF (armed) — {dist_m:.0f}m "
                     f"(was {effective_error:.0f}m) at {current_speed_mph:.1f}mph"
@@ -389,23 +408,7 @@ def check_convergence(driver_id, current_lat, current_lng,
                 return ('REFINE_DROPOFF', 'IN_TRIP', dist_m)
 
         else:
-            if dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
+            if state != 'STACKED' and dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
                 return ('REFINE', 'IN_TRIP', dist_m)
-
-        # Watchdog B — departure detection (checked regardless of armed radius)
-        if candidate_lat is not None and candidate_lng is not None:
-            cur.execute(
-                "SELECT app_private.distance_miles(%s,%s,%s,%s) * 1609.34 AS dist_m",
-                (current_lat, current_lng, candidate_lat, candidate_lng)
-            )
-            dist_from_candidate_m = float(cur.fetchone()['dist_m'])
-            if (dist_from_candidate_m > DEPARTURE_DISTANCE_M and
-                    current_speed_mph > DEPARTURE_SPEED_MPH):
-                logging.info(
-                    f"check_convergence: DROPOFF_NAIL_B (Watchdog B departure) — "
-                    f"retroactive nail at candidate, {dist_from_candidate_m:.0f}m departed"
-                )
-                return ('DROPOFF_NAIL_B', 'UNCOMMITTED', dist_from_candidate_m,
-                        (candidate_lat, candidate_lng))
 
     return ('HOLD', state, None)

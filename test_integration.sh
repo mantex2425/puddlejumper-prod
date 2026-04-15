@@ -693,3 +693,78 @@ STATE=$(get_state)
 check "T49" "Round-trip gate clears at 1.1mi → REFINE_DROPOFF armed" "$STATE" "REFINE_DROPOFF"
 
 echo ""
+
+# ── SCENARIO 16: Watchdog B + STACKED Atomic Swap ────────────────────────────
+
+echo "── Scenario 16: Watchdog B + STACKED Atomic Swap ──────────────────────"
+echo ""
+reset_state
+clear_logs
+sleep 1
+
+# Accept primary offer → ENROUTE
+decide 18.50 8.2 22 $PICKUP_LAT $PICKUP_LNG $DROPOFF_LAT $DROPOFF_LNG > /dev/null
+
+# Nail primary pickup → IN_TRIP
+heartbeat $PICKUP_LAT $PICKUP_LNG 0.5 15 45 > /dev/null
+STATE=$(get_state)
+check "T50a" "Stacked+WatchdogB setup: IN_TRIP after pickup nail" "$STATE" "IN_TRIP"
+
+# Accept stack offer while IN_TRIP → STACKED
+decide 18.50 7.0 20 $PICKUP2_LAT $PICKUP2_LNG $DROPOFF2_LAT $DROPOFF2_LNG > /dev/null
+STATE=$(get_state)
+check "T50b" "Stack accepted while IN_TRIP → STACKED" "$STATE" "STACKED"
+
+# Heartbeat at primary dropoff, micro-stop 5 seconds → SET_CANDIDATE (stays STACKED)
+curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"armed\": true, \"target_type\": \"dropoff\",
+        \"dist_to_target_m\": 280,
+        \"cumulative_miles\": 8.5,
+        \"stopped_seconds\": 5,
+        \"required_stopped_seconds\": 10,
+        \"speed_mph\": 0.5,
+        \"gps_accuracy_m\": 8,
+        \"enroute_seconds\": 420,
+        \"lat\": 29.71890556,
+        \"lng\": -95.40122071
+    }" > /dev/null
+STATE=$(get_state)
+check "T50c" "Micro-stop at primary dropoff → candidate set, stays STACKED" "$STATE" "STACKED"
+
+# Depart 400m at speed → Watchdog B fires → atomic swap → ENROUTE
+curl -s -X POST "$SERVICE/api/v1/driver/heartbeat" \
+    -H "X-Internal-Replay: puddlejumper-replay-2026" \
+    -H "X-Driver-Id: $DRIVER" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"armed\": true, \"target_type\": \"dropoff\",
+        \"dist_to_target_m\": 420,
+        \"cumulative_miles\": 8.8,
+        \"stopped_seconds\": 0,
+        \"required_stopped_seconds\": 10,
+        \"speed_mph\": 22.0,
+        \"gps_accuracy_m\": 8,
+        \"enroute_seconds\": 445,
+        \"lat\": 29.72200,
+        \"lng\": -95.4012
+    }" > /dev/null
+STATE=$(get_state)
+check "T50d" "Departure 400m at speed → Watchdog B fires → STACKED atomic swap → ENROUTE" "$STATE" "ENROUTE"
+
+# Verify primary offer audit record has dropoff written (Stolen Identity fix)
+AUDIT=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+    SELECT COUNT(*)
+    FROM app_private.offer_history oh
+    JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+    WHERE dl.driver_id = '$DRIVER'
+      AND oh.actual_pickup_at IS NOT NULL
+      AND oh.actual_dropoff_at IS NOT NULL
+      AND dl.created_at > NOW() - INTERVAL '5 minutes';
+" 2>/dev/null | tr -d ' ')
+check "T50e" "Primary offer audit record has dropoff written (not poisoned)" "$AUDIT" "1"
+
+echo ""
