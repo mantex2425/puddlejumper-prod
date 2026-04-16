@@ -24,16 +24,52 @@ def run_decision_engine(cur, conn, uid, params):
     # driver GPS as location bias. Cache key = normalized address text only.
     from triangulation import _lookup_geocode_cache, _google_geocode, _write_geocode_cache
 
+    # Vague address keywords — addresses matching these are highway/road centroids
+    # and should never be cached (single point on a 15-mile road is worse than no cache)
+    _VAGUE_KEYWORDS = {
+        'hwy', 'highway', 'pkwy', 'parkway', 'fwy', 'freeway',
+        'beltway', 'tollway', 'loop', 'expressway', 'sw fwy',
+        'west loop', 'east loop', 'north loop', 'south loop',
+    }
+
+    def _is_vague_address(addr: str) -> bool:
+        """True if address is a highway/road with no intersection anchor.
+        Intersections (e.g. "Allen Pkwy & Damico St") and numbered addresses
+        (e.g. "7745 S Sam Houston Pkwy") are considered precise enough to cache.
+        Pure highway names (e.g. "Southwest Fwy, Houston") are vague — don't cache.
+        """
+        if not addr:
+            return True
+        tokens = addr.lower().split()
+        # Single or two token addresses are too vague (e.g. "Pkwy" or "W Loop")
+        if len(tokens) <= 2:
+            return True
+        # Has a street number → precise enough to cache
+        if tokens[0].isdigit():
+            return False
+        # Has an intersection marker → precise enough to cache
+        if '&' in addr or ' and ' in addr.lower():
+            return False
+        # Pure highway/road name with no anchor
+        return any(kw in addr.lower() for kw in _VAGUE_KEYWORDS)
+
     def _server_geocode(addr, bias_lat, bias_lng, fallback_lat, fallback_lng):
         if not addr:
             return fallback_lat or 0.0, fallback_lng or 0.0
-        cached = _lookup_geocode_cache(addr, cur)
-        if cached:
-            logging.info(f"[GEO] Cache hit: {addr!r} → {cached[0]:.5f},{cached[1]:.5f}")
-            return cached[0], cached[1]
+        # Vague addresses (highways, loops, freeways) bypass cache entirely —
+        # a single cached point on a 15-mile road is worse than a fresh geocode
+        _vague = _is_vague_address(addr)
+        if not _vague:
+            cached = _lookup_geocode_cache(addr, cur)
+            if cached:
+                logging.info(f"[GEO] Cache hit: {addr!r} → {cached[0]:.5f},{cached[1]:.5f}")
+                return cached[0], cached[1]
+        else:
+            logging.info(f"[GEO] Vague address — bypassing cache: {addr!r}")
         coords = _google_geocode(addr, bias_lat=bias_lat, bias_lng=bias_lng)
         if coords:
-            _write_geocode_cache(addr, coords[0], coords[1], cur)
+            if not _vague:
+                _write_geocode_cache(addr, coords[0], coords[1], cur)
             logging.info(f"[GEO] Server geocode: {addr!r} → {coords[0]:.5f},{coords[1]:.5f}")
             return coords[0], coords[1]
         logging.warning(f"[GEO] Geocode failed for {addr!r} — using fallback coords")
