@@ -172,6 +172,7 @@ from collections import deque
 import time as _time
 
 BUFFER_SECONDS = 600  # 10 min — covers 5–7 min passenger waits
+TEMPORAL_WINDOW_S = 60   # Houston-tuned: 45-50s passenger walk-ups still win
 
 _stop_buffers: dict[str, deque] = {}
 
@@ -201,6 +202,73 @@ def get_buffer(driver_id: str) -> deque:
 def clear_buffer(driver_id: str) -> None:
     """DIAGNOSE: Called ONLY from EXECUTE on UNCOMMITTED transition."""
     _stop_buffers.pop(driver_id, None)
+
+
+def _add_scored_segment(candidates, segment, min_speed, seg_start_ts, seg_end_ts, trigger_time):
+    """Internal helper — pure DIAGNOSE, no side effects."""
+    if not segment:
+        return
+    lats = [p['lat'] for p in segment]
+    lngs = [p['lng'] for p in segment]
+    centroid_lat = sum(lats) / len(lats)
+    centroid_lng = sum(lngs) / len(lngs)
+    mean_lat = centroid_lat
+    variance_m = sum((lat - mean_lat)**2 for lat in lats) / len(lats)
+    duration_s = seg_end_ts - seg_start_ts
+    num_points = len(segment)
+    time_since_trigger = trigger_time - seg_end_ts
+    temporal_bonus = max(0.0, 1.0 - (time_since_trigger / TEMPORAL_WINDOW_S))
+    score = (
+        0.40 * (1.0 / (1.0 + variance_m)) +
+        0.25 * (5.0 - min_speed) / 5.0 +
+        0.15 * (num_points / 30.0) +
+        0.10 * temporal_bonus +
+        0.10 * min(1.0, duration_s / 420.0)
+    )
+    candidates.append({
+        'centroid_lat':           centroid_lat,
+        'centroid_lng':           centroid_lng,
+        'duration_s':             duration_s,
+        'min_speed_mph':          min_speed,
+        'position_variance_m':    variance_m,
+        'num_points':             num_points,
+        'temporal_proximity_bonus': temporal_bonus,
+        'score':                  score,
+        'end_ts':                 seg_end_ts,
+    })
+
+
+def detect_passenger_stops(driver_id: str, trigger_time: float, verdict_type: str) -> list:
+    """DIAGNOSE: Pure read-only. Segments buffer into micro-stops and scores them.
+    Called from check_convergence() for shadow scoring (Phase 1) or full nailing (Phase 2).
+    Returns list of dicts sorted by composite score (highest first)."""
+    buffer = get_buffer(driver_id)
+    if len(buffer) < 3:
+        return []
+    candidates = []
+    current_segment = []
+    min_speed_in_seg = 999.0
+    seg_start_ts = None
+    for pt in buffer:
+        speed = pt['speed_mph']
+        ts = pt['ts']
+        if speed < NAIL_CONFIRM_SPEED_MPH:
+            if not current_segment:
+                seg_start_ts = ts
+                min_speed_in_seg = speed
+            current_segment.append(pt)
+            min_speed_in_seg = min(min_speed_in_seg, speed)
+        else:
+            if current_segment and (ts - seg_start_ts) >= WATCHDOG_B_MIN_S:
+                _add_scored_segment(candidates, current_segment, min_speed_in_seg,
+                                    seg_start_ts, ts, trigger_time)
+            current_segment = []
+            min_speed_in_seg = 999.0
+    if current_segment and (buffer[-1]['ts'] - seg_start_ts) >= WATCHDOG_B_MIN_S:
+        _add_scored_segment(candidates, current_segment, min_speed_in_seg,
+                            seg_start_ts, buffer[-1]['ts'], trigger_time)
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    return candidates
 DEPARTURE_DISTANCE_M   = 300
 DEPARTURE_SPEED_MPH    = 15.0
 VAGUE_KEYWORDS = {
@@ -456,6 +524,11 @@ def check_convergence(driver_id, current_lat, current_lng,
                             f"[HIGH_SCORE] 🎯 FIRST CANDIDATE: {dist_m:.0f}m from pin — "
                             f"{current_lat:.5f},{current_lng:.5f} stopped {stopped_seconds}s"
                         )
+                    # Phase 0 shadow: confirm buffer health at candidate record time
+                    _buf = get_buffer(driver_id)
+                    if _buf:
+                        _last = _buf[-1]
+                        logging.info(f"[BUFFER] {len(_buf)} pts | last_speed={_last['speed_mph']:.1f}mph")
                     return ('SET_CANDIDATE', 'IN_TRIP', dist_m, (current_lat, current_lng))
                 else:
                     logging.info(
