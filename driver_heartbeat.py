@@ -13,7 +13,8 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
-from nail_it_core import check_convergence, write_nailed_position, classify
+from nail_it_core import (check_convergence, write_nailed_position,
+                          classify, process_heartbeat, clear_buffer)
 from decisions.triangulation_enricher import refine_dropoff_background
 from state_machine import DriverStateMachine
 
@@ -100,6 +101,11 @@ def post_heartbeat():
         enroute_seconds          = body.get("enroute_seconds")
         current_lat              = body.get("lat")
         current_lng              = body.get("lng")
+
+        heading = body.get("heading")  # degrees 0-360, nullable
+        # MONITOR → DIAGNOSE: forward raw heartbeat to Phase 0 shadow buffer
+        if current_lat is not None and current_lng is not None and speed_mph is not None:
+            process_heartbeat(driver_id, current_lat, current_lng, speed_mph, heading=heading)
 
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -216,6 +222,7 @@ def post_heartbeat():
         _just_nailed_pickup = False  # set True when INITIAL_NAIL fires this heartbeat
         if new_state == 'UNCOMMITTED':
             _reset_watchdog_state(cur=cur, conn=conn, driver_id=driver_id)
+            clear_buffer(driver_id)  # DIAGNOSE: clear stop buffer on new trip cycle
             logging.info("[WATCHDOG] State reset to UNCOMMITTED — cleared candidate stack")
         if verdict == 'INITIAL_NAIL':
             # ENROUTE → IN_TRIP: nail pickup, transition state

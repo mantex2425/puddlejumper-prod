@@ -47,6 +47,7 @@ from referrals import referrals_bp
 from crash_reports import crash_reports_bp
 from timelapse import timelapse_bp
 from market_intelligence import market_intelligence_bp
+from driver_debug import driver_debug_bp
 
 app.register_blueprint(markets_bp)
 app.register_blueprint(unified_search_bp, url_prefix="/api/v1")
@@ -62,6 +63,7 @@ app.register_blueprint(driver_heartbeat_bp, url_prefix='/api/v1')
 app.register_blueprint(pickup_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(dropoff_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(driver_state_reset_bp, url_prefix='/api/v1')
+app.register_blueprint(driver_debug_bp, url_prefix='/api/v1')
 
 @app.route('/internal/monitor', methods=['POST'])
 def monitor_endpoint():

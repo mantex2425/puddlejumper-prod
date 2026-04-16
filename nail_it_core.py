@@ -163,6 +163,44 @@ WATCHDOG_A_DURATION_S  = 300   # Last resort only — 5 minutes (red lights can 
 WATCHDOG_B_SPEED_MPH   = 5.0    # Displacement Fuse micro-stop
 WATCHDOG_B_MIN_S       = 3
 WATCHDOG_B_MAX_S       = 8
+
+# ── Phase 0: Unified Stop Buffer (DIAGNOSE box — pure reads, no writes) ──────
+# Grok + Claude + Gemini consensus — shadow mode only
+# Buffer fills silently; current Watchdog B / High Score logic 100% unchanged
+# Passes all three enforcement gates: read-only, no DB, no sm_transition()
+from collections import deque
+import time as _time
+
+BUFFER_SECONDS = 600  # 10 min — covers 5–7 min passenger waits
+
+_stop_buffers: dict[str, deque] = {}
+
+def process_heartbeat(driver_id: str, lat: float, lng: float,
+                      speed_mph: float, heading=None) -> None:
+    """DIAGNOSE: Append + prune raw heartbeat. Called from MONITOR only."""
+    if not driver_id or lat is None or lng is None or speed_mph is None:
+        return
+    if driver_id not in _stop_buffers:
+        _stop_buffers[driver_id] = deque()
+    buffer = _stop_buffers[driver_id]
+    now = _time.time()
+    buffer.append({
+        'lat':       lat,
+        'lng':       lng,
+        'speed_mph': speed_mph,
+        'ts':        now,
+        'heading':   heading,
+    })
+    while buffer and buffer[0]['ts'] < now - BUFFER_SECONDS:
+        buffer.popleft()
+
+def get_buffer(driver_id: str) -> deque:
+    """DIAGNOSE: Read-only accessor for Phase 1+ scoring (shadow only)."""
+    return _stop_buffers.get(driver_id, deque())
+
+def clear_buffer(driver_id: str) -> None:
+    """DIAGNOSE: Called ONLY from EXECUTE on UNCOMMITTED transition."""
+    _stop_buffers.pop(driver_id, None)
 DEPARTURE_DISTANCE_M   = 300
 DEPARTURE_SPEED_MPH    = 15.0
 VAGUE_KEYWORDS = {
