@@ -794,3 +794,56 @@ else
 fi
 
 echo ""
+
+# ── SCENARIO 17: Secondary Offer Cancellation While STACKED ──────────────────
+
+echo "── Scenario 17: Secondary Cancellation While STACKED ───────────────────"
+echo ""
+reset_state
+clear_logs
+sleep 1
+
+# Accept primary offer → ENROUTE
+decide 18.50 8.2 22 $PICKUP_LAT $PICKUP_LNG $DROPOFF_LAT $DROPOFF_LNG > /dev/null
+
+# Nail primary pickup → IN_TRIP
+heartbeat $PICKUP_LAT $PICKUP_LNG 0.5 15 45 > /dev/null
+STATE=$(get_state)
+check "T60a" "Secondary cancel setup: IN_TRIP after pickup nail" "$STATE" "IN_TRIP"
+
+# Accept stack offer → STACKED
+decide 18.50 7.0 20 $PICKUP2_LAT $PICKUP2_LNG $DROPOFF2_LAT $DROPOFF2_LNG > /dev/null
+STATE=$(get_state)
+check "T60b" "Secondary accepted → STACKED" "$STATE" "STACKED"
+
+# New offer arrives while STACKED (secondary cancelled — Uber offering replacement)
+# DECLINE the new offer — triggers secondary cancellation logic
+RESULT=$(decide 2.00 1.0 5 $PICKUP_LAT $PICKUP_LNG $DROPOFF_LAT $DROPOFF_LNG)
+VERDICT=$(echo $RESULT | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','?'))" 2>/dev/null)
+sleep 2
+STATE=$(get_state)
+check "T60c" "New offer while STACKED → secondary cancelled → IN_TRIP on primary" "$STATE" "IN_TRIP"
+
+# Verify primary offer is still active (dropoff not yet confirmed)
+PRIMARY_ACTIVE=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+    SELECT COUNT(*)
+    FROM app_private.offer_history oh
+    JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+    WHERE dl.driver_id = '$DRIVER'
+      AND oh.actual_pickup_at IS NOT NULL
+      AND oh.actual_dropoff_at IS NULL
+      AND dl.created_at > NOW() - INTERVAL '5 minutes';
+" 2>/dev/null | tr -d ' ')
+check "T60d" "Primary offer still active after secondary cancel" "$PRIMARY_ACTIVE" "1"
+
+echo ""
+
+# ── Final Summary ─────────────────────────────────────────────────────────────
+echo "======================================================================"
+PASSED=$((TOTAL - FAILURES))
+if [ $FAILURES -eq 0 ]; then
+    echo "  ✅  $PASSED/$TOTAL passed | 0 failed — READY TO DRIVE 🐸"
+else
+    echo "  ❌  $PASSED/$TOTAL passed | $FAILURES failed — DO NOT DRIVE"
+fi
+echo "======================================================================"

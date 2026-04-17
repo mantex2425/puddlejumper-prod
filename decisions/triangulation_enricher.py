@@ -337,18 +337,46 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     clear_coords=True,
                 )
             elif _verdict != "ACCEPT" and _current_state == "STACKED":
-                # Flag potential_cancellation — no state change
+                # New offer while STACKED = secondary cancelled (Uber wouldn't offer
+                # a new ride if the existing secondary was still valid).
+                # Assume Scenario A: secondary cancelled, primary still active.
+                # Fire offer_declined → IN_TRIP, restore primary dropoff coords.
+                # Scenario B (primary completed, nail missed) handled by self-healing route.
                 try:
                     cur.execute("""
-                        UPDATE app_private.driver_trip_state
-                        SET potential_cancellation = TRUE,
-                            state_updated_at = NOW()
-                        WHERE driver_id = %s
+                        SELECT oh.decision_log_id,
+                               oh.dropoff_lat, oh.dropoff_lng, oh.dropoff_h3
+                        FROM app_private.offer_history oh
+                        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                        WHERE dl.driver_id = %s
+                          AND oh.actual_pickup_at IS NOT NULL
+                          AND oh.actual_dropoff_at IS NULL
+                        ORDER BY oh.actual_pickup_at DESC
+                        LIMIT 1
                     """, (uid,))
-                    conn.commit()
-                    logging.info("[SM] potential_cancellation flagged on STACKED state")
-                except Exception as _pc_err:
-                    logging.warning(f"[SM] potential_cancellation flag failed: {_pc_err}")
+                    _primary = cur.fetchone()
+                    if _primary:
+                        DriverStateMachine.transition(
+                            uid, "offer_declined", cur, conn,
+                            offer_id=str(_primary["decision_log_id"]),
+                            dropoff_lat=_primary["dropoff_lat"],
+                            dropoff_lng=_primary["dropoff_lng"],
+                            dropoff_h3=_primary["dropoff_h3"],
+                        )
+                        logging.warning(
+                            f"[S04-STACKED] Secondary cancelled — demoted to IN_TRIP "
+                            f"on primary offer={_primary['decision_log_id']} "
+                            f"dropoff=({_primary['dropoff_lat']},{_primary['dropoff_lng']})"
+                        )
+                    else:
+                        # No active primary found — full reset
+                        DriverStateMachine.transition(
+                            uid, "manual_reset", cur, conn,
+                            clear_coords=True,
+                        )
+                        logging.warning("[S04-STACKED] Secondary cancelled, no active primary — full reset to UNCOMMITTED")
+                except Exception as _sc_err:
+                    logging.warning(f"[S04-STACKED] Secondary cancel handling failed: {_sc_err}")
                     try: conn.rollback()
                     except: pass
             else:
