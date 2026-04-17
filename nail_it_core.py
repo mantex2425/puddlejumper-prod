@@ -204,6 +204,31 @@ def clear_buffer(driver_id: str) -> None:
     _stop_buffers.pop(driver_id, None)
 
 
+def get_next_stacked_offer(cur, driver_id: str) -> dict | None:
+    """DIAGNOSE: Find the next unstarted accepted offer for a STACKED swap.
+    Returns dict with decision_log_id, dropoff_lat, dropoff_lng, dropoff_h3
+    or None if not found.
+    Uses FIFO order (ASC) — correct for triple-stack scenarios.
+    Filters: verdict=ACCEPT, actual_pickup_at IS NULL (not yet started).
+    """
+    try:
+        cur.execute("""
+            SELECT oh.decision_log_id,
+                   oh.dropoff_lat, oh.dropoff_lng, oh.dropoff_h3
+            FROM app_private.offer_history oh
+            JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+            WHERE dl.driver_id = %s
+              AND oh.actual_pickup_at IS NULL
+              AND dl.decision_result->>'verdict' = 'ACCEPT'
+            ORDER BY dl.created_at ASC
+            LIMIT 1
+        """, (driver_id,))
+        return cur.fetchone()
+    except Exception as e:
+        logging.warning(f"[S17] get_next_stacked_offer failed: {e}")
+        return None
+
+
 def _add_scored_segment(candidates, segment, min_speed, seg_start_ts, seg_end_ts, trigger_time):
     """Internal helper — pure DIAGNOSE, no side effects."""
     if not segment:

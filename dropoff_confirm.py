@@ -10,7 +10,7 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from state_machine import DriverStateMachine
-from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position
+from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, get_next_stacked_offer
 
 dropoff_confirm_bp = Blueprint('dropoff_confirm', __name__)
 
@@ -134,26 +134,18 @@ def confirm_dropoff():
             if _current_state == "STACKED":
                 # Completing first ride — pivot to secondary dropoff
                 _sec_dlat = _sec_dlng = _sec_dh3 = None
-                if _state_row and _state_row.get("current_offer_id"):
-                    cur.execute("""
-                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
-                        FROM app_private.offer_history
-                        WHERE decision_log_id = (
-                            SELECT id FROM app_private.decision_log
-                            WHERE driver_id = %s
-                            ORDER BY created_at DESC LIMIT 1
-                        ) LIMIT 1
-                    """, (driver_id,))
-                    _sec = cur.fetchone()
-                    if _sec:
-                        _sec_dlat = _sec["dropoff_lat"]
-                        _sec_dlng = _sec["dropoff_lng"]
-                        _sec_dh3  = _sec["dropoff_h3"]
-                        logging.info(
-                            f"🔄 Buffer swap: secondary dropoff "
-                            f"({_sec_dlat:.4f},{_sec_dlng:.4f})"
-                        )
+                _sec = get_next_stacked_offer(cur, driver_id)
+                if _sec:
+                    _sec_offer_id = str(_sec["decision_log_id"])
+                    _sec_dlat = _sec["dropoff_lat"]
+                    _sec_dlng = _sec["dropoff_lng"]
+                    _sec_dh3  = _sec["dropoff_h3"]
+                    logging.info(f"🔄 Buffer swap: secondary offer={_sec_offer_id} dropoff ({_sec_dlat:.4f},{_sec_dlng:.4f})")
+                else:
+                    _sec_offer_id = None
+                    logging.warning("🔄 Buffer swap: no secondary offer found")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    offer_id=_sec_offer_id,
                     nailed_dropoff_lat=actual_lat,
                     nailed_dropoff_lng=actual_lng,
                     dropoff_lat=_sec_dlat,

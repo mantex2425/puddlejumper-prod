@@ -14,7 +14,8 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import (check_convergence, write_nailed_position,
-                          classify, process_heartbeat, clear_buffer)
+                          classify, process_heartbeat, clear_buffer,
+                          get_next_stacked_offer)
 from decisions.triangulation_enricher import refine_dropoff_background
 from state_machine import DriverStateMachine
 
@@ -381,30 +382,24 @@ def post_heartbeat():
                 except Exception as _oh_err:
                     logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
             if _s == 'STACKED':
-                # Atomic buffer swap — fetch secondary ride coords
-                _sec_dlat = _sec_dlng = _sec_dh3 = None
-                if _offer_id:
-                    cur.execute("""
-                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
-                        FROM app_private.offer_history
-                        WHERE decision_log_id = (
-                            SELECT id FROM app_private.decision_log
-                            WHERE driver_id = %s
-                            ORDER BY created_at DESC LIMIT 1
-                        ) LIMIT 1
-                    """, (driver_id,))
-                    _sec = cur.fetchone()
-                    if _sec:
-                        _sec_dlat = _sec["dropoff_lat"]
-                        _sec_dlng = _sec["dropoff_lng"]
-                        _sec_dh3  = _sec["dropoff_h3"]
-                        logging.info(f"[S17] Atomic buffer swap: secondary dropoff ({_sec_dlat:.4f},{_sec_dlng:.4f})")
+                # Atomic buffer swap — fetch secondary ride coords + offer ID
+                _sec_dlat = _sec_dlng = _sec_dh3 = _sec_offer_id = None
+                _sec = get_next_stacked_offer(cur, driver_id)
+                if _sec:
+                    _sec_offer_id = str(_sec["decision_log_id"])
+                    _sec_dlat = _sec["dropoff_lat"]
+                    _sec_dlng = _sec["dropoff_lng"]
+                    _sec_dh3  = _sec["dropoff_h3"]
+                    logging.info(f"[S17] Atomic buffer swap: secondary offer={_sec_offer_id} dropoff ({_sec_dlat},{_sec_dlng})")
+                else:
+                    logging.warning(f"[S17] Atomic buffer swap: no secondary offer found")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    offer_id=_sec_offer_id,
                     dropoff_lat=_sec_dlat,
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
                 )
-                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete")
+                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete — new offer={_sec_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
             else:
@@ -480,30 +475,24 @@ def post_heartbeat():
                 except Exception as _oh_err:
                     logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
             if _s == 'STACKED':
-                # Atomic buffer swap — fetch secondary ride coords
-                _sec_dlat = _sec_dlng = _sec_dh3 = None
-                if _offer_id:
-                    cur.execute("""
-                        SELECT dropoff_lat, dropoff_lng, dropoff_h3
-                        FROM app_private.offer_history
-                        WHERE decision_log_id = (
-                            SELECT id FROM app_private.decision_log
-                            WHERE driver_id = %s
-                            ORDER BY created_at DESC LIMIT 1
-                        ) LIMIT 1
-                    """, (driver_id,))
-                    _sec = cur.fetchone()
-                    if _sec:
-                        _sec_dlat = _sec["dropoff_lat"]
-                        _sec_dlng = _sec["dropoff_lng"]
-                        _sec_dh3  = _sec["dropoff_h3"]
-                        logging.info(f"[S17] Atomic buffer swap (B): secondary dropoff ({_sec_dlat:.4f},{_sec_dlng:.4f})")
+                # Atomic buffer swap — fetch secondary ride coords + offer ID
+                _sec_dlat = _sec_dlng = _sec_dh3 = _sec_offer_id = None
+                _sec = get_next_stacked_offer(cur, driver_id)
+                if _sec:
+                    _sec_offer_id = str(_sec["decision_log_id"])
+                    _sec_dlat = _sec["dropoff_lat"]
+                    _sec_dlng = _sec["dropoff_lng"]
+                    _sec_dh3  = _sec["dropoff_h3"]
+                    logging.info(f"[S17] Atomic buffer swap (B): secondary offer={_sec_offer_id} dropoff ({_sec_dlat},{_sec_dlng})")
+                else:
+                    logging.warning(f"[S17] Atomic buffer swap (B): no secondary offer found")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
+                    offer_id=_sec_offer_id,
                     dropoff_lat=_sec_dlat,
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
                 )
-                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b)")
+                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — new offer={_sec_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
             else:
