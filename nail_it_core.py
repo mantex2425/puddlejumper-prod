@@ -216,12 +216,10 @@ def get_next_stacked_offer(cur, driver_id: str) -> dict | None:
             SELECT oh.decision_log_id,
                    oh.dropoff_lat, oh.dropoff_lng, oh.dropoff_h3
             FROM app_private.offer_history oh
-            JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
-            WHERE dl.driver_id = %s
+            JOIN app_private.driver_trip_state dts
+                   ON dts.current_offer_id::integer = oh.decision_log_id
+            WHERE dts.driver_id = %s
               AND oh.actual_pickup_at IS NULL
-              AND dl.decision_result->>'verdict' = 'ACCEPT'
-            ORDER BY dl.created_at ASC
-            LIMIT 1
         """, (driver_id,))
         return cur.fetchone()
     except Exception as e:

@@ -475,24 +475,27 @@ def post_heartbeat():
                 except Exception as _oh_err:
                     logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
             if _s == 'STACKED':
-                # Atomic buffer swap — fetch secondary ride coords + offer ID
-                _sec_dlat = _sec_dlng = _sec_dh3 = _sec_offer_id = None
-                _sec = get_next_stacked_offer(cur, driver_id)
+                # Atomic buffer swap — current_offer_id IS already the secondary offer
+                _sec_dlat = _sec_dlng = _sec_dh3 = None
+                cur.execute("""
+                    SELECT oh.dropoff_lat, oh.dropoff_lng, oh.dropoff_h3
+                    FROM app_private.offer_history oh
+                    WHERE oh.decision_log_id = %s::integer
+                """, (_offer_id,))
+                _sec = cur.fetchone()
                 if _sec:
-                    _sec_offer_id = str(_sec["decision_log_id"])
                     _sec_dlat = _sec["dropoff_lat"]
                     _sec_dlng = _sec["dropoff_lng"]
                     _sec_dh3  = _sec["dropoff_h3"]
-                    logging.info(f"[S17] Atomic buffer swap (B): secondary offer={_sec_offer_id} dropoff ({_sec_dlat},{_sec_dlng})")
+                    logging.info(f"[S17] Atomic buffer swap (B): offer={_offer_id} dropoff ({_sec_dlat},{_sec_dlng})")
                 else:
-                    logging.warning(f"[S17] Atomic buffer swap (B): no secondary offer found")
+                    logging.warning(f"[S17] Atomic buffer swap (B): no coords for offer={_offer_id}")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
-                    offer_id=_sec_offer_id,
                     dropoff_lat=_sec_dlat,
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
                 )
-                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — new offer={_sec_offer_id}")
+                logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — offer={_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
             else:
