@@ -312,6 +312,26 @@ def run_tests():
           f"state={row['state']}")
         rsp()
 
+        # S30 — Secondary cancellation: STACKED + offer_declined → IN_TRIP
+        # Verifies that when secondary is cancelled, primary coords are restored
+        sp()
+        force_state(cur, conn, "STACKED",
+            pickup_lat=PICKUP_LAT, pickup_lng=PICKUP_LNG,
+            dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG)
+        # offer_declined = secondary cancelled, restore primary
+        r = trans("offer_declined",
+            offer_id=None,
+            dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG,
+            dropoff_h3=DROPOFF_H3)
+        row = get_row(cur)
+        ok = (r["success"] and 
+              row["state"] == "IN_TRIP" and
+              row["dropoff_lat"] == DROPOFF_LAT and
+              row["dropoff_lng"] == DROPOFF_LNG)
+        T("S30", "STACKED + offer_declined → IN_TRIP with primary coords restored", ok,
+          f"state={row['state']} dropoff_lat={row['dropoff_lat']}")
+        rsp()
+
         # S13
         sp()
         force_state(cur, conn, "IN_TRIP",
@@ -460,7 +480,9 @@ def run_tests():
             pickup_lat=PICKUP_LAT, pickup_lng=PICKUP_LNG,
             dropoff_lat=DROPOFF_LAT, dropoff_lng=DROPOFF_LNG)
         state_row = get_row(cur)
-        armed_lat = PICKUP_LAT + 0.0072  # ~800m north — inside armed zone, outside confirm
+        state_row = dict(state_row)  # make mutable
+        state_row['pickup_address'] = "Main St & Texas Ave, Houston, Texas"  # precise → 200m confirm
+        armed_lat = PICKUP_LAT + 0.0072  # ~800m north — inside armed zone, outside 200m confirm
         verdict29b, new_state29b, _ = check_convergence(
             TEST_DRIVER, armed_lat, PICKUP_LNG, 20.0, state_row, cur
         )

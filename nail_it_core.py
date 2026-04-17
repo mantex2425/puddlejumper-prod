@@ -199,9 +199,14 @@ def get_buffer(driver_id: str) -> deque:
     """DIAGNOSE: Read-only accessor for Phase 1+ scoring (shadow only)."""
     return _stop_buffers.get(driver_id, deque())
 
-def clear_buffer(driver_id: str) -> None:
-    """DIAGNOSE: Called ONLY from EXECUTE on UNCOMMITTED transition."""
-    _stop_buffers.pop(driver_id, None)
+def clear_buffer(driver_id: str) -> int:
+    """DIAGNOSE: Called from EXECUTE on trip-cycle boundaries.
+
+    Returns the number of stops discarded (0 if buffer was empty or absent).
+    Idempotent — safe to call on any state transition.
+    """
+    buffer = _stop_buffers.pop(driver_id, None)
+    return len(buffer) if buffer is not None else 0
 
 
 def get_next_stacked_offer(cur, driver_id: str) -> dict | None:
