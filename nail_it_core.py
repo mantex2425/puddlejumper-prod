@@ -170,6 +170,7 @@ WATCHDOG_B_MAX_S       = 8
 # Passes all three enforcement gates: read-only, no DB, no sm_transition()
 from collections import deque
 import time as _time
+from routes_api import fetch_feasible_change as _fetch_feasible_change
 
 BUFFER_SECONDS = 600  # 10 min — covers 5–7 min passenger waits
 TEMPORAL_WINDOW_S = 60   # Houston-tuned: 45-50s passenger walk-ups still win
@@ -266,6 +267,231 @@ def _add_scored_segment(candidates, segment, min_speed, seg_start_ts, seg_end_ts
     })
 
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# Route-Context Scoring Helpers (Revision 00557)
+# ═══════════════════════════════════════════════════════════════════════════
+# Pure DIAGNOSE functions — no DB, no I/O, no state, no side effects.
+# Implements Gemini's technical spec for Scorer B (route-context).
+
+import math as _math
+
+# Configurable thresholds (tunable post-contest, not hardcoded deep in logic)
+ROUTE_XTE_GATE_M           = 30.0    # ±30m snap window for on-track / deviation
+ROUTE_LOWSPEED_MAX_MPS     = 1.0     # velocity filter for median centroid
+ROUTE_UTURN_HEADING_DEG    = 120.0   # heading deviation for U-turn tolerance
+ROUTE_LONG_STOP_S          = 15.0    # Feasible Change trigger: long-stop floor
+ROUTE_NEAR_TARGET_M        = 200.0   # Feasible Change trigger: near-target gate
+ROUTE_FINAL_NAIL_M         = 100.0   # (reserved — not used in Round 1)
+ROUTE_MIN_LOWSPEED_PTS     = 3       # minimum low-speed points to compute centroid
+
+
+def median_centroid(cluster_points: list) -> tuple:
+    """DIAGNOSE: Gemini's Median Centroid — independent medians of lat and lng
+    over points where velocity < ROUTE_LOWSPEED_MAX_MPS (1.0 m/s).
+
+    Returns (lat, lng, num_lowspeed_points) or (None, None, 0) if insufficient
+    low-speed data. The caller is responsible for handling None.
+
+    Why medians: robust to GPS jitter at low speed (multipath, urban canyons).
+    Why independent (lat & lng separately): cheaper than geometric median,
+    sufficient for 2D jitter correction in L1 space.
+    """
+    # Filter to low-speed points (curb truth, not decel/accel noise)
+    # speed_mph is what the buffer stores; convert threshold to mph
+    lowspeed_threshold_mph = ROUTE_LOWSPEED_MAX_MPS * 2.23694  # ~2.24 mph
+    lowspeed = [p for p in cluster_points if p.get('speed_mph', 999) < lowspeed_threshold_mph]
+    if len(lowspeed) < ROUTE_MIN_LOWSPEED_PTS:
+        return (None, None, len(lowspeed))
+    lats = sorted(p['lat'] for p in lowspeed)
+    lngs = sorted(p['lng'] for p in lowspeed)
+    n = len(lowspeed)
+    # Median: middle value for odd n, average of two middles for even n
+    if n % 2 == 1:
+        return (lats[n // 2], lngs[n // 2], n)
+    return ((lats[n // 2 - 1] + lats[n // 2]) / 2.0,
+            (lngs[n // 2 - 1] + lngs[n // 2]) / 2.0,
+            n)
+
+
+def decode_polyline(encoded: str) -> list:
+    """DIAGNOSE: Google's standard polyline algorithm decoder.
+    Returns list of (lat, lng) tuples. Handles malformed input by returning
+    an empty list (safer than raising — we want graceful degradation)."""
+    if not encoded:
+        return []
+    try:
+        points = []
+        index = 0
+        lat = 0
+        lng = 0
+        length = len(encoded)
+        while index < length:
+            for coord in ('lat', 'lng'):
+                shift = 0
+                result = 0
+                while True:
+                    if index >= length:
+                        return points  # truncated — return what we have
+                    b = ord(encoded[index]) - 63
+                    index += 1
+                    result |= (b & 0x1f) << shift
+                    shift += 5
+                    if b < 0x20:
+                        break
+                delta = ~(result >> 1) if (result & 1) else (result >> 1)
+                if coord == 'lat':
+                    lat += delta
+                else:
+                    lng += delta
+            points.append((lat / 1e5, lng / 1e5))
+        return points
+    except Exception:
+        return []  # fail-safe: never raise from a decoder
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Haversine distance in meters between two lat/lng points. Private helper."""
+    R = 6371000.0  # Earth radius in meters
+    phi1 = _math.radians(lat1)
+    phi2 = _math.radians(lat2)
+    dphi = _math.radians(lat2 - lat1)
+    dlam = _math.radians(lng2 - lng1)
+    a = _math.sin(dphi / 2) ** 2 + _math.cos(phi1) * _math.cos(phi2) * _math.sin(dlam / 2) ** 2
+    return 2 * R * _math.asin(_math.sqrt(a))
+
+
+def _xte_to_segment_m(lat: float, lng: float,
+                      lat_a: float, lng_a: float,
+                      lat_b: float, lng_b: float) -> float:
+    """Perpendicular distance from (lat,lng) to the segment A→B, in meters.
+    Uses planar projection — accurate for segments under ~10km, which is
+    always true for individual polyline segments from Routes API."""
+    # Convert to local planar coordinates (meters from segment start)
+    # This is a small-area approximation; error is <0.1% for sub-km segments
+    dlat_m = (lat_b - lat_a) * 111320.0
+    dlng_m = (lng_b - lng_a) * 111320.0 * _math.cos(_math.radians(lat_a))
+    plat_m = (lat - lat_a) * 111320.0
+    plng_m = (lng - lng_a) * 111320.0 * _math.cos(_math.radians(lat_a))
+    seg_len_sq = dlat_m ** 2 + dlng_m ** 2
+    if seg_len_sq < 1e-6:
+        # Degenerate segment — A and B are the same point
+        return _math.sqrt(plat_m ** 2 + plng_m ** 2)
+    # Project point onto segment, clamp to [0,1] to stay within segment bounds
+    t = max(0.0, min(1.0, (plat_m * dlat_m + plng_m * dlng_m) / seg_len_sq))
+    proj_lat_m = t * dlat_m
+    proj_lng_m = t * dlng_m
+    return _math.sqrt((plat_m - proj_lat_m) ** 2 + (plng_m - proj_lng_m) ** 2)
+
+
+def cross_track_error(lat: float, lng: float, polyline_points: list) -> float:
+    """DIAGNOSE: Minimum perpendicular distance (meters) from point to the
+    nearest segment of the polyline. Returns None if polyline has <2 points."""
+    if not polyline_points or len(polyline_points) < 2:
+        return None
+    min_xte = float('inf')
+    for i in range(len(polyline_points) - 1):
+        lat_a, lng_a = polyline_points[i]
+        lat_b, lng_b = polyline_points[i + 1]
+        d = _xte_to_segment_m(lat, lng, lat_a, lng_a, lat_b, lng_b)
+        if d < min_xte:
+            min_xte = d
+    return min_xte if min_xte < float('inf') else None
+
+
+def great_circle_xte(lat: float, lng: float,
+                     origin_lat: float, origin_lng: float,
+                     dest_lat: float, dest_lng: float) -> float:
+    """DIAGNOSE: Fallback XTE when no cached polyline is available.
+    Computes perpendicular distance from point to the straight-line path
+    between origin and destination. Single-segment special case of cross_track_error."""
+    return _xte_to_segment_m(lat, lng, origin_lat, origin_lng, dest_lat, dest_lng)
+
+
+def _bearing_deg(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Initial bearing from point 1 to point 2, in degrees (0=N, 90=E)."""
+    phi1 = _math.radians(lat1)
+    phi2 = _math.radians(lat2)
+    dlam = _math.radians(lng2 - lng1)
+    y = _math.sin(dlam) * _math.cos(phi2)
+    x = _math.cos(phi1) * _math.sin(phi2) - _math.sin(phi1) * _math.cos(phi2) * _math.cos(dlam)
+    return (_math.degrees(_math.atan2(y, x)) + 360.0) % 360.0
+
+
+def heading_deviation_deg(heading: float,
+                          from_lat: float, from_lng: float,
+                          to_lat: float, to_lng: float) -> float:
+    """DIAGNOSE: Absolute deviation (0-180°) between a vehicle heading
+    and the bearing from-to. Used for U-turn tolerance rule.
+    Returns None if heading is None (some heartbeats lack heading)."""
+    if heading is None:
+        return None
+    target_bearing = _bearing_deg(from_lat, from_lng, to_lat, to_lng)
+    diff = abs(heading - target_bearing) % 360.0
+    return diff if diff <= 180.0 else 360.0 - diff
+
+
+def route_context_score(centroid_lat: float, centroid_lng: float,
+                        xte_m: float,
+                        heading_deviation: float = None) -> tuple:
+    """DIAGNOSE: Scorer B's score, in [0.0, 1.0].
+
+    Returns (score, u_turn_tolerance_applied: bool).
+
+    Semantics (from Gemini's spec):
+      - XTE ≤ 30m           → high confidence on-track (likely traffic/light)
+                              LOW PUDO score (this is NOT a passenger stop)
+      - XTE > 30m           → deviation candidate (likely PUDO)
+                              HIGH PUDO score scaled by deviation magnitude
+      - Heading >120° from target bearing + within ±30m gate → U-turn tolerance
+                              Treat as on-track despite heading (Texas feeder U-turn)
+
+    Note: Scorer B scores the probability that a cluster IS a PUDO stop.
+    Higher score = more likely PUDO. Inverse of Scorer A's semantics.
+    """
+    if xte_m is None:
+        return (None, False)
+
+    u_turn_applied = False
+
+    # U-turn tolerance: if centroid is within gate and heading is reversed,
+    # classify as on-track regardless of heading
+    if (xte_m <= ROUTE_XTE_GATE_M
+            and heading_deviation is not None
+            and heading_deviation > ROUTE_UTURN_HEADING_DEG):
+        u_turn_applied = True
+
+    if xte_m <= ROUTE_XTE_GATE_M:
+        # On-track: low PUDO probability. Score scales inversely with proximity.
+        # At XTE=0: score=0.10 (very unlikely PUDO)
+        # At XTE=30m: score=0.40 (edge case, modest PUDO probability)
+        return (0.10 + 0.30 * (xte_m / ROUTE_XTE_GATE_M), u_turn_applied)
+    else:
+        # Off-track: high PUDO probability. Score saturates past ~150m deviation.
+        # At XTE=30m: score=0.60
+        # At XTE=150m+: score=0.95
+        deviation_beyond_gate = xte_m - ROUTE_XTE_GATE_M
+        saturation = min(1.0, deviation_beyond_gate / 120.0)
+        return (0.60 + 0.35 * saturation, u_turn_applied)
+
+
+def feasible_change_triggered(stop_duration_s: float,
+                              xte_m: float,
+                              distance_to_target_m: float) -> bool:
+    """DIAGNOSE: Evaluates all three of Gemini's Feasible Change gates.
+    Returns True only if all three are met."""
+    if xte_m is None or distance_to_target_m is None:
+        return False
+    return (stop_duration_s >= ROUTE_LONG_STOP_S
+            and xte_m > ROUTE_XTE_GATE_M
+            and distance_to_target_m < ROUTE_NEAR_TARGET_M)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# End of route-context scoring helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 def detect_passenger_stops(driver_id: str, trigger_time: float, verdict_type: str) -> list:
     """DIAGNOSE: Pure read-only. Segments buffer into micro-stops and scores them.
     Called from check_convergence() for shadow scoring (Phase 1) or full nailing (Phase 2).
@@ -327,6 +553,522 @@ def get_pickup_confirm_radius(address: str) -> int:
 def get_armed_radius(address: str) -> float:
     # 4-Box Symmetry Mandate: Universal 1500m net — eliminates pin-error dead zone
     return 1500.0
+
+# ════════════════════════════════════════════════════════════════════════════
+# Contest Mode (Revision 00557) — Module-level state
+# ════════════════════════════════════════════════════════════════════════════
+# Guards 1 & 3 from Round 1 design:
+#   - _contest_kill_switches[(driver_id, trip_id)] = {'scorer_a': bool, 'scorer_b': bool}
+#     Tracks whether each scorer has raised an exception during this trip.
+#     Tripped kill switch → that scorer skipped for remainder of trip.
+#   - _contest_nails_fired[(driver_id, trip_id)] = {'scorer_a': bool, 'scorer_b': bool}
+#     Guard 3: one-nail-per-trip-per-scorer. Prevents double-nailing.
+#
+# Both dicts reset when a trip transitions to UNCOMMITTED (cleared via the
+# same trip-boundary mechanism that clears _stop_buffers).
+
+_contest_kill_switches: dict[tuple, dict] = {}
+_contest_nails_fired: dict[tuple, dict] = {}
+
+# Scorer B must beat Scorer A by this margin to override candidate selection.
+# Tunable post-contest — too low and Scorer B hijacks on noise; too high and
+# Scorer B never gets to demonstrate improvement.
+CONTEST_SCORER_B_MARGIN = 0.15
+
+# Armed-radius multiplier for Scorer B centroid override.
+# Even if Scorer B wins the score contest, its chosen centroid must lie within
+# this multiple of the armed_radius to be allowed to override Scorer A.
+# Guard 2: "implausible nail" sanity gate.
+CONTEST_OVERRIDE_RADIUS_MULTIPLIER = 1.0  # i.e., within armed_radius
+
+
+def _contest_trip_key(driver_id: str, state_row: dict) -> tuple:
+    """Contest bookkeeping is per-(driver, trip). Use offer_id as trip identifier.
+    Falls back to driver_id alone if offer_id is missing (UNCOMMITTED state)."""
+    offer_id = state_row.get('current_offer_id') if state_row else None
+    return (driver_id, offer_id) if offer_id else (driver_id, None)
+
+
+def _contest_kill_switch_check(trip_key: tuple, scorer: str) -> bool:
+    """Returns True if scorer is tripped (should be skipped). False if healthy."""
+    return _contest_kill_switches.get(trip_key, {}).get(scorer, False)
+
+
+def _contest_trip_kill(trip_key: tuple, scorer: str, reason: str) -> None:
+    """Guard 1: trip the kill switch for a scorer on this trip."""
+    import logging
+    _contest_kill_switches.setdefault(trip_key, {})[scorer] = True
+    logging.warning(f"[CONTEST] Kill switch tripped: {scorer} on trip {trip_key} — {reason}")
+
+
+def _contest_nail_already_fired(trip_key: tuple, scorer: str) -> bool:
+    """Guard 3: has this scorer already fired a nail this trip?"""
+    return _contest_nails_fired.get(trip_key, {}).get(scorer, False)
+
+
+def _contest_mark_nail_fired(trip_key: tuple, scorer: str) -> None:
+    """Guard 3: record that this scorer has nailed on this trip."""
+    _contest_nails_fired.setdefault(trip_key, {})[scorer] = True
+
+
+def _contest_clear_trip_state(driver_id: str) -> None:
+    """Called from trip-boundary events (UNCOMMITTED transition) to reset
+    kill switches and nail flags. Invoked from state_machine.transition()
+    alongside clear_buffer()."""
+    # Drop every entry whose first tuple element is this driver_id
+    for d in (_contest_kill_switches, _contest_nails_fired):
+        for k in list(d.keys()):
+            if k[0] == driver_id:
+                d.pop(k, None)
+
+
+def _scorer_a_numeric_score(dist_m: float) -> float:
+    """Formalizes the existing [HIGH_SCORE] logic as a numeric score in [0,1].
+    Higher score = more confident this is a real PUDO stop at the pin.
+
+    Production semantics preserved: closer to pin = better. 50m→0.67, 100m→0.50,
+    200m→0.33, 500m→0.17. Smooth decay, no discontinuities.
+
+    This is what the existing [HIGH_SCORE] block already computes implicitly
+    via `dist_m < prev_dist`. We just reify it as a number for the contest."""
+    if dist_m is None or dist_m < 0:
+        return 0.0
+    return 1.0 / (1.0 + dist_m / 100.0)
+
+
+def _write_contest_event(cur, conn, driver_id, state, state_row,
+                         current_lat, current_lng, current_speed_mph,
+                         stopped_seconds, dist_m,
+                         score_a, score_b, scorer_b_data, nail_fired_by):
+    """EXECUTE: Write one contest_events row. Fail-safe — exceptions logged
+    but never propagated (contest infrastructure must not block a trip)."""
+    import logging
+    import time as _time
+    try:
+        xte_m                    = scorer_b_data.get('xte_m')
+        xte_source               = scorer_b_data.get('xte_source')
+        heading_deviation        = scorer_b_data.get('heading_deviation')
+        u_turn_applied           = scorer_b_data.get('u_turn_applied', False)
+        fc_fired                 = scorer_b_data.get('feasible_change_fired', False)
+        fc_xte_m                 = scorer_b_data.get('feasible_change_xte_m')
+        fc_polyline              = scorer_b_data.get('feasible_change_polyline')
+        fc_latency_ms            = scorer_b_data.get('feasible_change_latency_ms')
+        median_lat               = scorer_b_data.get('median_lat')
+        median_lng               = scorer_b_data.get('median_lng')
+        num_lowspeed_points      = scorer_b_data.get('num_lowspeed_points', 0)
+        scorer_a_status          = scorer_b_data.get('scorer_a_status', 'ok')
+        scorer_b_status          = scorer_b_data.get('scorer_b_status', 'ok')
+        target_lat               = scorer_b_data.get('target_lat')
+        target_lng               = scorer_b_data.get('target_lng')
+
+        cur.execute("""
+            INSERT INTO app_private.contest_events (
+                driver_id, offer_id, trip_state,
+                cluster_centroid_lat, cluster_centroid_lng, cluster_centroid_time,
+                cluster_median_lat, cluster_median_lng,
+                cluster_entry_time, cluster_exit_time,
+                num_points, num_lowspeed_points,
+                duration_s, min_speed_mph,
+                target_lat, target_lng, distance_to_target_m,
+                score_pin, score_route,
+                xte_meters, xte_source, heading_deviation_deg, u_turn_tolerance_applied,
+                feasible_change_fired, feasible_change_xte_m,
+                feasible_change_polyline, feasible_change_latency_ms,
+                scorer_a_status, scorer_b_status, nail_fired_by
+            ) VALUES (
+                %s, %s, %s,
+                %s, %s, NOW(),
+                %s, %s,
+                NOW() - make_interval(secs => %s), NOW(),
+                %s, %s,
+                %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s, %s
+            )
+        """, (
+            driver_id, state_row.get('current_offer_id'), state,
+            current_lat, current_lng,
+            median_lat, median_lng,
+            float(stopped_seconds or 0),
+            1, num_lowspeed_points,  # num_points placeholder — Round 2 uses current point only
+            float(stopped_seconds or 0), current_speed_mph,
+            target_lat, target_lng, dist_m,
+            score_a, score_b,
+            xte_m, xte_source, heading_deviation, u_turn_applied,
+            fc_fired, fc_xte_m,
+            fc_polyline, fc_latency_ms,
+            scorer_a_status, scorer_b_status, nail_fired_by,
+        ))
+        conn.commit()
+    except Exception as e:
+        logging.warning(f"[CONTEST] _write_contest_event failed (non-fatal): {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def write_nail_contest_event(
+    cur, conn,
+    driver_id: str,
+    state_row: dict,
+    nail_path: str,
+    current_lat: float,
+    current_lng: float,
+    current_speed_mph: float,
+    current_heading: float,
+    stopped_seconds: float,
+    dist_to_target_m: float,
+    target_lat: float,
+    target_lng: float,
+    pickup_lat: float,
+    pickup_lng: float,
+    dropoff_lat: float,
+    dropoff_lng: float,
+) -> None:
+    """Patch 00562: Public entry point for contest instrumentation at real
+    nail-fire sites. Call AFTER a successful state transition.
+
+    Computes Scorer A + Scorer B, writes one contest_events row with nail_path.
+    Fail-safe — all exceptions logged and swallowed.
+
+    Pickup paths (nail_path ending in 'pickup' or 'pickup_s12') are scored by
+    Scorer A only; Scorer B returns 'pickup_not_scorable' because the driver
+    is at the start of the polyline (XTE would be rigged to ~0).
+
+    Watchdog A paths may have insufficient cluster data; Scorer B returns
+    'insufficient_cluster_data' if num_lowspeed_points < 3.
+    """
+    import logging
+    try:
+        state = state_row.get("state", "UNKNOWN")
+        trip_key = _contest_trip_key(driver_id, state_row)
+        _is_pickup = nail_path.startswith("gps_convergence_pickup") or nail_path == "manual_pickup"
+
+        # Scorer A: always computable — the reified distance-to-target score
+        try:
+            score_a = _scorer_a_numeric_score(dist_to_target_m)
+            scorer_a_status = "ok"
+        except Exception as _a_err:
+            logging.warning(f"[CONTEST] Scorer A failed (non-fatal): {_a_err}")
+            score_a = 0.0
+            scorer_a_status = "error"
+
+        # Scorer B: gated by nail_path and cluster quality
+        if _is_pickup:
+            # Option C: pickup is the start of the polyline — Scorer B rigged to 0 XTE.
+            # Skip the math, capture the label path only.
+            scorer_b_data = {
+                'median_lat': None, 'median_lng': None,
+                'num_lowspeed_points': 0,
+                'xte_m': None, 'xte_source': None,
+                'heading_deviation': None, 'u_turn_applied': False,
+                'feasible_change_fired': False,
+                'feasible_change_xte_m': None,
+                'feasible_change_polyline': None,
+                'feasible_change_latency_ms': None,
+                'target_lat': target_lat, 'target_lng': target_lng,
+                'scorer_a_status': scorer_a_status,
+                'scorer_b_status': 'pickup_not_scorable',
+            }
+            score_b = None
+        elif _contest_kill_switch_check(trip_key, 'b'):
+            scorer_b_data = {
+                'median_lat': None, 'median_lng': None,
+                'num_lowspeed_points': 0,
+                'xte_m': None, 'xte_source': None,
+                'heading_deviation': None, 'u_turn_applied': False,
+                'feasible_change_fired': False,
+                'feasible_change_xte_m': None,
+                'feasible_change_polyline': None,
+                'feasible_change_latency_ms': None,
+                'target_lat': target_lat, 'target_lng': target_lng,
+                'scorer_a_status': scorer_a_status,
+                'scorer_b_status': 'trip_killed',
+            }
+            score_b = None
+        else:
+            try:
+                score_b, scorer_b_data = _compute_scorer_b(
+                    current_lat, current_lng, current_heading,
+                    target_lat, target_lng,
+                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                    stopped_seconds, dist_to_target_m,
+                    cur, trip_key,
+                )
+                # Patch 00562 gate: thin cluster → mark insufficient
+                _n_lowspeed = scorer_b_data.get('num_lowspeed_points', 0)
+                if _n_lowspeed < 3:
+                    scorer_b_data['scorer_b_status'] = 'insufficient_cluster_data'
+                    score_b = None
+            except Exception as _b_err:
+                logging.warning(f"[CONTEST] Scorer B failed (non-fatal): {_b_err}")
+                _contest_trip_kill(trip_key, 'b', f"exception in scorer: {_b_err}")
+                scorer_b_data = {
+                    'median_lat': None, 'median_lng': None,
+                    'num_lowspeed_points': 0,
+                    'xte_m': None, 'xte_source': None,
+                    'heading_deviation': None, 'u_turn_applied': False,
+                    'feasible_change_fired': False,
+                    'feasible_change_xte_m': None,
+                    'feasible_change_polyline': None,
+                    'feasible_change_latency_ms': None,
+                    'target_lat': target_lat, 'target_lng': target_lng,
+                    'scorer_a_status': scorer_a_status,
+                    'scorer_b_status': 'scorer_error',
+                }
+                score_b = None
+
+        scorer_b_data['scorer_a_status'] = scorer_a_status
+
+        # Write the row with nail_path stamped
+        _write_nail_contest_row(
+            cur, conn,
+            driver_id=driver_id,
+            state=state,
+            state_row=state_row,
+            nail_path=nail_path,
+            current_lat=current_lat,
+            current_lng=current_lng,
+            current_speed_mph=current_speed_mph,
+            stopped_seconds=stopped_seconds,
+            dist_m=dist_to_target_m,
+            score_a=score_a,
+            score_b=score_b,
+            scorer_b_data=scorer_b_data,
+            nail_fired_by='production',
+        )
+        logging.info(
+            f"[CONTEST] wrote event: nail_path={nail_path} "
+            f"score_a={score_a:.3f} "
+            f"score_b={(f'{score_b:.3f}' if score_b is not None else scorer_b_data.get('scorer_b_status'))} "
+            f"dist={dist_to_target_m:.0f}m"
+        )
+    except Exception as e:
+        logging.warning(f"[CONTEST] write_nail_contest_event failed (non-fatal): {e}")
+
+
+def _write_nail_contest_row(cur, conn, driver_id, state, state_row, nail_path,
+                             current_lat, current_lng, current_speed_mph,
+                             stopped_seconds, dist_m,
+                             score_a, score_b, scorer_b_data, nail_fired_by):
+    """Internal: INSERT one contest_events row with nail_path column.
+    Mirrors _write_contest_event() but adds nail_path. Fail-safe."""
+    import logging
+    try:
+        xte_m                    = scorer_b_data.get('xte_m')
+        xte_source               = scorer_b_data.get('xte_source')
+        heading_deviation        = scorer_b_data.get('heading_deviation')
+        u_turn_applied           = scorer_b_data.get('u_turn_applied', False)
+        fc_fired                 = scorer_b_data.get('feasible_change_fired', False)
+        fc_xte_m                 = scorer_b_data.get('feasible_change_xte_m')
+        fc_polyline              = scorer_b_data.get('feasible_change_polyline')
+        fc_latency_ms            = scorer_b_data.get('feasible_change_latency_ms')
+        median_lat               = scorer_b_data.get('median_lat')
+        median_lng               = scorer_b_data.get('median_lng')
+        num_lowspeed_points      = scorer_b_data.get('num_lowspeed_points', 0)
+        scorer_a_status          = scorer_b_data.get('scorer_a_status', 'ok')
+        scorer_b_status          = scorer_b_data.get('scorer_b_status', 'ok')
+        target_lat               = scorer_b_data.get('target_lat')
+        target_lng               = scorer_b_data.get('target_lng')
+
+        cur.execute("""
+            INSERT INTO app_private.contest_events (
+                driver_id, offer_id, trip_state, nail_path,
+                cluster_centroid_lat, cluster_centroid_lng, cluster_centroid_time,
+                cluster_median_lat, cluster_median_lng,
+                cluster_entry_time, cluster_exit_time,
+                num_points, num_lowspeed_points,
+                duration_s, min_speed_mph,
+                target_lat, target_lng, distance_to_target_m,
+                score_pin, score_route,
+                xte_meters, xte_source, heading_deviation_deg, u_turn_tolerance_applied,
+                feasible_change_fired, feasible_change_xte_m,
+                feasible_change_polyline, feasible_change_latency_ms,
+                scorer_a_status, scorer_b_status, nail_fired_by
+            ) VALUES (
+                %s, %s, %s, %s,
+                %s, %s, NOW(),
+                %s, %s,
+                NOW() - make_interval(secs => %s), NOW(),
+                %s, %s,
+                %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s, %s
+            )
+        """, (
+            driver_id, state_row.get('current_offer_id'), state, nail_path,
+            current_lat, current_lng,
+            median_lat, median_lng,
+            float(stopped_seconds or 0),
+            1, num_lowspeed_points,
+            float(stopped_seconds or 0), current_speed_mph,
+            target_lat, target_lng, dist_m,
+            score_a, score_b,
+            xte_m, xte_source, heading_deviation, u_turn_applied,
+            fc_fired, fc_xte_m,
+            fc_polyline, fc_latency_ms,
+            scorer_a_status, scorer_b_status, nail_fired_by,
+        ))
+        conn.commit()
+    except Exception as e:
+        logging.warning(f"[CONTEST] _write_nail_contest_row failed (non-fatal): {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _compute_scorer_b(current_lat, current_lng, current_heading,
+                      target_lat, target_lng,
+                      pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                      stopped_seconds, dist_to_target_m,
+                      cur, trip_key: tuple) -> tuple:
+    """DIAGNOSE: Compute Scorer B's route-context score for the current stop.
+
+    Returns (score_b, scorer_b_data_dict) where score_b is a float in [0,1]
+    or None if Scorer B could not produce a score.
+
+    In Round 2, no Routes API call is made — Feasible Change gates are
+    evaluated but the API call itself is stubbed. Round 3 adds the live call.
+    """
+    import logging
+    data = {
+        'xte_m': None, 'xte_source': 'none',
+        'heading_deviation': None, 'u_turn_applied': False,
+        'feasible_change_fired': False, 'feasible_change_xte_m': None,
+        'feasible_change_polyline': None, 'feasible_change_latency_ms': None,
+        'median_lat': None, 'median_lng': None, 'num_lowspeed_points': 0,
+        'scorer_a_status': 'ok', 'scorer_b_status': 'ok',
+        'target_lat': target_lat, 'target_lng': target_lng,
+    }
+
+    if _contest_kill_switch_check(trip_key, 'scorer_b'):
+        data['scorer_b_status'] = 'killed'
+        return (None, data)
+
+    try:
+        # Median centroid from low-speed buffer points
+        buffer = get_buffer(current_lat if False else None) if False else list(_stop_buffers.get(trip_key[0], []))
+        med_lat, med_lng, n_lowspeed = median_centroid(buffer) if buffer else (None, None, 0)
+        data['median_lat'] = med_lat
+        data['median_lng'] = med_lng
+        data['num_lowspeed_points'] = n_lowspeed
+
+        # Use median centroid if available, otherwise fall back to current position
+        score_lat = med_lat if med_lat is not None else current_lat
+        score_lng = med_lng if med_lng is not None else current_lng
+
+        # ── Attempt polyline lookup from cache (Round 3 will populate this) ──
+        polyline_points = []
+        offer_id = trip_key[1]
+        if offer_id:
+            try:
+                cur.execute("""
+                    SELECT encoded_polyline FROM app_private.trip_route_cache
+                    WHERE driver_id = %s AND offer_id = %s
+                """, (trip_key[0], offer_id))
+                row = cur.fetchone()
+                if row and row.get('encoded_polyline'):
+                    polyline_points = decode_polyline(row['encoded_polyline'])
+            except Exception as e:
+                logging.warning(f"[CONTEST] polyline cache read failed: {e}")
+
+        # ── Compute XTE ──────────────────────────────────────────────────
+        if polyline_points and len(polyline_points) >= 2:
+            xte_m = cross_track_error(score_lat, score_lng, polyline_points)
+            data['xte_source'] = 'polyline'
+        elif pickup_lat and pickup_lng and dropoff_lat and dropoff_lng:
+            xte_m = great_circle_xte(score_lat, score_lng,
+                                     pickup_lat, pickup_lng,
+                                     dropoff_lat, dropoff_lng)
+            data['xte_source'] = 'great_circle'
+            data['scorer_b_status'] = 'great_circle_fallback'
+        else:
+            data['scorer_b_status'] = 'no_reference_path'
+            return (None, data)
+
+        data['xte_m'] = xte_m
+
+        # ── Heading deviation for U-turn tolerance ────────────────────────
+        head_dev = None
+        if current_heading is not None and target_lat and target_lng:
+            head_dev = heading_deviation_deg(current_heading,
+                                              score_lat, score_lng,
+                                              target_lat, target_lng)
+        data['heading_deviation'] = head_dev
+
+        # ── Score ────────────────────────────────────────────────────────
+        score_b, u_turn = route_context_score(score_lat, score_lng, xte_m,
+                                               heading_deviation=head_dev)
+        data['u_turn_applied'] = u_turn
+
+        # ── Feasible Change gates ────────────────────────────────────────
+        # Round 3: fire live Routes API call when all three Gemini gates met.
+        # Guard: fire ONCE per cluster (enforced by caller — this function is
+        # invoked once per SET_CANDIDATE decision in check_convergence).
+        if feasible_change_triggered(float(stopped_seconds or 0), xte_m, dist_to_target_m):
+            try:
+                fc_result = _fetch_feasible_change(
+                    score_lat, score_lng, target_lat, target_lng
+                )
+                data['feasible_change_fired'] = True
+                data['feasible_change_latency_ms'] = fc_result.get('latency_ms')
+                if fc_result.get('status') == 'ok' and fc_result.get('encoded_polyline'):
+                    fc_polyline = fc_result['encoded_polyline']
+                    data['feasible_change_polyline'] = fc_polyline
+                    # Recompute XTE against the reroute polyline
+                    fc_points = decode_polyline(fc_polyline)
+                    if fc_points and len(fc_points) >= 2:
+                        fc_xte = cross_track_error(score_lat, score_lng, fc_points)
+                        data['feasible_change_xte_m'] = fc_xte
+                        # If the reroute places this stop on-track, upgrade Scorer B score
+                        if fc_xte is not None and fc_xte <= ROUTE_XTE_GATE_M:
+                            score_b, _uturn_ignored = route_context_score(
+                                score_lat, score_lng, fc_xte,
+                                heading_deviation=head_dev,
+                            )
+                            logging.info(
+                                f"[CONTEST/FEASIBLE] reroute found — "
+                                f"XTE {xte_m:.0f}m → {fc_xte:.0f}m, "
+                                f"score → {score_b:.3f}"
+                            )
+                        else:
+                            logging.info(
+                                f"[CONTEST/FEASIBLE] reroute didn't help — "
+                                f"fc_xte={fc_xte:.0f}m still > gate"
+                            )
+                else:
+                    data['scorer_b_status'] = 'feasible_change_failed'
+                    logging.warning(
+                        f"[CONTEST/FEASIBLE] API {fc_result.get('status')}, "
+                        f"{fc_result.get('latency_ms')}ms"
+                    )
+            except Exception as fc_e:
+                logging.exception(f"[CONTEST/FEASIBLE] exception: {fc_e}")
+                data['scorer_b_status'] = 'feasible_change_failed'
+
+        return (score_b, data)
+
+    except Exception as e:
+        logging.exception(f"[CONTEST] Scorer B exception: {e}")
+        _contest_trip_kill(trip_key, 'scorer_b', str(e))
+        data['scorer_b_status'] = 'error'
+        return (None, data)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# End of Contest Mode module-level state
+# ═══════════════════════════════════════════════════════════════════════════
+
 
 def check_convergence(driver_id, current_lat, current_lng,
                       current_speed_mph, state_row, cur,
@@ -453,9 +1195,19 @@ def check_convergence(driver_id, current_lat, current_lng,
         # If pickup and dropoff address are identical, this is an errand/round trip.
         # Hold REFINE_DROPOFF until driver has driven at least 1.0 mile — prevents
         # Watchdog B firing the moment the driver departs the pickup location.
-        _pickup_addr  = (state_row.get('pickup_address')  or '').strip().lower()
-        _dropoff_addr = (state_row.get('dropoff_address') or '').strip().lower()
-        _is_round_trip = bool(_pickup_addr and _dropoff_addr and _pickup_addr == _dropoff_addr)
+        # Coordinate-based round-trip detection: pickup and dropoff coords within ~55m.
+        # More reliable than address strings (which can be NULL, mis-normalized, or
+        # have capitalization / whitespace / abbreviation variants).
+        _p_lat = state_row.get('pickup_lat')
+        _p_lng = state_row.get('pickup_lng')
+        _d_lat = state_row.get('dropoff_lat')
+        _d_lng = state_row.get('dropoff_lng')
+        _is_round_trip = (
+            _p_lat is not None and _p_lng is not None
+            and _d_lat is not None and _d_lng is not None
+            and abs(float(_p_lat) - float(_d_lat)) < 0.0005
+            and abs(float(_p_lng) - float(_d_lng)) < 0.0005
+        )
         if _is_round_trip and state in ('IN_TRIP', 'REFINE_DROPOFF'):
             _miles_driven = float(cumulative_miles or 0)
             if _miles_driven < 1.0:
@@ -503,7 +1255,11 @@ def check_convergence(driver_id, current_lat, current_lng,
         # ── Dual-Watchdog Logic (NEW) ───────────────────────────────────────
         if dist_m < armed_radius:
             # Inner confirm zone — hard lock regardless of stopped_seconds (preserves S15)
-            if dist_m < NAIL_CONFIRM_RADIUS_M and current_speed_mph < NAIL_CONFIRM_SPEED_MPH:
+            # EXCEPTION: round trips (pickup==dropoff) require Watchdog B departure
+            # detection to disambiguate stops at the circular origin.
+            if (dist_m < NAIL_CONFIRM_RADIUS_M
+                    and current_speed_mph < NAIL_CONFIRM_SPEED_MPH
+                    and not _is_round_trip):
                 logging.info(
                     f"check_convergence: DROPOFF_NAIL (inner confirm) — "
                     f"{dist_m:.0f}m at {current_speed_mph:.1f}mph"
@@ -552,12 +1308,80 @@ def check_convergence(driver_id, current_lat, current_lng,
                             f"[HIGH_SCORE] 🎯 FIRST CANDIDATE: {dist_m:.0f}m from pin — "
                             f"{current_lat:.5f},{current_lng:.5f} stopped {stopped_seconds}s"
                         )
+
+                    # ── CONTEST MODE (Revision 00557) ─────────────────────
+                    # Scorer A is the existing [HIGH_SCORE] distance-based ranker.
+                    # Scorer B is route-context (XTE + U-turn tolerance).
+                    # Both scores written to contest_events. If Scorer B beats
+                    # Scorer A by CONTEST_SCORER_B_MARGIN AND its chosen centroid
+                    # lies within the armed_radius (Guard 2), Scorer B's centroid
+                    # overrides the SET_CANDIDATE tuple below.
+                    _contest_trip_key_v = _contest_trip_key(driver_id, state_row)
+                    _contest_candidate_lat = current_lat
+                    _contest_candidate_lng = current_lng
+                    _contest_nail_fired_by = None
+                    try:
+                        _score_a = _scorer_a_numeric_score(dist_m)
+                        _score_b, _sb_data = _compute_scorer_b(
+                            current_lat, current_lng, None,  # heading: not plumbed in Round 2
+                            state_row.get('dropoff_lat'), state_row.get('dropoff_lng'),
+                            state_row.get('pickup_lat'), state_row.get('pickup_lng'),
+                            state_row.get('dropoff_lat'), state_row.get('dropoff_lng'),
+                            stopped_seconds, dist_m,
+                            cur, _contest_trip_key_v,
+                        )
+
+                        # Scorer B override decision
+                        if (_score_b is not None
+                                and _score_a is not None
+                                and _score_b > _score_a + CONTEST_SCORER_B_MARGIN
+                                and not _contest_nail_already_fired(_contest_trip_key_v, 'scorer_b')):
+                            _med_lat = _sb_data.get('median_lat')
+                            _med_lng = _sb_data.get('median_lng')
+                            if _med_lat is not None and _med_lng is not None:
+                                # Guard 2: centroid must be within armed_radius of target
+                                cur.execute("""
+                                    SELECT app_private.distance_miles(%s,%s,%s,%s) * 1609.34 AS d
+                                """, (_med_lat, _med_lng,
+                                      state_row.get('dropoff_lat'), state_row.get('dropoff_lng')))
+                                _override_dist = float(cur.fetchone()['d'])
+                                if _override_dist <= armed_radius * CONTEST_OVERRIDE_RADIUS_MULTIPLIER:
+                                    _contest_candidate_lat = _med_lat
+                                    _contest_candidate_lng = _med_lng
+                                    _contest_nail_fired_by = 'scorer_b'
+                                    _contest_mark_nail_fired(_contest_trip_key_v, 'scorer_b')
+                                    logging.warning(
+                                        f"[CONTEST] 🏁 Scorer B OVERRIDE: score_b={_score_b:.3f} > "
+                                        f"score_a={_score_a:.3f}+margin, centroid "
+                                        f"({_med_lat:.5f},{_med_lng:.5f}) {_override_dist:.0f}m from dropoff"
+                                    )
+                                else:
+                                    logging.info(
+                                        f"[CONTEST] Scorer B won score but centroid "
+                                        f"{_override_dist:.0f}m > armed {armed_radius:.0f}m (Guard 2)"
+                                    )
+                        if _contest_nail_fired_by is None:
+                            # Scorer A won (or B had no usable centroid or was killed)
+                            _contest_nail_fired_by = 'scorer_a'
+                            _contest_mark_nail_fired(_contest_trip_key_v, 'scorer_a')
+
+                        _write_contest_event(
+                            cur, cur.connection, driver_id, state, state_row,
+                            current_lat, current_lng, current_speed_mph,
+                            stopped_seconds, dist_m,
+                            _score_a, _score_b, _sb_data, _contest_nail_fired_by,
+                        )
+                    except Exception as _ce:
+                        logging.exception(f"[CONTEST] contest block failed (non-fatal): {_ce}")
+                        _contest_trip_kill(_contest_trip_key_v, 'scorer_a', str(_ce))
+                        # Fall through — candidate stays as current position (existing behavior)
+                    # ── END CONTEST MODE ──────────────────────────────────
                     # Phase 0 shadow: confirm buffer health at candidate record time
                     _buf = get_buffer(driver_id)
                     if _buf:
                         _last = _buf[-1]
                         logging.info(f"[BUFFER] {len(_buf)} pts | last_speed={_last['speed_mph']:.1f}mph")
-                    return ('SET_CANDIDATE', 'IN_TRIP', dist_m, (current_lat, current_lng))
+                    return ('SET_CANDIDATE', 'IN_TRIP', dist_m, (_contest_candidate_lat, _contest_candidate_lng))
                 else:
                     logging.info(
                         f"[HIGH_SCORE] ❌ REJECTED: stop at {dist_m:.0f}m exceeds 500m proximity gate"

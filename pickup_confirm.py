@@ -10,7 +10,7 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from state_machine import DriverStateMachine
-from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position
+from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, write_nail_contest_event
 
 pickup_confirm_bp = Blueprint('pickup_confirm', __name__)
 

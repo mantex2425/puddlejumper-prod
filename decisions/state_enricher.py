@@ -31,11 +31,13 @@ def enrich_with_state(cur, conn, uid, ep, result):
             logging.warning("[STATE] DriverStateMachine.read returned None — using default state")
             result["driverState"] = "UNCOMMITTED"
             return result, default_state
-        logging.info(
-            f"[STATE] Driver state: {driver_state['state']} "
-            f"(arc: {driver_state['arc_center_lat']:.4f}, "
-            f"{driver_state['arc_center_lng']:.4f})"
-        )
+        _arc_lat = driver_state.get('arc_center_lat')
+        _arc_lng = driver_state.get('arc_center_lng')
+        if _arc_lat is not None and _arc_lng is not None:
+            _arc_str = f"(arc: {_arc_lat:.4f}, {_arc_lng:.4f})"
+        else:
+            _arc_str = "(no arc)"
+        logging.info(f"[STATE] Driver state: {driver_state['state']} {_arc_str}")
 
         # ── S04: ENROUTE + new offer = implicit cancel ────────────────
         # A new offer card from Uber = the previous transaction is dead.

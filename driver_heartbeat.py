@@ -18,6 +18,8 @@ from nail_it_core import (check_convergence, write_nailed_position,
                           get_next_stacked_offer)
 from decisions.triangulation_enricher import refine_dropoff_background
 from state_machine import DriverStateMachine
+from decisions.triangulation_enricher import _cache_stacked_polyline_async
+from nail_it_core import write_nail_contest_event
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
 
@@ -155,6 +157,7 @@ def post_heartbeat():
                    dts.nailed_pickup_error_m, dts.nailed_dropoff_error_m,
                    dts.current_offer_id,
                    dts.candidate_lat, dts.candidate_lng, dts.candidate_at,
+                   dts.potential_cancellation,
                    dts.state_updated_at,
                    EXTRACT(EPOCH FROM (
                        NOW() - dts.state_updated_at
@@ -237,6 +240,29 @@ def post_heartbeat():
             logging.warning(f"S29 INITIAL_NAIL: ENROUTE->IN_TRIP at {new_error_m or 0:.0f}m")
             driverState = "IN_TRIP"
             _just_nailed_pickup = True
+
+            # Patch 00562: contest event for gps_convergence pickup (Scorer B = pickup_not_scorable)
+            try:
+                write_nail_contest_event(
+                    cur, conn,
+                    driver_id=driver_id,
+                    state_row=state_row,
+                    nail_path="gps_convergence_pickup",
+                    current_lat=current_lat,
+                    current_lng=current_lng,
+                    current_speed_mph=speed_mph or 0.0,
+                    current_heading=0.0,
+                    stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                    dist_to_target_m=float(new_error_m or 0),
+                    target_lat=state_row.get('pickup_lat'),
+                    target_lng=state_row.get('pickup_lng'),
+                    pickup_lat=state_row.get('pickup_lat'),
+                    pickup_lng=state_row.get('pickup_lng'),
+                    dropoff_lat=state_row.get('dropoff_lat'),
+                    dropoff_lng=state_row.get('dropoff_lng'),
+                )
+            except Exception as _ce:
+                logging.warning(f"[CONTEST] hook1 non-fatal: {_ce}")
 
         if _just_nailed_pickup:
             # ── Feed community radar from Auto Nail It (fire-and-forget) ──
@@ -402,6 +428,38 @@ def post_heartbeat():
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete — new offer={_sec_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
+                # Contest Mode (Rev 00558): async polyline fetch for newly-promoted offer.
+                # Skip if coords missing or potential_cancellation flagged pre-swap.
+                if (_sec_offer_id and _sec_dlat and _sec_dlng
+                        and not state_row.get('potential_cancellation')):
+                    _refine_executor.submit(
+                        _cache_stacked_polyline_async,
+                        driver_id, _sec_offer_id, _sec_dlat, _sec_dlng
+                    )
+                    logging.info(f"[ROUTES_CACHE/STACK] submitted async fetch for offer={_sec_offer_id}")
+
+                # Patch 00562: contest event for watchdog_a STACKED dropoff (primary ride end)
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=state_row,
+                        nail_path="watchdog_a_dropoff_stacked",
+                        current_lat=current_lat,
+                        current_lng=current_lng,
+                        current_speed_mph=speed_mph or 0.0,
+                        current_heading=0.0,
+                        stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                        dist_to_target_m=float(new_error_m or 0),
+                        target_lat=state_row.get('dropoff_lat'),
+                        target_lng=state_row.get('dropoff_lng'),
+                        pickup_lat=state_row.get('pickup_lat'),
+                        pickup_lng=state_row.get('pickup_lng'),
+                        dropoff_lat=state_row.get('dropoff_lat'),
+                        dropoff_lng=state_row.get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] hook3 non-fatal: {_ce}")
             else:
                 if _s == 'IN_TRIP':
                     DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
@@ -412,6 +470,29 @@ def post_heartbeat():
                 )
                 logging.warning(f"S31 DROPOFF_NAIL: REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
                 driverState = "UNCOMMITTED"
+
+                # Patch 00562: contest event for watchdog_a non-STACKED dropoff nail
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=state_row,
+                        nail_path="watchdog_a_dropoff",
+                        current_lat=current_lat,
+                        current_lng=current_lng,
+                        current_speed_mph=speed_mph or 0.0,
+                        current_heading=0.0,
+                        stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                        dist_to_target_m=float(new_error_m or 0),
+                        target_lat=state_row.get('dropoff_lat'),
+                        target_lng=state_row.get('dropoff_lng'),
+                        pickup_lat=state_row.get('pickup_lat'),
+                        pickup_lng=state_row.get('pickup_lng'),
+                        dropoff_lat=state_row.get('dropoff_lat'),
+                        dropoff_lng=state_row.get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] hook2 non-fatal: {_ce}")
 
         elif verdict == 'SET_CANDIDATE':
             # Watchdog B: record micro-stop position
@@ -498,6 +579,38 @@ def post_heartbeat():
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — offer={_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
+                # Contest Mode (Rev 00558): async polyline fetch for newly-promoted offer.
+                # Skip if coords missing or potential_cancellation flagged pre-swap.
+                if (_offer_id and _sec_dlat and _sec_dlng
+                        and not state_row.get('potential_cancellation')):
+                    _refine_executor.submit(
+                        _cache_stacked_polyline_async,
+                        driver_id, _offer_id, _sec_dlat, _sec_dlng
+                    )
+                    logging.info(f"[ROUTES_CACHE/STACK] submitted async fetch (B) for offer={_offer_id}")
+
+                # Patch 00562: contest event for watchdog_b STACKED dropoff (primary ride end)
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=state_row,
+                        nail_path="watchdog_b_dropoff_stacked",
+                        current_lat=current_lat,
+                        current_lng=current_lng,
+                        current_speed_mph=speed_mph or 0.0,
+                        current_heading=0.0,
+                        stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                        dist_to_target_m=float(new_error_m or 0),
+                        target_lat=state_row.get('dropoff_lat'),
+                        target_lng=state_row.get('dropoff_lng'),
+                        pickup_lat=state_row.get('pickup_lat'),
+                        pickup_lng=state_row.get('pickup_lng'),
+                        dropoff_lat=state_row.get('dropoff_lat'),
+                        dropoff_lng=state_row.get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] hook5 non-fatal: {_ce}")
             else:
                 if _s == 'IN_TRIP':
                     DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
@@ -508,6 +621,29 @@ def post_heartbeat():
                 )
                 logging.warning(f"S31 DROPOFF_NAIL_B (retroactive): REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
                 driverState = "UNCOMMITTED"
+
+                # Patch 00562: contest event for watchdog_b non-STACKED dropoff nail
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=state_row,
+                        nail_path="watchdog_b_dropoff",
+                        current_lat=current_lat,
+                        current_lng=current_lng,
+                        current_speed_mph=speed_mph or 0.0,
+                        current_heading=0.0,
+                        stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                        dist_to_target_m=float(new_error_m or 0),
+                        target_lat=state_row.get('dropoff_lat'),
+                        target_lng=state_row.get('dropoff_lng'),
+                        pickup_lat=state_row.get('pickup_lat'),
+                        pickup_lng=state_row.get('pickup_lng'),
+                        dropoff_lat=state_row.get('dropoff_lat'),
+                        dropoff_lng=state_row.get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] hook4 non-fatal: {_ce}")
 
         elif verdict == 'REFINE_PICKUP':
             write_nailed_position(cur, driver_id, 'pickup',
@@ -609,6 +745,29 @@ def post_heartbeat():
                     dropoff_h3=nearby['dropoff_h3'],
                 )
                 driverState = "IN_TRIP"
+
+                # Patch 00562: contest event for S12 gps_convergence override
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=state_row,
+                        nail_path="gps_convergence_pickup_s12",
+                        current_lat=current_lat,
+                        current_lng=current_lng,
+                        current_speed_mph=speed_mph or 0.0,
+                        current_heading=0.0,
+                        stopped_seconds=float(state_row.get('stopped_seconds') or 0),
+                        dist_to_target_m=float(nearby.get('dist_miles', 0) * 1609.34),
+                        target_lat=nearby['pickup_lat'],
+                        target_lng=nearby['pickup_lng'],
+                        pickup_lat=nearby['pickup_lat'],
+                        pickup_lng=nearby['pickup_lng'],
+                        dropoff_lat=nearby['dropoff_lat'],
+                        dropoff_lng=nearby['dropoff_lng'],
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] hook6 non-fatal: {_ce}")
 
         conn.commit()
         return jsonify({"status": "ok", "driverState": driverState}), 200

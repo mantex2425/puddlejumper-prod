@@ -8,6 +8,151 @@ import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(__file__)))
 from state_machine import DriverStateMachine
 
+def _cache_trip_polyline_on_accept(driver_id, offer_id, pickup_lat, pickup_lng,
+                                    dropoff_lat, dropoff_lng, cur, conn):
+    """Sync Routes API fetch + cache. Non-blocking semantics — all failures
+    logged and swallowed. Called immediately after successful offer_accepted
+    state machine transition. Populates app_private.trip_route_cache so
+    Scorer B can read polyline during cluster scoring."""
+    import logging
+    if not (pickup_lat and pickup_lng and dropoff_lat and dropoff_lng):
+        logging.info(f"[ROUTES_CACHE] skipped — missing coords offer={offer_id}")
+        return
+    try:
+        result = _fetch_trip_polyline(float(pickup_lat), float(pickup_lng),
+                                      float(dropoff_lat), float(dropoff_lng))
+        status = result.get('status', 'unknown')
+        latency = result.get('latency_ms')
+        if status == 'ok':
+            cur.execute("""
+                INSERT INTO app_private.trip_route_cache (
+                    driver_id, offer_id, encoded_polyline,
+                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                    api_latency_ms, api_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (driver_id, offer_id) DO UPDATE SET
+                    encoded_polyline = EXCLUDED.encoded_polyline,
+                    api_latency_ms   = EXCLUDED.api_latency_ms,
+                    api_status       = EXCLUDED.api_status,
+                    fetched_at       = NOW()
+            """, (driver_id, offer_id, result['encoded_polyline'],
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  latency, status))
+            conn.commit()
+            logging.info(f"[ROUTES_CACHE] ✅ cached offer={offer_id} "
+                         f"dist={result.get('distance_m')}m {latency}ms")
+        else:
+            # Log the failure but still record the attempt for post-drive analysis
+            cur.execute("""
+                INSERT INTO app_private.trip_route_cache (
+                    driver_id, offer_id, encoded_polyline,
+                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                    api_latency_ms, api_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (driver_id, offer_id) DO NOTHING
+            """, (driver_id, offer_id, '',
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  latency, status))
+            conn.commit()
+            logging.warning(f"[ROUTES_CACHE] ⚠️  status={status} offer={offer_id} {latency}ms")
+    except Exception as e:
+        logging.exception(f"[ROUTES_CACHE] exception (non-fatal): {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _cache_stacked_polyline_async(driver_id: str, offer_id: str,
+                                    dropoff_lat: float, dropoff_lng: float) -> None:
+    """Async executor target: fetch polyline for a stacked offer at promotion time.
+
+    Called from _refine_executor in driver_heartbeat.py immediately after a
+    STACKED→ENROUTE atomic swap. Unlike _cache_trip_polyline_on_accept, this
+    opens its own DB connection (caller's cursor is heartbeat-scoped and will be
+    released before this completes).
+
+    Pickup coords are fetched from offer_history by decision_log_id. This is
+    safe because the secondary offer_history row was written at offer_accepted
+    time (when the stack was accepted), minutes before the swap fires.
+
+    All failures are logged and swallowed — never raises.
+    """
+    import logging
+    from db import get_db
+    conn = None
+    cur = None
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        # Fetch secondary's pickup coords from offer_history
+        cur.execute("""
+            SELECT pickup_lat, pickup_lng
+            FROM app_private.offer_history
+            WHERE decision_log_id = %s::integer
+        """, (offer_id,))
+        row = cur.fetchone()
+        if not row or row[0] is None or row[1] is None:
+            logging.warning(f"[ROUTES_CACHE/STACK] no pickup coords for offer={offer_id} — skipping")
+            return
+        pickup_lat, pickup_lng = float(row[0]), float(row[1])
+
+        result = _fetch_trip_polyline(pickup_lat, pickup_lng,
+                                       float(dropoff_lat), float(dropoff_lng))
+        status = result.get('status', 'unknown')
+        latency = result.get('latency_ms')
+        if status == 'ok':
+            cur.execute("""
+                INSERT INTO app_private.trip_route_cache (
+                    driver_id, offer_id, encoded_polyline,
+                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                    api_latency_ms, api_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (driver_id, offer_id) DO UPDATE SET
+                    encoded_polyline = EXCLUDED.encoded_polyline,
+                    api_latency_ms   = EXCLUDED.api_latency_ms,
+                    api_status       = EXCLUDED.api_status,
+                    fetched_at       = NOW()
+            """, (driver_id, offer_id, result['encoded_polyline'],
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  latency, status))
+            conn.commit()
+            logging.info(f"[ROUTES_CACHE/STACK] ✅ cached offer={offer_id} "
+                         f"dist={result.get('distance_m')}m {latency}ms")
+        else:
+            cur.execute("""
+                INSERT INTO app_private.trip_route_cache (
+                    driver_id, offer_id, encoded_polyline,
+                    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                    api_latency_ms, api_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (driver_id, offer_id) DO NOTHING
+            """, (driver_id, offer_id, '',
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  latency, status))
+            conn.commit()
+            logging.warning(f"[ROUTES_CACHE/STACK] ⚠️  status={status} offer={offer_id} {latency}ms")
+    except Exception as e:
+        logging.exception(f"[ROUTES_CACHE/STACK] exception (non-fatal): {e}")
+        try:
+            if conn:
+                conn.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            if cur:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+from routes_api import fetch_trip_polyline as _fetch_trip_polyline
+
 
 
 
@@ -313,7 +458,7 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
             _dropoff_lng   = triangulated_dropoff_lng or (ep["d_lng"] if is_validated else None)
 
             if _verdict == "ACCEPT" and _current_state in ("UNCOMMITTED", "ENROUTE"):
-                DriverStateMachine.transition(
+                _sm_result = DriverStateMachine.transition(
                     uid, "offer_accepted", cur, conn,
                     offer_id=str(decision_log_id) if decision_log_id else None,
                     pickup_lat=final_pickup_lat, pickup_lng=final_pickup_lng,
@@ -321,6 +466,18 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     dropoff_lat=_dropoff_lat, dropoff_lng=_dropoff_lng,
                     dropoff_h3=triangulated_dropoff_h3,
                 )
+                # Contest Mode (Rev 00557/00558): sync Routes API cache on accept.
+                # This is the decision path, not heartbeat hot path — sync is acceptable.
+                if (_sm_result and _sm_result.get("success")
+                        and final_pickup_lat and final_pickup_lng
+                        and _dropoff_lat and _dropoff_lng):
+                    _cache_trip_polyline_on_accept(
+                        uid,
+                        str(decision_log_id) if decision_log_id else None,
+                        final_pickup_lat, final_pickup_lng,
+                        _dropoff_lat, _dropoff_lng,
+                        cur, conn,
+                    )
             elif _verdict == "ACCEPT" and _current_state in ("IN_TRIP", "REFINE_DROPOFF"):
                 DriverStateMachine.transition(
                     uid, "offer_accepted", cur, conn,

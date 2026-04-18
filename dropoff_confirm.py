@@ -10,7 +10,7 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from state_machine import DriverStateMachine
-from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, get_next_stacked_offer
+from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, write_nail_contest_event, get_next_stacked_offer
 
 dropoff_confirm_bp = Blueprint('dropoff_confirm', __name__)
 
@@ -152,6 +152,28 @@ def confirm_dropoff():
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
                 )
+                # Patch 00562: contest event for manual STACKED dropoff (primary ride end)
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=_state_row or {},
+                        nail_path="manual_dropoff_stacked",
+                        current_lat=actual_lat,
+                        current_lng=actual_lng,
+                        current_speed_mph=0.0,
+                        current_heading=0.0,
+                        stopped_seconds=0.0,
+                        dist_to_target_m=float(error_m or 0),
+                        target_lat=(_state_row or {}).get('dropoff_lat'),
+                        target_lng=(_state_row or {}).get('dropoff_lng'),
+                        pickup_lat=(_state_row or {}).get('pickup_lat'),
+                        pickup_lng=(_state_row or {}).get('pickup_lng'),
+                        dropoff_lat=(_state_row or {}).get('dropoff_lat'),
+                        dropoff_lng=(_state_row or {}).get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] manual_dropoff_stacked hook non-fatal: {_ce}")
             else:
                 # Solo ride completed — enforce linear path via REFINE_DROPOFF
                 if _current_state == 'IN_TRIP':
@@ -162,6 +184,28 @@ def confirm_dropoff():
                     nailed_dropoff_lng=actual_lng,
                     clear_coords=True,
                 )
+                # Patch 00562: contest event for manual solo dropoff
+                try:
+                    write_nail_contest_event(
+                        cur, conn,
+                        driver_id=driver_id,
+                        state_row=_state_row or {},
+                        nail_path="manual_dropoff",
+                        current_lat=actual_lat,
+                        current_lng=actual_lng,
+                        current_speed_mph=0.0,
+                        current_heading=0.0,
+                        stopped_seconds=0.0,
+                        dist_to_target_m=float(error_m or 0),
+                        target_lat=(_state_row or {}).get('dropoff_lat'),
+                        target_lng=(_state_row or {}).get('dropoff_lng'),
+                        pickup_lat=(_state_row or {}).get('pickup_lat'),
+                        pickup_lng=(_state_row or {}).get('pickup_lng'),
+                        dropoff_lat=(_state_row or {}).get('dropoff_lat'),
+                        dropoff_lng=(_state_row or {}).get('dropoff_lng'),
+                    )
+                except Exception as _ce:
+                    logging.warning(f"[CONTEST] manual_dropoff hook non-fatal: {_ce}")
         else:
             logging.info(f"📍 Dropoff Nail It: state={current_state} — coord refinement only")
 
