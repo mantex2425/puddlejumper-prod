@@ -17,6 +17,7 @@ from nail_it_core import (check_convergence, write_nailed_position,
                           classify, process_heartbeat, clear_buffer,
                           get_next_stacked_offer)
 from decisions.triangulation_enricher import refine_dropoff_background
+from decisions.nail_manager import handle_post_nail_refinement
 from state_machine import DriverStateMachine
 from decisions.triangulation_enricher import _cache_stacked_polyline_async
 from nail_it_core import write_nail_contest_event
@@ -263,6 +264,57 @@ def post_heartbeat():
                 )
             except Exception as _ce:
                 logging.warning(f"[CONTEST] hook1 non-fatal: {_ce}")
+
+            # === SB3 hook (Patch 00566a Step 10) ===
+            # Plan logic lives in decisions.nail_manager. Only the write
+            # mechanic is inline — 2 UPDATE statements, acknowledged drift
+            # per v0.4 R5. 00566-reboxing will extract this together with
+            # the heartbeat's other 8 existing write sites.
+            try:
+                refinement_plan = handle_post_nail_refinement(
+                    offer_id=state_row.get('current_offer_id'),
+                    driver_id=driver_id,
+                    nailed_pickup_lat=current_lat,
+                    nailed_pickup_lng=current_lng,
+                    cur=cur,
+                )
+                if refinement_plan:
+                    if refinement_plan["overwrite_driver_state"]:
+                        cur.execute("""
+                            UPDATE app_private.driver_trip_state
+                            SET dropoff_lat         = %s,
+                                dropoff_lng         = %s,
+                                dropoff_h3          = %s,
+                                refined_dropoff_lat = %s,
+                                refined_dropoff_lng = %s,
+                                refinement_source   = %s
+                            WHERE driver_id = %s
+                        """, (
+                            refinement_plan["refined_lat"],
+                            refinement_plan["refined_lng"],
+                            refinement_plan["refined_h3"],
+                            refinement_plan["refined_lat"],
+                            refinement_plan["refined_lng"],
+                            refinement_plan["refinement_source"],
+                            driver_id,
+                        ))
+                    else:
+                        cur.execute("""
+                            UPDATE app_private.driver_trip_state
+                            SET refined_dropoff_lat = %s,
+                                refined_dropoff_lng = %s,
+                                refinement_source   = %s
+                            WHERE driver_id = %s
+                        """, (
+                            refinement_plan["refined_lat"],
+                            refinement_plan["refined_lng"],
+                            refinement_plan["refinement_source"],
+                            driver_id,
+                        ))
+                    logging.info(f"[SB3] {refinement_plan['log_reason']}")
+            except Exception as _sb3_err:
+                logging.warning(f"[SB3] refinement failed (non-fatal): {_sb3_err}")
+            # === end SB3 hook ===
 
         if _just_nailed_pickup:
             # ── Feed community radar from Auto Nail It (fire-and-forget) ──
