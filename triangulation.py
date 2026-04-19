@@ -574,3 +574,478 @@ def h3_to_coords(h3_hex, cur):
     except Exception as e:
         logging.warning(f"H3 coordinate resolution failed for {h3_hex}: {e}")
     return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# UNIFIED REFINEMENT ENGINE (Patch 00566a Step 2)
+#
+# Single source of truth for pickup + dropoff coordinate refinement.
+# Walks a 5-tier cascade, returns best available refinement or None.
+# triangulate_pickup() and triangulate_dropoff() will be rewritten as
+# thin wrappers around this engine in Step 4.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _compute_geocoded_miles(lat1, lng1, lat2, lng2, cur):
+    """Straight-line distance in miles between two coords."""
+    if not all([lat1, lng1, lat2, lng2]):
+        return None
+    try:
+        cur.execute(
+            "SELECT app_private.distance_miles(%s, %s, %s, %s) AS dist",
+            (lat1, lng1, lat2, lng2)
+        )
+        row = cur.fetchone()
+        return float(row["dist"]) if (row and row.get("dist") is not None) else None
+    except Exception:
+        return None
+
+
+def refine_target_by_geometry(
+    anchor_lat,
+    anchor_lng,
+    uber_target_lat,
+    uber_target_lng,
+    intended_miles,
+    geocoded_miles,
+    cur,
+    *,
+    mode,
+    street_name=None,
+    gps_age_sec=None,
+    pre_geocoded=False,
+    driver_lat=None,
+    driver_lng=None,
+):
+    """
+    Unified refinement engine for pickup and dropoff coordinate resolution.
+
+    Walks a 5-tier cascade, returns first successful refinement.
+
+    Tiers:
+      0 - enhanced_arc_band: vague single-road addresses, ST_Buffer+houston_ways
+      1 - google_cache/google_live: live Google geocode, cached for dedup
+      2 - arc_band (donut): build_arc_donut() inner/outer bounds + houston_ways
+      3 - scored_snap: _TRIANGULATION_SQL scored candidate ranker
+      4 - uber_snap: last-resort snap of Uber pin to H3
+
+    Mode parameterization:
+      - mode="pickup": anchor is driver GPS; honors gps_age_sec, pre_geocoded,
+        center-switching in Tier 0, and Tier 2 YOLO-undercount retry.
+      - mode="dropoff": anchor is nailed pickup; ignores GPS staleness
+        (nailed pickup is not a live GPS source) and does not retry Tier 2.
+
+    Returns: dict {h3, lat, lng, source, tier} or None.
+      source: google_cache | google_live | enhanced_arc_band | arc_band
+            | scored_snap | uber_snap
+      tier:   int 0..4 corresponding to the tier that fired
+    """
+    if mode not in ("pickup", "dropoff"):
+        raise ValueError(f"mode must be 'pickup' or 'dropoff', got {mode!r}")
+    if not all([anchor_lat, anchor_lng, uber_target_lat, uber_target_lng]):
+        return None
+
+    # Intended-miles fallback (pickup-mode): YOLO zeroed out but geocoded present
+    if intended_miles is None or intended_miles <= 0:
+        if mode == "pickup" and geocoded_miles is not None and geocoded_miles > 0:
+            logging.info(
+                f"⚠️ intended_miles=0 — falling back to geocoded "
+                f"({geocoded_miles:.2f}mi) as arc radius"
+            )
+            intended_miles = geocoded_miles
+        else:
+            return None
+
+    # Hallucination detection (mode-specific threshold)
+    hallucination_factor = 2.0 if mode == "pickup" else 1.5
+    arc_outer = intended_miles / TORT_MIN_HOUSTON
+    is_hallucination = (
+        geocoded_miles is not None
+        and geocoded_miles > arc_outer * hallucination_factor
+    )
+    if is_hallucination:
+        logging.warning(
+            f"⚠️ [{mode}] Geocode mismatch ({geocoded_miles:.1f}mi vs "
+            f"{intended_miles}mi intended, factor {hallucination_factor}x)"
+        )
+
+    # GPS staleness (pickup-mode only)
+    gps_stale = (
+        mode == "pickup"
+        and gps_age_sec is not None
+        and gps_age_sec > 30
+    )
+    if gps_stale:
+        logging.info(f"⚠️ [{mode}] GPS stale ({gps_age_sec:.0f}s)")
+
+    # ── TIER 0: Enhanced arc-banding for vague single-road ──────────────────
+    if street_name and _is_vague_single_road(street_name) and not gps_stale:
+        logging.info(f"🛣️ [{mode}] Tier 0 enhanced arc-band for '{street_name}'")
+        result = _tier0_enhanced_arc_band(
+            anchor_lat, anchor_lng,
+            uber_target_lat, uber_target_lng,
+            intended_miles, geocoded_miles,
+            street_name, mode, cur,
+        )
+        if result:
+            return result
+
+    # ── TIER 1: Google geocode (cache → live) ───────────────────────────────
+    if street_name and not pre_geocoded:
+        result = _tier1_google_geocode(street_name, cur)
+        if result:
+            return result
+
+    # ── TIER 2: Donut arc-banding ───────────────────────────────────────────
+    if street_name and not gps_stale:
+        result = _tier2_donut_arc_band(
+            anchor_lat, anchor_lng,
+            intended_miles, geocoded_miles,
+            street_name,
+            driver_lat, driver_lng,
+            mode, cur,
+        )
+        if result:
+            return result
+
+    # ── TIER 3: Scored snap (with Option X safety gate) ─────────────────────
+    result = _tier3_scored_snap(uber_target_lat, uber_target_lng, cur)
+    if result:
+        dist_m = _haversine_miles(
+            uber_target_lat, uber_target_lng,
+            result["lat"], result["lng"],
+        ) * 1609.34
+        if dist_m <= 500:
+            return result
+        logging.warning(
+            f"⚠️ [{mode}] Tier 3 result {dist_m:.0f}m from uber_target — "
+            f"rejected (Option X gate, falling through to Tier 4)"
+        )
+
+    # ── TIER 4: Last resort — Uber snap ─────────────────────────────────────
+    return _tier4_uber_snap(uber_target_lat, uber_target_lng, cur)
+
+
+def _tier0_enhanced_arc_band(
+    anchor_lat, anchor_lng,
+    uber_target_lat, uber_target_lng,
+    intended_miles, geocoded_miles,
+    street_name, mode, cur,
+):
+    """Tier 0: vague single-road arc-banding. Pickup-mode may center-switch."""
+    try:
+        cleaned = clean_street_name(street_name)
+        lower = cleaned.lower()
+
+        # Center-switching (pickup-mode only per v0.3 §4.3):
+        # When geocode is strongly hallucinated, trust Uber's pin over driver GPS.
+        # Dropoff-mode never switches — nailed pickup is verified good.
+        if (mode == "pickup"
+                and geocoded_miles
+                and geocoded_miles > intended_miles * 3.0):
+            logging.info(
+                f"   → Strong hallucination: center-switch to Uber geocode "
+                f"({uber_target_lat:.5f}, {uber_target_lng:.5f})"
+            )
+            arc_lat, arc_lng = uber_target_lat, uber_target_lng
+        else:
+            arc_lat, arc_lng = anchor_lat, anchor_lng
+
+        # Variant expansion for freeway-class names
+        variants = [cleaned]
+        if any(x in lower for x in ['fwy', 'freeway', 'hwy', 'highway']):
+            base = cleaned.replace('Fwy', 'Freeway').replace('Hwy', 'Highway')
+            variants += [base, base + ' Frontage Road']
+        variants = list(dict.fromkeys(variants))
+
+        for variant in variants:
+            cur.execute("""
+                WITH arc AS (
+                    SELECT ST_Buffer(
+                        app_private.coords_to_point(%s, %s)::geography,
+                        %s * 1609.34
+                    )::geometry AS ring
+                )
+                SELECT
+                    app_private.coords_to_h3(
+                        ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
+                        ST_X(ST_ClosestPoint(s.the_geom, a.ring))
+                    ) AS h3,
+                    ST_Y(ST_ClosestPoint(s.the_geom, a.ring)) AS lat,
+                    ST_X(ST_ClosestPoint(s.the_geom, a.ring)) AS lng
+                FROM routing.houston_ways s, arc a
+                WHERE s.name ILIKE '%%' || %s || '%%'
+                  AND ST_DWithin(
+                        s.the_geom::geography,
+                        app_private.coords_to_point(%s, %s)::geography,
+                        (%s + 0.35) * 1609.34
+                  )
+                ORDER BY ST_Distance(s.the_geom, a.ring) ASC
+                LIMIT 1
+            """, (
+                arc_lat, arc_lng, intended_miles,
+                variant,
+                arc_lat, arc_lng, intended_miles,
+            ))
+            row = cur.fetchone()
+            if row and row['h3']:
+                logging.info(
+                    f"✅ Tier 0: {row['h3']} (variant '{variant}')"
+                )
+                return {
+                    "h3": row['h3'],
+                    "lat": float(row['lat']),
+                    "lng": float(row['lng']),
+                    "source": "enhanced_arc_band",
+                    "tier": 0,
+                }
+        logging.info(f"⚠️ Tier 0: no match for any variant of '{street_name}'")
+    except Exception as e:
+        logging.warning(f"⚠️ Tier 0 failed: {e}")
+    return None
+
+
+def _tier1_google_geocode(street_name, cur):
+    """Tier 1: cache lookup then live Google geocode. Returns coords → H3."""
+    logging.info(f"📡 Tier 1 Google for '{street_name}'")
+    google_coords = _lookup_geocode_cache(street_name, cur)
+    source = "google_cache" if google_coords else None
+
+    if google_coords is None:
+        google_coords = _google_geocode(street_name)
+        if google_coords:
+            _write_geocode_cache(street_name, google_coords[0], google_coords[1], cur)
+            try:
+                cur.connection.commit()
+            except Exception as commit_err:
+                logging.warning(f"[CACHE] commit failed: {commit_err}")
+            source = "google_live"
+
+    if google_coords:
+        g_lat, g_lng = google_coords
+        try:
+            cur.execute(
+                "SELECT app_private.coords_to_h3(%s, %s)::text AS h3",
+                (g_lat, g_lng)
+            )
+            row = cur.fetchone()
+            if row and row['h3']:
+                logging.info(f"🎯 Tier 1 ({source}): {row['h3']}")
+                return {
+                    "h3": row['h3'],
+                    "lat": g_lat,
+                    "lng": g_lng,
+                    "source": source,
+                    "tier": 1,
+                }
+        except Exception as e:
+            logging.warning(f"⚠️ Tier 1 H3 conversion failed: {e}")
+    else:
+        logging.warning(f"⚠️ Tier 1: Google returned nothing for '{street_name}'")
+    return None
+
+
+def _tier2_donut_arc_band(
+    anchor_lat, anchor_lng,
+    intended_miles, geocoded_miles,
+    street_name,
+    driver_lat, driver_lng,
+    mode, cur,
+):
+    """Tier 2: donut-bounded arc-band via build_arc_donut(). Pickup may retry."""
+    logging.info(
+        f"🔄 Tier 2 donut from ({anchor_lat:.4f},{anchor_lng:.4f}) "
+        f"at ~{intended_miles}mi for '{street_name}'"
+    )
+    try:
+        cleaned = clean_street_name(street_name)
+        inner_miles, outer_miles = build_arc_donut(
+            intended_miles, geocoded_miles or intended_miles
+        )
+
+        # Order-by bias: driver-aware ordering when driver coords provided
+        # (offer-time enricher uses this for dropoff refinement).
+        if driver_lat and driver_lng:
+            order_sql = (
+                "ST_Distance(s.the_geom::geography, "
+                "app_private.coords_to_point(%s, %s)::geography) ASC"
+            )
+            order_params = (driver_lat, driver_lng)
+        else:
+            order_sql = "ST_Distance(s.the_geom, a.ring) ASC"
+            order_params = ()
+
+        result = _tier2_run_query(
+            anchor_lat, anchor_lng,
+            intended_miles, inner_miles, outer_miles,
+            cleaned, order_sql, order_params, cur,
+        )
+        if result:
+            logging.info(
+                f"✅ Tier 2: {result['h3']} "
+                f"(donut [{inner_miles:.2f}, {outer_miles:.2f}]mi)"
+            )
+            return result
+
+        # Pickup-mode retry: YOLO significantly undercounts geocoded distance
+        if (mode == "pickup"
+                and geocoded_miles
+                and abs(geocoded_miles - intended_miles) > 1.0):
+            logging.info(
+                f"🔄 Tier 2 retry with geocoded {geocoded_miles:.2f}mi "
+                f"(vs intended {intended_miles}mi)"
+            )
+            inner_r, outer_r = build_arc_donut(geocoded_miles, geocoded_miles)
+            result = _tier2_run_query(
+                anchor_lat, anchor_lng,
+                geocoded_miles, inner_r, outer_r,
+                cleaned, order_sql, order_params, cur,
+            )
+            if result:
+                logging.info(f"✅ Tier 2 retry: {result['h3']}")
+                return result
+
+        logging.info(f"⚠️ Tier 2: no match for '{street_name}'")
+    except Exception as e:
+        logging.warning(f"⚠️ Tier 2 failed: {e}")
+    return None
+
+
+def _tier2_run_query(
+    anchor_lat, anchor_lng,
+    ring_miles, inner_miles, outer_miles,
+    cleaned_street, order_sql, order_params, cur,
+):
+    """Inner helper for Tier 2. Runs the donut+street query once."""
+    cur.execute(f"""
+        WITH arc AS (
+            SELECT ST_Buffer(
+                app_private.coords_to_point(%s, %s)::geography,
+                %s * 1609.34
+            )::geometry AS ring
+        )
+        SELECT
+            app_private.coords_to_h3(
+                ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
+                ST_X(ST_ClosestPoint(s.the_geom, a.ring))
+            ) AS h3,
+            ST_Y(ST_ClosestPoint(s.the_geom, a.ring)) AS lat,
+            ST_X(ST_ClosestPoint(s.the_geom, a.ring)) AS lng
+        FROM routing.houston_ways s, arc a
+        WHERE s.name ILIKE '%%' || %s || '%%'
+          AND ST_DWithin(
+                s.the_geom::geography,
+                app_private.coords_to_point(%s, %s)::geography,
+                %s * 1609.34
+          )
+          AND NOT ST_DWithin(
+                s.the_geom::geography,
+                app_private.coords_to_point(%s, %s)::geography,
+                %s * 1609.34
+          )
+        ORDER BY {order_sql}
+        LIMIT 1
+    """, (
+        anchor_lat, anchor_lng, ring_miles,
+        cleaned_street,
+        anchor_lat, anchor_lng, outer_miles,
+        anchor_lat, anchor_lng, inner_miles,
+    ) + order_params)
+    row = cur.fetchone()
+    if row and row['h3']:
+        return {
+            "h3": row['h3'],
+            "lat": float(row['lat']),
+            "lng": float(row['lng']),
+            "source": "arc_band",
+            "tier": 2,
+        }
+    return None
+
+
+def _tier3_scored_snap(uber_target_lat, uber_target_lng, cur):
+    """Tier 3: scored ranker over houston_ways candidates near Uber pin."""
+    logging.info("🎯 Tier 3 scored snap")
+    try:
+        cur.execute("""
+            WITH candidate_segments AS (
+                SELECT
+                    s.tag_id,
+                    ST_ClosestPoint(s.the_geom,
+                        app_private.coords_to_point(%s, %s)) AS snap_point,
+                    ST_Distance(
+                        s.the_geom::geography,
+                        app_private.coords_to_point(%s, %s)::geography
+                    ) AS dist_to_geocode_m
+                FROM routing.houston_ways s
+                WHERE ST_DWithin(
+                    s.the_geom,
+                    app_private.coords_to_point(%s, %s),
+                    0.001
+                )
+                  AND s.tag_id NOT IN (101, 102, 104, 105)
+                ORDER BY dist_to_geocode_m
+                LIMIT 20
+            ),
+            scored AS (
+                SELECT
+                    snap_point,
+                    (0.45 + 0.35 * EXP(-dist_to_geocode_m / 100.0))
+                        * (dist_to_geocode_m / 800.0)
+                    + 0.20 * CASE WHEN tag_id IN (110, 109, 108, 111, 123)
+                                  THEN 0.0 ELSE 1.0 END AS score
+                FROM candidate_segments
+            )
+            SELECT
+                app_private.coords_to_h3(
+                    ST_Y(snap_point),
+                    ST_X(snap_point)
+                ) AS h3,
+                ST_Y(snap_point) AS lat,
+                ST_X(snap_point) AS lng
+            FROM scored
+            ORDER BY score ASC
+            LIMIT 1
+        """, (
+            uber_target_lat, uber_target_lng,
+            uber_target_lat, uber_target_lng,
+            uber_target_lat, uber_target_lng,
+        ))
+        row = cur.fetchone()
+        if row and row['h3']:
+            logging.info(f"✅ Tier 3 snap: {row['h3']}")
+            return {
+                "h3": row['h3'],
+                "lat": float(row['lat']),
+                "lng": float(row['lng']),
+                "source": "scored_snap",
+                "tier": 3,
+            }
+        logging.info("⚠️ Tier 3: no candidate")
+    except Exception as e:
+        logging.warning(f"⚠️ Tier 3 failed: {e}")
+    return None
+
+
+def _tier4_uber_snap(uber_target_lat, uber_target_lng, cur):
+    """Tier 4: last resort — snap Uber's pin directly to H3."""
+    logging.info("📍 Tier 4 uber_snap (last resort)")
+    try:
+        cur.execute(
+            "SELECT app_private.coords_to_h3(%s, %s)::text AS h3",
+            (uber_target_lat, uber_target_lng)
+        )
+        row = cur.fetchone()
+        if row and row['h3']:
+            logging.info(f"Tier 4: {row['h3']}")
+            return {
+                "h3": row['h3'],
+                "lat": uber_target_lat,
+                "lng": uber_target_lng,
+                "source": "uber_snap",
+                "tier": 4,
+            }
+        logging.warning("⚠️ Tier 4: no result for Uber geocoded point")
+    except Exception as e:
+        logging.warning(f"⚠️ Tier 4 failed: {e}")
+    return None
