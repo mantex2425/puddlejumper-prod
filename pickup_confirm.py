@@ -11,6 +11,7 @@ from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from state_machine import DriverStateMachine
 from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, write_nail_contest_event
+from decisions.nail_manager import handle_post_nail_refinement
 
 pickup_confirm_bp = Blueprint('pickup_confirm', __name__)
 
@@ -164,29 +165,56 @@ def confirm_pickup():
         except Exception as nail_e:
             logging.warning(f"⚠️ nailed_pickup write failed: {nail_e}")
 
-        # ── Recalibrate dropoff using confirmed pickup coords ─────────
+        # === SB3 hook (Patch 00566a Step 11 — Site B, dev path) ===
+        # Replaces the pre-00566a inline recalibrate block. Plan logic lives
+        # in decisions.nail_manager. Only the write mechanic is inline.
+        # Matches driver_heartbeat.py Site A pattern — both paths now respect
+        # Option C source branching (previous inline code always overwrote).
         try:
-            d_lat      = row.get('dropoff_lat')
-            d_lng      = row.get('dropoff_lng')
-            trip_miles = float(row.get('trip_miles') or 0)
-            if d_lat and d_lng and trip_miles > 0:
-                from triangulation import triangulate_dropoff, h3_to_coords
-                new_dropoff_h3 = triangulate_dropoff(
-                    actual_lat, actual_lng, d_lat, d_lng, trip_miles, cur
-                )
-                if new_dropoff_h3:
-                    dropoff_coords = h3_to_coords(new_dropoff_h3, cur)
-                    if dropoff_coords:
-                        cur.execute("""
-                            UPDATE app_private.driver_trip_state
-                            SET dropoff_h3  = %s,
-                                dropoff_lat = %s,
-                                dropoff_lng = %s
-                            WHERE driver_id = %s
-                        """, (new_dropoff_h3, dropoff_coords[0], dropoff_coords[1], driver_id))
-                        logging.info(f"🎯 Dropoff recalibrated: {new_dropoff_h3}")
-        except Exception as recal_e:
-            logging.warning(f"⚠️ Dropoff recalibration failed: {recal_e}")
+            refinement_plan = handle_post_nail_refinement(
+                offer_id=offer_id,
+                driver_id=driver_id,
+                nailed_pickup_lat=actual_lat,
+                nailed_pickup_lng=actual_lng,
+                cur=cur,
+            )
+            if refinement_plan:
+                if refinement_plan["overwrite_driver_state"]:
+                    cur.execute("""
+                        UPDATE app_private.driver_trip_state
+                        SET dropoff_lat         = %s,
+                            dropoff_lng         = %s,
+                            dropoff_h3          = %s,
+                            refined_dropoff_lat = %s,
+                            refined_dropoff_lng = %s,
+                            refinement_source   = %s
+                        WHERE driver_id = %s
+                    """, (
+                        refinement_plan["refined_lat"],
+                        refinement_plan["refined_lng"],
+                        refinement_plan["refined_h3"],
+                        refinement_plan["refined_lat"],
+                        refinement_plan["refined_lng"],
+                        refinement_plan["refinement_source"],
+                        driver_id,
+                    ))
+                else:
+                    cur.execute("""
+                        UPDATE app_private.driver_trip_state
+                        SET refined_dropoff_lat = %s,
+                            refined_dropoff_lng = %s,
+                            refinement_source   = %s
+                        WHERE driver_id = %s
+                    """, (
+                        refinement_plan["refined_lat"],
+                        refinement_plan["refined_lng"],
+                        refinement_plan["refinement_source"],
+                        driver_id,
+                    ))
+                logging.info(f"[SB3] {refinement_plan['log_reason']}")
+        except Exception as _sb3_err:
+            logging.warning(f"[SB3] refinement failed (non-fatal): {_sb3_err}")
+        # === end SB3 hook ===
 
         # ── Update offer_history ──────────────────────────────────────
         try:
