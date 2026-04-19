@@ -32,7 +32,9 @@ def _call_routes_api(origin_lat, origin_lng, dest_lat, dest_lng,
         "origin":      {"location": {"latLng": {"latitude": origin_lat, "longitude": origin_lng}}},
         "destination": {"location": {"latLng": {"latitude": dest_lat,   "longitude": dest_lng}}},
         "travelMode": "DRIVE",
-        "routingPreference": "TRAFFIC_AWARE",
+        # Patch 00563b: omit routingPreference to stay on Essentials tier.
+        # TRAFFIC_AWARE triggers Pro-tier billing ($10/1k vs $5/1k, 5k free vs 10k free).
+        # Scorer B uses polyline geometry, not traffic-aware ETA. No functional loss.
         "polylineEncoding":  "ENCODED_POLYLINE",
     }
 

@@ -87,15 +87,21 @@ _HIGHWAY_RE = re.compile(r'^[a-z]{1,3}[-\s]\d', re.IGNORECASE)
 def _is_vague_single_road(street_name: str) -> bool:
     if not street_name:
         return False
-    if '&' in street_name:
+    # Evaluate the street portion only — city/state suffixes (e.g.,
+    # "Lexington Blvd, Sugar Land, Texas") don't contribute to complexity
+    # and shouldn't disqualify the Tier 0 arc-banding path.
+    street_only = street_name.split(',')[0].strip()
+    if not street_only:
         return False
-    lower = street_name.lower()
+    if '&' in street_only:
+        return False
+    lower = street_only.lower()
     if any(x in lower for x in [' and ', ' at ', '/', 'near']):
         return False
-    is_highway = bool(_HIGHWAY_RE.match(street_name.strip()))
-    if not is_highway and (any(c.isdigit() for c in street_name[:10]) or '#' in lower):
+    is_highway = bool(_HIGHWAY_RE.match(street_only))
+    if not is_highway and (any(c.isdigit() for c in street_only[:10]) or '#' in lower):
         return False
-    if len(street_name.split()) > 4:  # too long = likely intersection or POI
+    if len(street_only.split()) > 4:  # too long = likely intersection or POI
         return False
     road_keywords = [
         'fwy', 'freeway', 'hwy', 'highway', 'pkwy', 'parkway',
