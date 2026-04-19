@@ -237,227 +237,25 @@ def triangulate_pickup(
     gps_age_sec=None,
     pre_geocoded=False,
 ):
-    if not all([current_lat, current_lng, p_lat, p_lng]):
-        return None
-    if geocoded_miles is None:
-        return None
-    if pickup_miles is None or pickup_miles <= 0:
-        if geocoded_miles > 0:
-            logging.info(
-                f"⚠️ YOLO pickup_miles=0 — falling back to geocoded distance "
-                f"({geocoded_miles:.2f}mi) as arc radius"
-            )
-            pickup_miles = geocoded_miles
-        else:
-            return None
+    """Thin wrapper — routes to refine_target_by_geometry(mode='pickup').
 
-    gps_stale = gps_age_sec is not None and gps_age_sec > 30
-    if gps_stale:
-        logging.info(f"⚠️ GPS stale ({gps_age_sec:.0f}s)")
-
-    arc_outer = pickup_miles / TORT_MIN_HOUSTON
-    is_hallucination = geocoded_miles > arc_outer * 2.0
-    if is_hallucination:
-        logging.warning(
-            f"⚠️ Geocode/GPS mismatch ({geocoded_miles:.1f}mi vs {pickup_miles}mi YOLO). "
-            f"Proceeding with Google verification..."
-        )
-
-    # ── TIER 0: Enhanced arc-banding for vague single-road ───────────────────
-    if street_name and _is_vague_single_road(street_name) and not gps_stale:
-        logging.info(f"🛣️ Vague single-road detected → Enhanced arc-banding on '{street_name}'")
-        try:
-            cleaned = clean_street_name(street_name)
-            lower = cleaned.lower()
-
-            if geocoded_miles > pickup_miles * 3.0:
-                logging.info(
-                    f"   → Strong hallucination: using Uber geocode "
-                    f"({p_lat:.5f}, {p_lng:.5f}) as arc center"
-                )
-                arc_lat, arc_lng = p_lat, p_lng
-            else:
-                arc_lat, arc_lng = current_lat, current_lng
-
-            variants = [cleaned]
-            if any(x in lower for x in ['fwy', 'freeway', 'hwy', 'highway']):
-                base = cleaned.replace('Fwy', 'Freeway').replace('Hwy', 'Highway')
-                variants += [base, base + ' Frontage Road']
-            variants = list(dict.fromkeys(variants))
-
-            for variant in variants:
-                cur.execute("""
-                    WITH arc AS (
-                        SELECT ST_Buffer(
-                            app_private.coords_to_point(%s, %s)::geography,
-                            %s * 1609.34
-                        )::geometry AS ring
-                    )
-                    SELECT app_private.coords_to_h3(
-                        ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
-                        ST_X(ST_ClosestPoint(s.the_geom, a.ring))
-                    ) AS h3
-                    FROM routing.houston_ways s, arc a
-                    WHERE s.name ILIKE '%%' || %s || '%%'
-                      AND ST_DWithin(
-                            s.the_geom::geography,
-                            app_private.coords_to_point(%s, %s)::geography,
-                            (%s + 0.35) * 1609.34
-                      )
-                    ORDER BY ST_Distance(s.the_geom, a.ring) ASC
-                    LIMIT 1
-                """, (
-                    arc_lat, arc_lng, pickup_miles,
-                    variant,
-                    arc_lat, arc_lng, pickup_miles
-                ))
-                row = cur.fetchone()
-                if row and row['h3']:
-                    logging.info(
-                        f"✅ Enhanced arc-banding succeeded: {row['h3']} "
-                        f"(variant: '{variant}')"
-                    )
-                    return row['h3']
-            logging.warning(
-                f"⚠️ Enhanced arc-banding: no match for any variant of '{street_name}'"
-            )
-        except Exception as e:
-            logging.warning(f"⚠️ Enhanced arc-banding failed: {e}")
-
-    # ── TIER 1: Google geocode → direct H3 ───────────────────────────────────
-    # Skipped when pickup coords already geocoded upstream (saves API call)
-    if street_name and not pre_geocoded:
-        logging.info(f"📡 [ORACLE] Querying Google for '{street_name}'...")
-        google_coords = _lookup_geocode_cache(street_name, cur)
-        if google_coords is None:
-            google_coords = _google_geocode(street_name)
-            if google_coords:
-                _write_geocode_cache(street_name, google_coords[0], google_coords[1], cur)
-                try:
-                    cur.connection.commit()
-                except Exception as _commit_err:
-                    logging.warning(f"[CACHE] Geocode cache commit failed: {_commit_err}")
-        if google_coords:
-            g_lat, g_lng = google_coords
-            if True:  # Total Trust in Google Address
-                try:
-                    cur.execute(
-                        "SELECT app_private.coords_to_h3(%s, %s)::text AS h3",
-                        (g_lat, g_lng)
-                    )
-                    row = cur.fetchone()
-                    if row and row['h3']:
-                        logging.info(f"🎯 BULLSEYE: Using Google Coords Directly: {row['h3']}")
-                        return row['h3']
-                except Exception as e:
-                    logging.warning(f"⚠️ Google direct H3 failed: {e}")
-        else:
-            logging.warning(f"⚠️ Google geocode returned nothing for '{street_name}'")
-
-    # ── TIER 2: Arc-banding (GPS must be fresh) ───────────────────────────────
-    if street_name and not gps_stale:
-        logging.info(
-            f"🔄 Arc-banding from ({current_lat:.4f},{current_lng:.4f}) "
-            f"at {pickup_miles}mi for '{street_name}'"
-        )
-        try:
-            cleaned = clean_street_name(street_name)
-            cur.execute("""
-                WITH arc AS (
-                    SELECT ST_Buffer(
-                        app_private.coords_to_point(%s, %s)::geography,
-                        %s * 1609.34
-                    )::geometry AS ring
-                )
-                SELECT app_private.coords_to_h3(
-                    ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
-                    ST_X(ST_ClosestPoint(s.the_geom, a.ring))
-                ) AS h3
-                FROM routing.houston_ways s, arc a
-                WHERE s.name ILIKE '%%' || %s || '%%'
-                  AND ST_DWithin(
-                        s.the_geom::geography,
-                        app_private.coords_to_point(%s, %s)::geography,
-                        (%s + 0.2) * 1609.34
-                  )
-                ORDER BY ST_Distance(s.the_geom, a.ring) ASC
-                LIMIT 1
-            """, (
-                current_lat, current_lng, pickup_miles,
-                cleaned,
-                current_lat, current_lng, pickup_miles
-            ))
-            row = cur.fetchone()
-            if row and row['h3']:
-                logging.info(f"✅ Arc-banding succeeded: {row['h3']}")
-                return row['h3']
-            else:
-                logging.warning(
-                    f"⚠️ Arc-banding: no match for '{street_name}' at {pickup_miles}mi"
-                )
-                # Geocoded distance retry when YOLO undercounts
-                if geocoded_miles and abs(geocoded_miles - pickup_miles) > 1.0:
-                    logging.info(
-                        f"🔄 Retrying arc-banding with geocoded distance "
-                        f"({geocoded_miles:.2f}mi vs YOLO {pickup_miles}mi)"
-                    )
-                    try:
-                        cur.execute("""
-                            WITH arc AS (
-                                SELECT ST_Buffer(
-                                    app_private.coords_to_point(%s, %s)::geography,
-                                    %s * 1609.34
-                                )::geometry AS ring
-                            )
-                            SELECT app_private.coords_to_h3(
-                                ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
-                                ST_X(ST_ClosestPoint(s.the_geom, a.ring))
-                            ) AS h3
-                            FROM routing.houston_ways s, arc a
-                            WHERE s.name ILIKE '%%' || %s || '%%'
-                              AND ST_DWithin(
-                                    s.the_geom::geography,
-                                    app_private.coords_to_point(%s, %s)::geography,
-                                    (%s + 0.2) * 1609.34
-                              )
-                            ORDER BY ST_Distance(s.the_geom, a.ring) ASC
-                            LIMIT 1
-                        """, (
-                            current_lat, current_lng, geocoded_miles,
-                            cleaned,
-                            current_lat, current_lng, geocoded_miles
-                        ))
-                        row = cur.fetchone()
-                        if row and row['h3']:
-                            logging.info(
-                                f"✅ Arc-banding succeeded with geocoded distance: {row['h3']}"
-                            )
-                            return row['h3']
-                        else:
-                            logging.warning(
-                                f"⚠️ Arc-banding: no match at geocoded {geocoded_miles:.2f}mi either"
-                            )
-                    except Exception as e:
-                        logging.warning(f"⚠️ Arc-banding geocoded fallback failed: {e}")
-        except Exception as e:
-            logging.warning(f"⚠️ Arc-banding failed: {e}")
-
-    # ── TIER 3: Uber geocoded snap ────────────────────────────────────────────
-    logging.info("📍 Last resort: Uber geocoded coords")
-    try:
-        cur.execute(
-            "SELECT app_private.coords_to_h3(%s, %s)::text AS h3",
-            (p_lat, p_lng)
-        )
-        row = cur.fetchone()
-        if row and row['h3']:
-            logging.info(f"Pickup triangulation (Uber snap) succeeded: {row['h3']}")
-            return row['h3']
-        else:
-            logging.warning("Pickup triangulation: no result for Uber geocoded point")
-    except Exception as e:
-        logging.warning(f"Pickup triangulation failed: {e}")
-    return None
+    Preserves the pre-00566a signature and h3-only return contract for
+    existing callers in decisions/triangulation_enricher.py, decisions/router.py,
+    and backtest scripts. New callers should call refine_target_by_geometry
+    directly to access the full {h3, lat, lng, source, tier} result dict.
+    """
+    result = refine_target_by_geometry(
+        anchor_lat=current_lat, anchor_lng=current_lng,
+        uber_target_lat=p_lat, uber_target_lng=p_lng,
+        intended_miles=pickup_miles,
+        geocoded_miles=geocoded_miles,
+        cur=cur,
+        mode="pickup",
+        street_name=street_name,
+        gps_age_sec=gps_age_sec,
+        pre_geocoded=pre_geocoded,
+    )
+    return result["h3"] if result else None
 
 
 def triangulate_dropoff(
@@ -467,97 +265,32 @@ def triangulate_dropoff(
     cur,
     street_name=None,
     driver_lat=None,
-    driver_lng=None
+    driver_lng=None,
 ):
-    if not all([pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, trip_miles]):
-        return None
-    if trip_miles <= 0:
-        return None
+    """Thin wrapper — routes to refine_target_by_geometry(mode='dropoff').
 
-    geocoded_miles = None
-    try:
-        cur.execute(
-            "SELECT app_private.distance_miles(%s, %s, %s, %s) AS dist",
-            (pickup_lat, pickup_lng, dropoff_lat, dropoff_lng)
-        )
-        row = cur.fetchone()
-        geocoded_miles = float(row["dist"]) if row else None
-    except Exception:
-        pass
-
-    arc_outer = trip_miles / TORT_MIN_HOUSTON
-    is_hallucination = geocoded_miles is not None and geocoded_miles > arc_outer * 1.5
-
-    if is_hallucination:
-        logging.info(
-            f"⚠️ Dropoff geocode hallucinated ({geocoded_miles:.1f}mi vs {trip_miles}mi). "
-            f"Pivoting to arc-banding for '{street_name}'..."
-        )
-        if street_name:
-            try:
-                cleaned = clean_street_name(street_name)
-                order_clause = (
-                    "ST_Distance(s.the_geom::geography, "
-                    "app_private.coords_to_point(%s, %s)::geography) ASC"
-                    if driver_lat and driver_lng
-                    else "ST_Distance(s.the_geom, a.ring) ASC"
-                )
-                params_base = (
-                    pickup_lat, pickup_lng, trip_miles,
-                    cleaned,
-                    pickup_lat, pickup_lng, trip_miles
-                )
-                params_full = params_base + (
-                    (driver_lat, driver_lng) if driver_lat and driver_lng else ()
-                )
-                cur.execute(f"""
-                    WITH arc AS (
-                        SELECT ST_Buffer(
-                            app_private.coords_to_point(%s, %s)::geography,
-                            %s * 1609.34
-                        )::geometry AS ring
-                    )
-                    SELECT app_private.coords_to_h3(
-                        ST_Y(ST_ClosestPoint(s.the_geom, a.ring)),
-                        ST_X(ST_ClosestPoint(s.the_geom, a.ring))
-                    ) AS h3
-                    FROM routing.houston_ways s, arc a
-                    WHERE s.name ILIKE '%%' || %s || '%%'
-                      AND ST_DWithin(
-                            s.the_geom::geography,
-                            app_private.coords_to_point(%s, %s)::geography,
-                            (%s / 0.9 + 0.5) * 1609.34
-                      )
-                    ORDER BY {order_clause}
-                    LIMIT 1
-                """, params_full)
-                row = cur.fetchone()
-                if row and row["h3"]:
-                    logging.info(f"🎯 Dropoff arc-banding succeeded: {row['h3']}")
-                    return row["h3"]
-                else:
-                    logging.warning(
-                        f"⚠️ Dropoff arc-banding: no match for '{street_name}'"
-                    )
-            except Exception as e:
-                logging.warning(f"⚠️ Dropoff arc-banding failed: {e}")
-        return None
-
-    try:
-        cur.execute(_TRIANGULATION_SQL, (
-            dropoff_lat, dropoff_lng,
-            dropoff_lat, dropoff_lng,
-            dropoff_lat, dropoff_lng,
-        ))
-        row = cur.fetchone()
-        if row and row["h3"]:
-            logging.info(f"Dropoff triangulation succeeded: {row['h3']}")
-            return row["h3"]
-        else:
-            logging.warning("Dropoff triangulation: no street found near geocoded point")
-    except Exception as e:
-        logging.warning(f"Dropoff triangulation failed: {e}")
-    return None
+    Preserves the pre-00566a signature and h3-only return contract.
+    Computes geocoded_miles internally via _compute_geocoded_miles() since
+    existing callers don't pass it. New callers (decisions/nail_manager.py,
+    Patch 00566a Step 9) should call refine_target_by_geometry directly.
+    """
+    geocoded_miles = _compute_geocoded_miles(
+        pickup_lat, pickup_lng,
+        dropoff_lat, dropoff_lng,
+        cur,
+    )
+    result = refine_target_by_geometry(
+        anchor_lat=pickup_lat, anchor_lng=pickup_lng,
+        uber_target_lat=dropoff_lat, uber_target_lng=dropoff_lng,
+        intended_miles=trip_miles,
+        geocoded_miles=geocoded_miles,
+        cur=cur,
+        mode="dropoff",
+        street_name=street_name,
+        driver_lat=driver_lat,
+        driver_lng=driver_lng,
+    )
+    return result["h3"] if result else None
 
 
 def h3_to_coords(h3_hex, cur):
