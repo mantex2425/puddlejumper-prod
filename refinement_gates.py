@@ -35,8 +35,10 @@ def _haversine_miles(lat1, lng1, lat2, lng2):
 # with Round 2 data.
 NOISE_FLOOR_MILES = 0.3
 
-# Circular-trip guard — if the anchor (nailed pickup) and the Uber dropoff pin
-# are within this many meters, treat as errand/return-trip class and skip.
+# Circular-trip guard — if the anchor (nailed pickup) and our current
+# dropoff estimate are within this many meters, treat as errand/return-trip
+# class and skip. (Note: Uber does not provide a dropoff pin; the 'estimate'
+# is our own earlier geocoding of the dropoff address.)
 CIRCULAR_GUARD_METERS = 50.0
 
 
@@ -45,8 +47,8 @@ def should_refine_dropoff(
     dropoff_addr,
     anchor_lat,
     anchor_lng,
-    uber_dropoff_lat,
-    uber_dropoff_lng,
+    initial_dropoff_estimate_lat,
+    initial_dropoff_estimate_lng,
     trip_miles,
 ):
     """
@@ -57,8 +59,8 @@ def should_refine_dropoff(
     Guards (short-circuit on first fail):
       1. same_address_errand — pickup and dropoff address strings match
          (case-insensitive, trimmed)
-      2. circular_within_50m — anchor and Uber dropoff pin are within
-         CIRCULAR_GUARD_METERS of each other (anchor ≈ dropoff pin)
+      2. circular_within_50m — anchor and current dropoff estimate are
+         within CIRCULAR_GUARD_METERS of each other (anchor ≈ estimate)
       3. trip_miles_below_noise_floor — trip_miles is None, zero, or
          below NOISE_FLOOR_MILES
 
@@ -76,10 +78,10 @@ def should_refine_dropoff(
         return False, "same_address_errand"
 
     # Guard 2: circular within 50m
-    if all([anchor_lat, anchor_lng, uber_dropoff_lat, uber_dropoff_lng]):
+    if all([anchor_lat, anchor_lng, initial_dropoff_estimate_lat, initial_dropoff_estimate_lng]):
         dist_m = _haversine_miles(
             anchor_lat, anchor_lng,
-            uber_dropoff_lat, uber_dropoff_lng,
+            initial_dropoff_estimate_lat, initial_dropoff_estimate_lng,
         ) * 1609.34
         if dist_m < CIRCULAR_GUARD_METERS:
             return False, "circular_within_50m"

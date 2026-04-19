@@ -10,12 +10,12 @@ Use only app_private canonical functions.
 
 v6 - April 2 2026
 Tier 0: Enhanced arc-banding for vague single-road addresses.
-         Uses Uber geocode as arc center when hallucination detected.
+         Uses our cached initial estimate as arc center when hallucination detected.
          Filled ST_Buffer (not ExteriorRing) — empirically better on
          fragmented Houston OSM data.
 Tier 1: Google geocode → direct H3 (intersections, POIs)
 Tier 2: Arc-banding fallback (GPS fresh)
-Tier 3: Uber geocoded snap (last resort)
+Tier 3: Initial-estimate snap (last resort)
 
 Confirmed working changes vs original v6:
 - YOLO=0 fallback: uses geocoded_miles as arc radius
@@ -24,6 +24,19 @@ Confirmed working changes vs original v6:
 - DWithin tolerance 0.4 → 0.5 in Tier 0
 - arc_band.py uses routing.houston_ways for dropoff geometry
 """
+
+# ═══════════════════════════════════════════════════════════════════
+# CRITICAL MENTAL MODEL — READ FIRST
+# ═══════════════════════════════════════════════════════════════════
+# Uber does NOT provide lat/lng coordinates. Any coordinate passed to
+# this engine as an "initial_estimate" originates from our OWN earlier
+# work — a Google Geocoding API call, a cache hit on a prior Google
+# lookup, or the output of a prior triangulation stage. Never reason
+# about initial_estimate values as if they came from Uber; they are
+# our prior guess being refined by this engine using address string +
+# driver GPS + OCR-reported driven distance + houston_ways geometry.
+# ═══════════════════════════════════════════════════════════════════
+
 
 import logging
 import os
@@ -246,7 +259,7 @@ def triangulate_pickup(
     """
     result = refine_target_by_geometry(
         anchor_lat=current_lat, anchor_lng=current_lng,
-        uber_target_lat=p_lat, uber_target_lng=p_lng,
+        initial_estimate_lat=p_lat, initial_estimate_lng=p_lng,
         intended_miles=pickup_miles,
         geocoded_miles=geocoded_miles,
         cur=cur,
@@ -281,7 +294,7 @@ def triangulate_dropoff(
     )
     result = refine_target_by_geometry(
         anchor_lat=pickup_lat, anchor_lng=pickup_lng,
-        uber_target_lat=dropoff_lat, uber_target_lng=dropoff_lng,
+        initial_estimate_lat=dropoff_lat, initial_estimate_lng=dropoff_lng,
         intended_miles=trip_miles,
         geocoded_miles=geocoded_miles,
         cur=cur,
@@ -337,8 +350,8 @@ def _compute_geocoded_miles(lat1, lng1, lat2, lng2, cur):
 def refine_target_by_geometry(
     anchor_lat,
     anchor_lng,
-    uber_target_lat,
-    uber_target_lng,
+    initial_estimate_lat,
+    initial_estimate_lng,
     intended_miles,
     geocoded_miles,
     cur,
@@ -360,7 +373,7 @@ def refine_target_by_geometry(
       1 - google_cache/google_live: live Google geocode, cached for dedup
       2 - arc_band (donut): build_arc_donut() inner/outer bounds + houston_ways
       3 - scored_snap: _TRIANGULATION_SQL scored candidate ranker
-      4 - uber_snap: last-resort snap of Uber pin to H3
+      4 - estimate_snap: last-resort snap of initial estimate to H3
 
     Mode parameterization:
       - mode="pickup": anchor is driver GPS; honors gps_age_sec, pre_geocoded,
@@ -370,12 +383,12 @@ def refine_target_by_geometry(
 
     Returns: dict {h3, lat, lng, source, tier} or None.
       source: google_cache | google_live | enhanced_arc_band | arc_band
-            | scored_snap | uber_snap
+            | scored_snap | estimate_snap
       tier:   int 0..4 corresponding to the tier that fired
     """
     if mode not in ("pickup", "dropoff"):
         raise ValueError(f"mode must be 'pickup' or 'dropoff', got {mode!r}")
-    if not all([anchor_lat, anchor_lng, uber_target_lat, uber_target_lng]):
+    if not all([anchor_lat, anchor_lng, initial_estimate_lat, initial_estimate_lng]):
         return None
 
     # Intended-miles fallback (pickup-mode): YOLO zeroed out but geocoded present
@@ -416,7 +429,7 @@ def refine_target_by_geometry(
         logging.info(f"🛣️ [{mode}] Tier 0 enhanced arc-band for '{street_name}'")
         result = _tier0_enhanced_arc_band(
             anchor_lat, anchor_lng,
-            uber_target_lat, uber_target_lng,
+            initial_estimate_lat, initial_estimate_lng,
             intended_miles, geocoded_miles,
             street_name, mode, cur,
         )
@@ -442,26 +455,26 @@ def refine_target_by_geometry(
             return result
 
     # ── TIER 3: Scored snap (with Option X safety gate) ─────────────────────
-    result = _tier3_scored_snap(uber_target_lat, uber_target_lng, cur)
+    result = _tier3_scored_snap(initial_estimate_lat, initial_estimate_lng, cur)
     if result:
         dist_m = _haversine_miles(
-            uber_target_lat, uber_target_lng,
+            initial_estimate_lat, initial_estimate_lng,
             result["lat"], result["lng"],
         ) * 1609.34
         if dist_m <= 500:
             return result
         logging.warning(
-            f"⚠️ [{mode}] Tier 3 result {dist_m:.0f}m from uber_target — "
+            f"⚠️ [{mode}] Tier 3 result {dist_m:.0f}m from initial_estimate — "
             f"rejected (Option X gate, falling through to Tier 4)"
         )
 
-    # ── TIER 4: Last resort — Uber snap ─────────────────────────────────────
-    return _tier4_uber_snap(uber_target_lat, uber_target_lng, cur)
+    # ── TIER 4: Last resort — initial-estimate snap ─────────────────────────
+    return _tier4_estimate_snap(initial_estimate_lat, initial_estimate_lng, cur)
 
 
 def _tier0_enhanced_arc_band(
     anchor_lat, anchor_lng,
-    uber_target_lat, uber_target_lng,
+    initial_estimate_lat, initial_estimate_lng,
     intended_miles, geocoded_miles,
     street_name, mode, cur,
 ):
@@ -471,16 +484,20 @@ def _tier0_enhanced_arc_band(
         lower = cleaned.lower()
 
         # Center-switching (pickup-mode only per v0.3 §4.3):
-        # When geocode is strongly hallucinated, trust Uber's pin over driver GPS.
+        # When our prior geocode is strongly at odds with OCR pickup_miles (>3x
+        # the expected arc), the driver GPS anchor may be in a totally different
+        # part of the city than the pickup. Switch arc center from driver GPS
+        # to the prior geocode — the assumption is that the geocode is closer
+        # to reality than GPS-anchored arc-banding would yield.
         # Dropoff-mode never switches — nailed pickup is verified good.
         if (mode == "pickup"
                 and geocoded_miles
                 and geocoded_miles > intended_miles * 3.0):
             logging.info(
-                f"   → Strong hallucination: center-switch to Uber geocode "
-                f"({uber_target_lat:.5f}, {uber_target_lng:.5f})"
+                f"   → Strong hallucination: center-switch to initial estimate "
+                f"({initial_estimate_lat:.5f}, {initial_estimate_lng:.5f})"
             )
-            arc_lat, arc_lng = uber_target_lat, uber_target_lng
+            arc_lat, arc_lng = initial_estimate_lat, initial_estimate_lng
         else:
             arc_lat, arc_lng = anchor_lat, anchor_lng
 
@@ -696,8 +713,8 @@ def _tier2_run_query(
     return None
 
 
-def _tier3_scored_snap(uber_target_lat, uber_target_lng, cur):
-    """Tier 3: scored ranker over houston_ways candidates near Uber pin."""
+def _tier3_scored_snap(initial_estimate_lat, initial_estimate_lng, cur):
+    """Tier 3: scored ranker over houston_ways candidates near initial estimate."""
     logging.info("🎯 Tier 3 scored snap")
     try:
         cur.execute("""
@@ -740,9 +757,9 @@ def _tier3_scored_snap(uber_target_lat, uber_target_lng, cur):
             ORDER BY score ASC
             LIMIT 1
         """, (
-            uber_target_lat, uber_target_lng,
-            uber_target_lat, uber_target_lng,
-            uber_target_lat, uber_target_lng,
+            initial_estimate_lat, initial_estimate_lng,
+            initial_estimate_lat, initial_estimate_lng,
+            initial_estimate_lat, initial_estimate_lng,
         ))
         row = cur.fetchone()
         if row and row['h3']:
@@ -760,25 +777,25 @@ def _tier3_scored_snap(uber_target_lat, uber_target_lng, cur):
     return None
 
 
-def _tier4_uber_snap(uber_target_lat, uber_target_lng, cur):
-    """Tier 4: last resort — snap Uber's pin directly to H3."""
-    logging.info("📍 Tier 4 uber_snap (last resort)")
+def _tier4_estimate_snap(initial_estimate_lat, initial_estimate_lng, cur):
+    """Tier 4: last resort — snap initial estimate directly to H3."""
+    logging.info("📍 Tier 4 estimate_snap (last resort)")
     try:
         cur.execute(
             "SELECT app_private.coords_to_h3(%s, %s)::text AS h3",
-            (uber_target_lat, uber_target_lng)
+            (initial_estimate_lat, initial_estimate_lng)
         )
         row = cur.fetchone()
         if row and row['h3']:
             logging.info(f"Tier 4: {row['h3']}")
             return {
                 "h3": row['h3'],
-                "lat": uber_target_lat,
-                "lng": uber_target_lng,
-                "source": "uber_snap",
+                "lat": initial_estimate_lat,
+                "lng": initial_estimate_lng,
+                "source": "estimate_snap",
                 "tier": 4,
             }
-        logging.warning("⚠️ Tier 4: no result for Uber geocoded point")
+        logging.warning("⚠️ Tier 4: no result for initial estimate")
     except Exception as e:
         logging.warning(f"⚠️ Tier 4 failed: {e}")
     return None
