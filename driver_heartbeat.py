@@ -274,9 +274,10 @@ def post_heartbeat():
                 refinement_plan = handle_post_nail_refinement(
                     offer_id=state_row.get('current_offer_id'),
                     driver_id=driver_id,
-                    nailed_pickup_lat=current_lat,
-                    nailed_pickup_lng=current_lng,
+                    nailed_anchor_lat=current_lat,
+                    nailed_anchor_lng=current_lng,
                     cur=cur,
+                    mode="dropoff",
                 )
                 if refinement_plan:
                     if refinement_plan["overwrite_driver_state"]:
@@ -311,9 +312,9 @@ def post_heartbeat():
                             refinement_plan["refinement_source"],
                             driver_id,
                         ))
-                    logging.info(f"[SB3] {refinement_plan['log_reason']}")
+                    logging.info(f"[REFINEMENT] {refinement_plan['log_reason']}")
             except Exception as _sb3_err:
-                logging.warning(f"[SB3] refinement failed (non-fatal): {_sb3_err}")
+                logging.warning(f"[REFINEMENT] refinement failed (non-fatal): {_sb3_err}")
             # === end SB3 hook ===
 
         if _just_nailed_pickup:
@@ -445,6 +446,20 @@ def post_heartbeat():
                                 (current_lat, current_lng))
                     _h3r = cur.fetchone()
                     _actual_h3 = _h3r['h3'] if _h3r else None
+
+                    # SB3 trip-close hook (Patch 00566a Step 12, watchdog_a path):
+                    # Propagate refined_dropoff_* and refinement_source from
+                    # driver_trip_state into this trip's offer_history row.
+                    cur.execute("""
+                        SELECT refined_dropoff_lat, refined_dropoff_lng, refinement_source
+                        FROM app_private.driver_trip_state
+                        WHERE driver_id = %s
+                    """, (driver_id,))
+                    _dts_row = cur.fetchone() or {}
+                    _refined_lat = _dts_row.get("refined_dropoff_lat")
+                    _refined_lng = _dts_row.get("refined_dropoff_lng")
+                    _refinement_source = _dts_row.get("refinement_source")
+
                     cur.execute("""
                         UPDATE app_private.offer_history
                         SET actual_dropoff_lat     = %s,
@@ -452,11 +467,20 @@ def post_heartbeat():
                             actual_dropoff_h3      = %s,
                             actual_dropoff_at      = NOW(),
                             dropoff_error_m        = %s,
-                            dropoff_classification = %s
+                            dropoff_classification = %s,
+                            refined_dropoff_lat    = %s,
+                            refined_dropoff_lng    = %s,
+                            refinement_source      = %s
                         WHERE decision_log_id = %s::integer
                     """, (current_lat, current_lng, _actual_h3,
-                          new_error_m, 'watchdog_a', _audit_id))
-                    logging.info(f"[HEARTBEAT] offer_history dropoff updated (watchdog_a) offer={_audit_id}")
+                          new_error_m, 'watchdog_a',
+                          _refined_lat, _refined_lng, _refinement_source,
+                          _audit_id))
+                    logging.info(
+                        f"[HEARTBEAT] offer_history dropoff updated (watchdog_a) offer={_audit_id} "
+                        f"refined={'yes' if _refined_lat is not None else 'no'} "
+                        f"source={_refinement_source}"
+                    )
                 except Exception as _oh_err:
                     logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
             if _s == 'STACKED':
@@ -593,6 +617,20 @@ def post_heartbeat():
                                 (nail_lat, nail_lng))
                     _h3r = cur.fetchone()
                     _actual_h3 = _h3r['h3'] if _h3r else None
+
+                    # SB3 trip-close hook (Patch 00566a Step 12, watchdog_b path):
+                    # Propagate refined_dropoff_* and refinement_source from
+                    # driver_trip_state into this trip's offer_history row.
+                    cur.execute("""
+                        SELECT refined_dropoff_lat, refined_dropoff_lng, refinement_source
+                        FROM app_private.driver_trip_state
+                        WHERE driver_id = %s
+                    """, (driver_id,))
+                    _dts_row = cur.fetchone() or {}
+                    _refined_lat = _dts_row.get("refined_dropoff_lat")
+                    _refined_lng = _dts_row.get("refined_dropoff_lng")
+                    _refinement_source = _dts_row.get("refinement_source")
+
                     cur.execute("""
                         UPDATE app_private.offer_history
                         SET actual_dropoff_lat     = %s,
@@ -600,11 +638,20 @@ def post_heartbeat():
                             actual_dropoff_h3      = %s,
                             actual_dropoff_at      = NOW(),
                             dropoff_error_m        = %s,
-                            dropoff_classification = %s
+                            dropoff_classification = %s,
+                            refined_dropoff_lat    = %s,
+                            refined_dropoff_lng    = %s,
+                            refinement_source      = %s
                         WHERE decision_log_id = %s::integer
                     """, (nail_lat, nail_lng, _actual_h3,
-                          new_error_m, 'watchdog_b', _audit_id))
-                    logging.info(f"[HEARTBEAT] offer_history dropoff updated (watchdog_b) offer={_audit_id}")
+                          new_error_m, 'watchdog_b',
+                          _refined_lat, _refined_lng, _refinement_source,
+                          _audit_id))
+                    logging.info(
+                        f"[HEARTBEAT] offer_history dropoff updated (watchdog_b) offer={_audit_id} "
+                        f"refined={'yes' if _refined_lat is not None else 'no'} "
+                        f"source={_refinement_source}"
+                    )
                 except Exception as _oh_err:
                     logging.warning(f"[HEARTBEAT] offer_history dropoff update failed: {_oh_err}")
             if _s == 'STACKED':

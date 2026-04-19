@@ -4,7 +4,7 @@ import traceback
 import math
 import os
 from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords
-from refinement_gates import should_refine_dropoff
+from refinement_gates import should_refine_target
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(__file__)))
 from state_machine import DriverStateMachine
@@ -339,16 +339,16 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     triangulated_pickup_lng = pickup_coords[1]
 
             # Dropoff refinement policy gate (Patch 00566a Step 6).
-            # Single source of truth: refinement_gates.should_refine_dropoff().
+            # Single source of truth: refinement_gates.should_refine_target().
             # Same semantic as the old inline same-address check, extended with
             # circular-within-50m and noise-floor guards.
-            should_refine, skip_reason = should_refine_dropoff(
+            should_refine, skip_reason = should_refine_target(
                 pickup_addr=ep.get("pickup_address"),
                 dropoff_addr=ep.get("dropoff_address"),
                 anchor_lat=triangulated_pickup_lat or ep.get("p_lat"),
                 anchor_lng=triangulated_pickup_lng or ep.get("p_lng"),
-                initial_dropoff_estimate_lat=ep.get("d_lat"),
-                initial_dropoff_estimate_lng=ep.get("d_lng"),
+                initial_target_estimate_lat=ep.get("d_lat"),
+                initial_target_estimate_lng=ep.get("d_lng"),
                 trip_miles=ep.get("trip_miles"),
             )
 

@@ -174,9 +174,10 @@ def confirm_pickup():
             refinement_plan = handle_post_nail_refinement(
                 offer_id=offer_id,
                 driver_id=driver_id,
-                nailed_pickup_lat=actual_lat,
-                nailed_pickup_lng=actual_lng,
+                nailed_anchor_lat=actual_lat,
+                nailed_anchor_lng=actual_lng,
                 cur=cur,
+                mode="dropoff",
             )
             if refinement_plan:
                 if refinement_plan["overwrite_driver_state"]:
@@ -211,9 +212,9 @@ def confirm_pickup():
                         refinement_plan["refinement_source"],
                         driver_id,
                     ))
-                logging.info(f"[SB3] {refinement_plan['log_reason']}")
+                logging.info(f"[REFINEMENT] {refinement_plan['log_reason']}")
         except Exception as _sb3_err:
-            logging.warning(f"[SB3] refinement failed (non-fatal): {_sb3_err}")
+            logging.warning(f"[REFINEMENT] refinement failed (non-fatal): {_sb3_err}")
         # === end SB3 hook ===
 
         # ── Update offer_history ──────────────────────────────────────

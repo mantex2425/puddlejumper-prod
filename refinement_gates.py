@@ -42,13 +42,13 @@ NOISE_FLOOR_MILES = 0.3
 CIRCULAR_GUARD_METERS = 50.0
 
 
-def should_refine_dropoff(
+def should_refine_target(
     pickup_addr,
     dropoff_addr,
     anchor_lat,
     anchor_lng,
-    initial_dropoff_estimate_lat,
-    initial_dropoff_estimate_lng,
+    initial_target_estimate_lat,
+    initial_target_estimate_lng,
     trip_miles,
 ):
     """
@@ -78,10 +78,10 @@ def should_refine_dropoff(
         return False, "same_address_errand"
 
     # Guard 2: circular within 50m
-    if all([anchor_lat, anchor_lng, initial_dropoff_estimate_lat, initial_dropoff_estimate_lng]):
+    if all([anchor_lat, anchor_lng, initial_target_estimate_lat, initial_target_estimate_lng]):
         dist_m = _haversine_miles(
             anchor_lat, anchor_lng,
-            initial_dropoff_estimate_lat, initial_dropoff_estimate_lng,
+            initial_target_estimate_lat, initial_target_estimate_lng,
         ) * 1609.34
         if dist_m < CIRCULAR_GUARD_METERS:
             return False, "circular_within_50m"
