@@ -4,6 +4,7 @@ import traceback
 import math
 import os
 from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords
+from refinement_gates import should_refine_dropoff
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(__file__)))
 from state_machine import DriverStateMachine
@@ -337,18 +338,34 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                     triangulated_pickup_lat = pickup_coords[0]
                     triangulated_pickup_lng = pickup_coords[1]
 
-            # Same-address guard: circular trip / errand detection
-            p_addr = (ep.get("pickup_address") or "").strip().lower()
-            d_addr = (ep.get("dropoff_address") or "").strip().lower()
-            _same_address = bool(p_addr and d_addr and p_addr == d_addr)
-            if _same_address:
-                logging.info(f"[TRI] Same-address errand detected ({p_addr}) — mirroring pickup coords")
-                triangulated_dropoff_lat = triangulated_pickup_lat or ep.get("p_lat")
-                triangulated_dropoff_lng = triangulated_pickup_lng or ep.get("p_lng")
-                triangulated_dropoff_h3  = triangulated_h3
+            # Dropoff refinement policy gate (Patch 00566a Step 6).
+            # Single source of truth: refinement_gates.should_refine_dropoff().
+            # Same semantic as the old inline same-address check, extended with
+            # circular-within-50m and noise-floor guards.
+            should_refine, skip_reason = should_refine_dropoff(
+                pickup_addr=ep.get("pickup_address"),
+                dropoff_addr=ep.get("dropoff_address"),
+                anchor_lat=triangulated_pickup_lat or ep.get("p_lat"),
+                anchor_lng=triangulated_pickup_lng or ep.get("p_lng"),
+                initial_dropoff_estimate_lat=ep.get("d_lat"),
+                initial_dropoff_estimate_lng=ep.get("d_lng"),
+                trip_miles=ep.get("trip_miles"),
+            )
+
+            if not should_refine:
+                logging.info(f"[TRI] Dropoff refinement skipped: {skip_reason}")
+                # Only the same-address errand case mirrors pickup coords to
+                # dropoff. Other skip reasons (circular_within_50m, noise floor)
+                # leave dropoff coords at their initial estimate so downstream
+                # SB3 at pickup-nail time can attempt refinement with the
+                # verified nailed anchor.
+                if skip_reason == "same_address_errand":
+                    triangulated_dropoff_lat = triangulated_pickup_lat or ep.get("p_lat")
+                    triangulated_dropoff_lng = triangulated_pickup_lng or ep.get("p_lng")
+                    triangulated_dropoff_h3  = triangulated_h3
 
             # Triangulate dropoff (uses resolved pickup coords, not raw h3)
-            if (not _same_address and triangulated_h3 and triangulated_pickup_lat and triangulated_pickup_lng
+            elif (triangulated_h3 and triangulated_pickup_lat and triangulated_pickup_lng
                     and ep["d_lat"] and ep["d_lng"] and ep["trip_miles"]):
                 triangulated_dropoff_h3 = triangulate_dropoff(
                     triangulated_pickup_lat, triangulated_pickup_lng,
