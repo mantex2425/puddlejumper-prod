@@ -31,8 +31,9 @@ import requests
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 
-TORT_MIN = 0.9
-TORT_MAX = 2.5
+# Tortuosity constants imported from arc_band.py (single source of truth).
+# Houston-specific empirical values — see arc_band.py for data provenance.
+from arc_band import TORT_MIN_HOUSTON, TORT_MAX_HOUSTON
 
 
 def _google_geocode(address: str, bias_lat: float = None, bias_lng: float = None) -> tuple | None:
@@ -114,8 +115,10 @@ def _is_vague_single_road(street_name: str) -> bool:
     return any(f' {kw}' in lower or lower.endswith(kw) for kw in road_keywords)
 
 
-TORTUOSITY_MIN = 1.0
-TORTUOSITY_MAX = 3.0
+# TORTUOSITY_MIN (1.0) and TORTUOSITY_MAX (3.0) removed here —
+# these were a duplicate, drifted set of the canonical Houston tortuosity
+# constants now imported from arc_band.py above (values: 0.9 / 2.5).
+# build_arc_donut() below uses the canonical TORT_MIN_HOUSTON / TORT_MAX_HOUSTON.
 
 
 def _normalize_address(address: str) -> str:
@@ -163,8 +166,8 @@ def _write_geocode_cache(address: str, lat: float, lng: float, cur):
 def build_arc_donut(yolo_miles, geocoded_miles, safety_buffer_miles=0.2):
     if yolo_miles <= 0:
         return 0.1, 1.0
-    inner_yolo = yolo_miles / TORTUOSITY_MAX
-    outer_yolo = yolo_miles / TORTUOSITY_MIN
+    inner_yolo = yolo_miles / TORT_MAX_HOUSTON
+    outer_yolo = yolo_miles / TORT_MIN_HOUSTON
     inner_geo = max(geocoded_miles - safety_buffer_miles, 0.1)
     outer_geo = geocoded_miles + safety_buffer_miles
     inner_radius = min(inner_yolo, inner_geo)
@@ -252,7 +255,7 @@ def triangulate_pickup(
     if gps_stale:
         logging.info(f"⚠️ GPS stale ({gps_age_sec:.0f}s)")
 
-    arc_outer = pickup_miles / TORT_MIN
+    arc_outer = pickup_miles / TORT_MIN_HOUSTON
     is_hallucination = geocoded_miles > arc_outer * 2.0
     if is_hallucination:
         logging.warning(
@@ -482,7 +485,7 @@ def triangulate_dropoff(
     except Exception:
         pass
 
-    arc_outer = trip_miles / TORT_MIN
+    arc_outer = trip_miles / TORT_MIN_HOUSTON
     is_hallucination = geocoded_miles is not None and geocoded_miles > arc_outer * 1.5
 
     if is_hallucination:

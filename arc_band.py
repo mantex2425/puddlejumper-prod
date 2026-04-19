@@ -19,9 +19,11 @@ import urllib.request
 import urllib.parse
 from typing import Optional, Dict, List, Tuple
 
-# Tortuosity range: driving distance / straight-line distance
-TORT_MIN = 0.9   # p01 — near-straight freeway routes (data-driven from 554 rides)
-TORT_MAX = 2.5   # p95 — covers 95% of Houston route shapes (data-driven)
+# Tortuosity range: driving distance / straight-line distance.
+# Houston-specific empirical values. Single source of truth for the whole
+# codebase — triangulation.py imports these names. Do not redefine elsewhere.
+TORT_MIN_HOUSTON = 0.9   # p01 — near-straight freeway routes (data-driven from 554 rides)
+TORT_MAX_HOUSTON = 2.5   # p95 — covers 95% of Houston route shapes (data-driven)
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_TIMEOUT = 5  # seconds
@@ -68,8 +70,8 @@ def check_distance_gate(
         return {"is_hallucination": False, "reason": "no_data"}
 
     geocoded_distance = haversine(pickup_lat, pickup_lng, dropoff_lat, dropoff_lng)
-    arc_inner = trip_miles / TORT_MAX
-    arc_outer = trip_miles / TORT_MIN
+    arc_inner = trip_miles / TORT_MAX_HOUSTON
+    arc_outer = trip_miles / TORT_MIN_HOUSTON
 
     ratio = geocoded_distance / arc_outer if arc_outer > 0 else 999
 
@@ -352,8 +354,8 @@ def sweep_arc_band(
         - best_guess: (lat, lng) closest band point to geometric center
         - any_red: bool
     """
-    arc_inner = distance_miles / TORT_MAX
-    arc_outer = distance_miles / TORT_MIN
+    arc_inner = distance_miles / TORT_MAX_HOUSTON
+    arc_outer = distance_miles / TORT_MIN_HOUSTON
 
     band_points = []
 
