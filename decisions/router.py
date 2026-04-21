@@ -381,7 +381,17 @@ def make_decision():
                 _cache_street, ep["dropoff_address"], ep["d_lat"], ep["d_lng"]
             )
 
-        logging.info(f"[TIMER] TOTAL decision time: {(time.time()-_t0)*1000:.0f}ms")
+        _total_ms = (time.time() - _t0) * 1000
+        if _total_ms > 2000:
+            logging.warning(
+                f"[TIMER] ⚠️ SLOW decision {_total_ms:.0f}ms "
+                f"dropoff={ep.get('dropoff_address')!r} "
+                f"pickup_miles={ep.get('pickup_miles')} "
+                f"trip_miles={ep.get('trip_miles')} "
+                f"verdict={result.get('verdict')}"
+            )
+        else:
+            logging.info(f"[TIMER] TOTAL decision time: {_total_ms:.0f}ms")
 
         # ── Stage 7: Seed geocode cache with Android coords (free, non-blocking) ──
         try:

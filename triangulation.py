@@ -508,6 +508,16 @@ def _tier0_enhanced_arc_band(
             variants += [base, base + ' Frontage Road']
         variants = list(dict.fromkeys(variants))
 
+        # Tier 0 donut (Patch 00568). YOLO-only bounds — geocoded_miles is
+        # known to be unreliable for vague single-road names, so we pass
+        # intended_miles for both args. This collapses the search envelope
+        # from a full disc of ~intended_miles radius to a thin ring of width
+        # (intended/TORT_MIN - intended/TORT_MAX), matching the pattern in
+        # _tier2_donut_arc_band. See review notes in /tmp/tier0_donut_review.md.
+        inner_miles, outer_miles = build_arc_donut(
+            intended_miles, intended_miles
+        )
+
         for variant in variants:
             cur.execute("""
                 WITH arc AS (
@@ -528,14 +538,20 @@ def _tier0_enhanced_arc_band(
                   AND ST_DWithin(
                         s.the_geom::geography,
                         app_private.coords_to_point(%s, %s)::geography,
-                        (%s + 0.35) * 1609.34
+                        %s * 1609.34
+                  )
+                  AND NOT ST_DWithin(
+                        s.the_geom::geography,
+                        app_private.coords_to_point(%s, %s)::geography,
+                        %s * 1609.34
                   )
                 ORDER BY ST_Distance(s.the_geom, a.ring) ASC
                 LIMIT 1
             """, (
                 arc_lat, arc_lng, intended_miles,
                 variant,
-                arc_lat, arc_lng, intended_miles,
+                arc_lat, arc_lng, outer_miles,
+                arc_lat, arc_lng, inner_miles,
             ))
             row = cur.fetchone()
             if row and row['h3']:

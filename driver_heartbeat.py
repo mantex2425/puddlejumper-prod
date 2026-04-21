@@ -140,6 +140,37 @@ def post_heartbeat():
         ))
         conn.commit()
 
+        # ── Patch 00567: heartbeat_log flight recorder ──────────────────────
+        # No explicit commit — absorbed into downstream commit(s) in this handler.
+        # On failure: log + rollback so heartbeat state is still clean.
+        try:
+            cur.execute("""
+                SELECT state, current_offer_id
+                FROM app_private.driver_trip_state
+                WHERE driver_id = %s
+            """, (driver_id,))
+            _log_state_row = cur.fetchone() or {}
+            cur.execute("""
+                INSERT INTO app_private.heartbeat_log
+                  (driver_id, lat, lng, speed_mph, gps_accuracy_m,
+                   stopped_seconds, armed, target_type, dist_to_target_m,
+                   state, current_offer_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                driver_id, current_lat, current_lng, speed_mph, gps_accuracy_m,
+                stopped_seconds, armed, target_type, dist_to_target_m,
+                _log_state_row.get('state'),
+                _log_state_row.get('current_offer_id'),
+            ))
+            conn.commit()  # explicit commit — flight recorder must persist
+        except Exception as _hb_log_err:
+            logging.warning(f"[HEARTBEAT_LOG] insert failed (non-fatal): {_hb_log_err}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        # ── End Patch 00567 ─────────────────────────────────────────────────
+
         # ── Convergence engine ─────────────────────────────────────────────────
         # Default to real DB state — never lie to Android by defaulting UNCOMMITTED
         driverState = "UNCOMMITTED"
