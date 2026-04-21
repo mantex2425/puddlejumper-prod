@@ -1089,6 +1089,90 @@ def check_convergence(driver_id, current_lat, current_lng,
     else:
         return ('HOLD', state, None)
 
+    # ════════════════════════════════════════════════════════════════════════
+    # Bead-on-wire target refinement (DIAGNOSE)
+    # ════════════════════════════════════════════════════════════════════════
+    # Runs BEFORE the distance calculation. If the Blind Man produces a
+    # higher-confidence target (via OSM intersection, Google intersection
+    # fallback, or a Blind-Man single_road/POI fire), we override the
+    # target_lat/target_lng coming from state_row.
+    #
+    # When compute_target() returns None (HOLD), we keep the existing
+    # Tier-0 / Tier-1 target that state_row gave us. No regression.
+    try:
+        from bead_on_wire import compute_target as _bead_compute_target
+
+        _bead_offer_id = state_row.get('current_offer_id')
+        if _bead_offer_id:
+            # Look up: (a) address text + expected miles from offer_history
+            #          (b) anchor time from driver_trip_state_log
+            if state == 'ENROUTE':
+                _bead_addr_col, _bead_miles_col = 'pickup_address', 'pickup_miles'
+                _bead_anchor_to_state = 'ENROUTE'
+                _bead_anchor_trigger = 'offer_accepted'
+            else:
+                _bead_addr_col, _bead_miles_col = 'dropoff_address', 'trip_miles'
+                _bead_anchor_to_state = 'IN_TRIP'
+                _bead_anchor_trigger = None  # accept any transition INTO IN_TRIP
+
+            cur.execute(f"""
+                SELECT oh.{_bead_addr_col} AS addr,
+                       oh.{_bead_miles_col} AS miles
+                FROM app_private.offer_history oh
+                JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                WHERE dl.driver_id = %s
+                  AND oh.created_at >= NOW() - interval '6 hours'
+                ORDER BY oh.created_at DESC
+                LIMIT 1
+            """, (driver_id,))
+            _bead_row = cur.fetchone()
+            if _bead_row and _bead_row.get('addr') and _bead_row.get('miles'):
+                _bead_addr = _bead_row['addr']
+                _bead_miles = float(_bead_row['miles'])
+
+                # Anchor time — most recent transition INTO the relevant state
+                if _bead_anchor_trigger:
+                    cur.execute("""
+                        SELECT logged_at FROM app_private.driver_trip_state_log
+                        WHERE driver_id = %s
+                          AND to_state = %s
+                          AND trigger_event = %s
+                        ORDER BY logged_at DESC LIMIT 1
+                    """, (driver_id, _bead_anchor_to_state,
+                          _bead_anchor_trigger))
+                else:
+                    cur.execute("""
+                        SELECT logged_at FROM app_private.driver_trip_state_log
+                        WHERE driver_id = %s
+                          AND to_state = %s
+                        ORDER BY logged_at DESC LIMIT 1
+                    """, (driver_id, _bead_anchor_to_state))
+                _bead_anchor_row = cur.fetchone()
+                if _bead_anchor_row:
+                    _bead_anchor_time = _bead_anchor_row['logged_at']
+                    _bead_result = _bead_compute_target(
+                        address_text=_bead_addr,
+                        anchor_time=_bead_anchor_time,
+                        expected_miles=_bead_miles,
+                        driver_id=driver_id,
+                        cur=cur,
+                    )
+                    if _bead_result:
+                        _orig_lat, _orig_lng = target_lat, target_lng
+                        target_lat = _bead_result['lat']
+                        target_lng = _bead_result['lng']
+                        logging.info(
+                            f"[BEAD] target override state={state} "
+                            f"source={_bead_result.get('source')} "
+                            f"tier={_bead_result.get('tier')} "
+                            f"reason={_bead_result.get('reason')} "
+                            f"orig=({_orig_lat},{_orig_lng}) "
+                            f"new=({target_lat},{target_lng})"
+                        )
+    except Exception as _bead_err:
+        logging.warning(f"[BEAD] compute_target integration failed: {_bead_err}")
+    # ════════════════════════════════════════════════════════════════════════
+
     # S27 guard — NULL target coords -> HOLD unconditionally
     if target_lat is None or target_lng is None:
         logging.warning(
