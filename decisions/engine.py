@@ -1,5 +1,4 @@
 import logging
-from arc_band import correct_dropoff
 
 
 
@@ -22,7 +21,7 @@ def run_decision_engine(cur, conn, uid, params):
     # ── Phase 1: Server-side geocoding consolidation ──────────────────
     # Android now sends null coords. Server geocodes all addresses using
     # driver GPS as location bias. Cache key = normalized address text only.
-    from triangulation import _lookup_geocode_cache, _google_geocode, _write_geocode_cache
+    from geo_utils import _lookup_geocode_cache, _google_geocode, _write_geocode_cache
 
     # Vague address keywords — addresses matching these are highway/road centroids
     # and should never be cached (single point on a 15-mile road is worse than no cache)
@@ -97,56 +96,14 @@ def run_decision_engine(cur, conn, uid, params):
             ep.get("d_lat"), ep.get("d_lng")
         )
 
-    # ── Arc band correction ───────────────────────────────────────────
-    _t_arc = time.time()
-    try:
-        cur.execute("""
-            SELECT jsonb_array_elements_text(settings->'redZones') AS hex
-            FROM app_private.driver_settings_new WHERE driver_id = %s
-        """, (uid,))
-        red_zone_set = {row["hex"] for row in cur.fetchall()}
-
-        green_zone_set = set()
-        if ep["market_id"]:
-            cur.execute("""
-                SELECT jsonb_array_elements_text(elem->'greenZones')
-                FROM app_private.driver_settings_new,
-                     jsonb_array_elements(settings->'markets') elem
-                WHERE driver_id = %s AND elem->>'id' = %s
-            """, (uid, ep["market_id"]))
-            green_zone_set = {row["jsonb_array_elements_text"] for row in cur.fetchall()}
-
-        correction = correct_dropoff(
-            pickup_lat=ep["p_lat"],   pickup_lng=ep["p_lng"],
-            dropoff_lat=ep["d_lat"],  dropoff_lng=ep["d_lng"],
-            trip_miles=ep["trip_miles"],
-            dropoff_address=ep["dropoff_address"],
-            red_zone_set=red_zone_set, green_zone_set=green_zone_set,
-            is_puddle_jump=ep["is_puddle_jump"], cur=cur, conn=conn
-        )
-
-        arc_band_trace                       = correction.get("trace", {})
-        arc_band_trace["arc_band_triggered"] = correction["arc_band_triggered"]
-        arc_band_trace["is_red_zone_risk"]   = correction["is_red_zone_risk"]
-        arc_band_trace["use_ocr_distance"]   = correction["use_ocr_distance"]
-        arc_band_trace["dropoff_address"]    = ep["dropoff_address"]
-        arc_band_trace["pickup_address"]     = ep["pickup_address"]
-
-        if correction["corrected_lat"] != ep["d_lat"] or correction["corrected_lng"] != ep["d_lng"]:
-            arc_band_trace["original_dropoff"] = {"lat": ep["d_lat"], "lng": ep["d_lng"]}
-            ep["d_lat"] = correction["corrected_lat"]
-            ep["d_lng"] = correction["corrected_lng"]
-            logging.info(f"[ARC] Dropoff corrected to {ep['d_lat']}, {ep['d_lng']}")
-
-        if correction["use_ocr_distance"]:
-            logging.info(f"[ARC] Using OCR distance: {ep['trip_miles']} mi")
-        if correction["is_red_zone_risk"]:
-            logging.warning(f"[RED] Red zone risk: '{ep['dropoff_address']}'")
-
-    except Exception as arc_err:
-        logging.error(f"Arc band error (non-blocking): {arc_err}")
-        arc_band_trace["error"] = str(arc_err)
-    logging.info(f"[TIMER] Arc band: {(time.time()-_t_arc)*1000:.0f}ms")
+    # Arc-band dropoff correction removed with arc_band.py. Bead-on-wire
+    # handles target refinement at heartbeat time via check_convergence.
+    # The arc_band_trace dict is retained for schema compatibility with
+    # downstream consumers (decision_log trace_data, shadow signals).
+    # It now carries only geocode-hallucination + pickup/dropoff address
+    # annotations, not arc-band state.
+    arc_band_trace["pickup_address"]  = ep["pickup_address"]
+    arc_band_trace["dropoff_address"] = ep["dropoff_address"]
 
     # ── Geocode hallucination guard ───────────────────────────────────
     def _haversine_mi(lat1, lng1, lat2, lng2):

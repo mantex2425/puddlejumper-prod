@@ -11,7 +11,6 @@ from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from state_machine import DriverStateMachine
 from nail_it_core import compute_error, classify, should_refine, build_voice, get_accuracy_stats, write_nailed_position, write_nail_contest_event
-from decisions.nail_manager import handle_post_nail_refinement
 
 pickup_confirm_bp = Blueprint('pickup_confirm', __name__)
 
@@ -165,57 +164,20 @@ def confirm_pickup():
         except Exception as nail_e:
             logging.warning(f"⚠️ nailed_pickup write failed: {nail_e}")
 
-        # === SB3 hook (Patch 00566a Step 11 — Site B, dev path) ===
-        # Replaces the pre-00566a inline recalibrate block. Plan logic lives
-        # in decisions.nail_manager. Only the write mechanic is inline.
-        # Matches driver_heartbeat.py Site A pattern — both paths now respect
-        # Option C source branching (previous inline code always overwrote).
-        try:
-            refinement_plan = handle_post_nail_refinement(
-                offer_id=offer_id,
-                driver_id=driver_id,
-                nailed_anchor_lat=actual_lat,
-                nailed_anchor_lng=actual_lng,
-                cur=cur,
-                mode="dropoff",
-            )
-            if refinement_plan:
-                if refinement_plan["overwrite_driver_state"]:
-                    cur.execute("""
-                        UPDATE app_private.driver_trip_state
-                        SET dropoff_lat         = %s,
-                            dropoff_lng         = %s,
-                            dropoff_h3          = %s,
-                            refined_dropoff_lat = %s,
-                            refined_dropoff_lng = %s,
-                            refinement_source   = %s
-                        WHERE driver_id = %s
-                    """, (
-                        refinement_plan["refined_lat"],
-                        refinement_plan["refined_lng"],
-                        refinement_plan["refined_h3"],
-                        refinement_plan["refined_lat"],
-                        refinement_plan["refined_lng"],
-                        refinement_plan["refinement_source"],
-                        driver_id,
-                    ))
-                else:
-                    cur.execute("""
-                        UPDATE app_private.driver_trip_state
-                        SET refined_dropoff_lat = %s,
-                            refined_dropoff_lng = %s,
-                            refinement_source   = %s
-                        WHERE driver_id = %s
-                    """, (
-                        refinement_plan["refined_lat"],
-                        refinement_plan["refined_lng"],
-                        refinement_plan["refinement_source"],
-                        driver_id,
-                    ))
-                logging.info(f"[REFINEMENT] {refinement_plan['log_reason']}")
-        except Exception as _sb3_err:
-            logging.warning(f"[REFINEMENT] refinement failed (non-fatal): {_sb3_err}")
-        # === end SB3 hook ===
+        # SB3 post-nail refinement removed with arc_band.py / nail_manager.py.
+        # Bead-on-wire does target refinement at heartbeat time via
+        # check_convergence — nothing left to refine after the nail fires.
+        #
+        # FIXME [4-box violation, tracked for post-bead refactor]:
+        # This file (PLAN layer) runs UPDATE statements directly against
+        # app_private.offer_history and app_private.driver_trip_state below.
+        # The 4-box rule says only EXECUTE (sm_transition) writes. These
+        # pre-existing writes don't flow through sm_transition because they
+        # mutate coordinate columns on the existing state row rather than
+        # triggering a state transition. Fix requires either extending
+        # sm_transition() to accept coord-only updates or adding a new
+        # EXECUTE primitive for nailed-coord writes. Defer until bead-on-wire
+        # is validated in production.
 
         # ── Update offer_history ──────────────────────────────────────
         try:
@@ -286,31 +248,9 @@ def confirm_pickup():
             except Exception:
                 pass
 
-        # ── Pre-warm street geometry cache for this pickup area ────────
-        try:
-            import threading
-            from arc_band import get_street_geometry
-            pickup_address = row.get('pickup_address') if row else None
-            if pickup_address and actual_lat and actual_lng:
-                def _prewarm():
-                    _c = _cr = None
-                    try:
-                        from db import get_db as _get_db
-                        _c  = _get_db()
-                        _cr = _c.cursor()
-                        get_street_geometry(
-                            pickup_address, actual_lat, actual_lng,
-                            _cr, _c, bbox_margin=0.03
-                        )
-                        logging.info(f"[CACHE] Pickup geometry pre-warmed for '{pickup_address}'")
-                    except Exception as _e:
-                        logging.warning(f"[CACHE] Pre-warm failed: {_e}")
-                    finally:
-                        if _cr: _cr.close()
-                        if _c:  _c.close()
-                threading.Thread(target=_prewarm, daemon=True).start()
-        except Exception as prewarm_err:
-            logging.warning(f"[CACHE] Pre-warm dispatch failed: {prewarm_err}")
+        # Arc-band street-geometry pre-warm removed with arc_band.py.
+        # Bead-on-wire uses Google geocode cache, which warms naturally
+        # on first lookup.
 
         voice = build_voice(stats['totalConfirmed'], error_m, "pickup")
         logging.info(f"Pickup confirmed: offer={offer_id} error={error_m}m class={classification}")

@@ -6,8 +6,6 @@ import random
 import json
 import traceback
 import logging
-from arc_band import correct_dropoff, get_street_geometry
-from triangulation import triangulate_pickup, triangulate_dropoff, h3_to_coords
 
 from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
@@ -360,26 +358,7 @@ def make_decision():
         # ── Stage 6: Patch decision_log (never fails) ──────────────────
         patch_decision_log(cur, conn, decision_log_id, result)
 
-        # ── Background: pre-warm street geometry cache ─────────────────
-        if ep["d_lat"] and ep["d_lng"]:
-            def _cache_street(addr, lat, lng):
-                _c = _cr = None
-                try:
-                    from db import get_db as _get_db
-                    _c  = _get_db()
-                    _cr = _c.cursor()
-                    get_street_geometry(
-                        addr or f"{lat},{lng}", lat, lng, _cr, _c, bbox_margin=0.03
-                    )
-                    logging.info(f"[CACHE] Street geometry cached for '{addr}'")
-                except Exception as _e:
-                    logging.warning(f"[WARN] Street cache pre-warm failed: {_e}")
-                finally:
-                    if _cr: _cr.close()
-                    if _c:  _c.close()
-            executor.submit(
-                _cache_street, ep["dropoff_address"], ep["d_lat"], ep["d_lng"]
-            )
+        # Arc-band street-geometry pre-warm removed with arc_band.py.
 
         _total_ms = (time.time() - _t0) * 1000
         if _total_ms > 2000:

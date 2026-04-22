@@ -19,7 +19,7 @@ import math
 
 
 def _haversine_miles(lat1, lng1, lat2, lng2):
-    """Great-circle distance in miles. Duplicated from triangulation._haversine_miles
+    """Great-circle distance in miles. Self-contained (originally duplicated from triangulation._haversine_miles before that module was removed)
     to keep this module free of circular imports. Small function; small cost."""
     R = 3958.8
     lat1_r, lng1_r, lat2_r, lng2_r = map(math.radians, [lat1, lng1, lat2, lng2])
