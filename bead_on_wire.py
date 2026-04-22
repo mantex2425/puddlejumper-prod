@@ -508,6 +508,92 @@ def odometer_miles_since(driver_id: str, since_time, cur,
 # PRIMITIVE 5 — get_pivot_context
 # ============================================================================
 
+
+def _build_breadcrumb(rows, min_dwell_sec: float = 10.0,
+                      max_age_sec: float = 300.0,
+                      max_segments: int = 4) -> list:
+    """Aggregate DESC-ordered heartbeat rows into named-road segments.
+
+    Args:
+        rows: heartbeat rows ordered DESC, each with .logged_at and .road_name
+        min_dwell_sec: skip segments where entered_at and exited_at differ by
+                       less than this (filters out brief intersection crossings)
+        max_age_sec: skip segments where exited_at is older than this from the
+                     most recent heartbeat (rolling window)
+        max_segments: cap return list at this many most-recent segments
+
+    Returns:
+        List of {road_name, dwell_seconds, entered_at, exited_at}, most
+        recent first. Empty list if rows empty or no qualifying segments.
+
+    Used by compute_target gate 2 to support the "re-route to other side"
+    edge case: driver arrives at PUDO, passenger redirects, driver takes
+    a different access road back. The CORRECT named road (matching the
+    offer's single_road address) is not the most recent, but is within
+    the recent breadcrumb trail.
+    """
+    if not rows:
+        return []
+
+    # Rows arrive DESC (most recent first). Walk through them, grouping
+    # consecutive same-name rows into segments. None entries (off-wire)
+    # break segments.
+    segments = []  # each: {road_name, exited_at, entered_at}
+    current_seg = None
+    for row in rows:
+        name = row.get("road_name")
+        ts = row.get("logged_at")
+        if name is None:
+            # off-wire — close any open segment
+            if current_seg is not None:
+                segments.append(current_seg)
+                current_seg = None
+            continue
+        if current_seg is None:
+            # start a new segment (this is the most recent row on this road)
+            current_seg = {
+                "road_name": name,
+                "exited_at": ts,
+                "entered_at": ts,
+            }
+        elif current_seg["road_name"] == name:
+            # extend — push entered_at earlier
+            current_seg["entered_at"] = ts
+        else:
+            # different named road — close current, start new
+            segments.append(current_seg)
+            current_seg = {
+                "road_name": name,
+                "exited_at": ts,
+                "entered_at": ts,
+            }
+    if current_seg is not None:
+        segments.append(current_seg)
+
+    if not segments:
+        return []
+
+    # Compute dwell + age; filter
+    most_recent_ts = rows[0].get("logged_at")
+    result = []
+    for seg in segments:
+        dwell = (seg["exited_at"] - seg["entered_at"]).total_seconds()
+        age   = (most_recent_ts - seg["exited_at"]).total_seconds()
+        if dwell < min_dwell_sec:
+            continue
+        if age > max_age_sec:
+            continue
+        result.append({
+            "road_name": seg["road_name"],
+            "dwell_seconds": dwell,
+            "entered_at": seg["entered_at"],
+            "exited_at": seg["exited_at"],
+        })
+        if len(result) >= max_segments:
+            break
+    return result
+
+
 def get_pivot_context(driver_id: str, cur,
                       anchor_time=None) -> dict:
     """Determine whether driver is on-wire, and the last named road touched.
@@ -529,7 +615,8 @@ def get_pivot_context(driver_id: str, cur,
     """
     if not driver_id:
         return {"on_wire": False, "current_road": None,
-                "last_named_road": None, "pivot_time": None}
+                "last_named_road": None, "pivot_time": None,
+                "breadcrumb": []}
 
     try:
         # Query: most recent N heartbeats in this ride, with each one's snap.
@@ -579,12 +666,23 @@ def get_pivot_context(driver_id: str, cur,
 
         if not rows:
             return {"on_wire": False, "current_road": None,
-                    "last_named_road": None, "pivot_time": None}
+                    "last_named_road": None, "pivot_time": None,
+                    "breadcrumb": []}
 
         # Most recent heartbeat
         current = rows[0]
         on_wire = current["road_name"] is not None
         current_road = current["road_name"]
+
+        # Build breadcrumb of recent named-road segments (for re-route cases
+        # where the relevant road is not the most recent named road — e.g.,
+        # driver arrives, passenger redirects to "other side", driver takes a
+        # different access road back to the lot).
+        #
+        # rules: segments must have dwell >= 10s AND be within last 5min,
+        # and we keep at most 4 most recent.
+        breadcrumb = _build_breadcrumb(rows, min_dwell_sec=10.0,
+                                        max_age_sec=300.0, max_segments=4)
 
         if on_wire:
             # Still on a named road — pivot hasn't happened
@@ -593,6 +691,7 @@ def get_pivot_context(driver_id: str, cur,
                 "current_road": current_road,
                 "last_named_road": current_road,
                 "pivot_time": None,
+                "breadcrumb": breadcrumb,
             }
 
         # Off-wire — walk backwards to find the last named road and when we left it
@@ -613,11 +712,13 @@ def get_pivot_context(driver_id: str, cur,
             "current_road": None,
             "last_named_road": last_named_road,
             "pivot_time": pivot_time,
+            "breadcrumb": breadcrumb,
         }
     except Exception as e:
         logging.warning(f"[BEAD] get_pivot_context failed: {e}")
         return {"on_wire": False, "current_road": None,
-                "last_named_road": None, "pivot_time": None}
+                "last_named_road": None, "pivot_time": None,
+                "breadcrumb": []}
 
 
 # ============================================================================
@@ -892,20 +993,39 @@ def compute_target(
             )
             return None
 
-        # Gate 2: pivot context. Either currently on matching road (curb
-        # dropoff) OR last-named-road before pivot matches (parking lot).
+        # Gate 2: pivot context. Three-tier match:
+        #   (a) Currently on matching road (curb dropoff)
+        #   (b) Last-named-road before pivot matches (parking lot)
+        #   (c) BREADCRUMB LOOKBACK: any recent named segment matches
+        #       (re-route scenario: passenger says "other side", driver
+        #        exits lot, takes a different road back, stops).
         pivot = get_pivot_context(driver_id, cur, anchor_time=anchor_time)
-        candidate_road = pivot.get("current_road") if pivot.get("on_wire")                          else pivot.get("last_named_road")
-        if not candidate_road:
+        candidate_road = pivot.get("current_road") if pivot.get("on_wire") \
+                         else pivot.get("last_named_road")
+
+        match_source = None
+        if candidate_road and _road_names_match(candidate_road, address_road):
+            match_source = "on_wire" if pivot.get("on_wire") else "last_named"
+        else:
+            # Breadcrumb lookback — scan recent named-road segments for a
+            # match. Each segment has >= 10s dwell and is within last 5 min.
+            for seg in pivot.get("breadcrumb", []):
+                seg_name = seg.get("road_name")
+                if seg_name and _road_names_match(seg_name, address_road):
+                    candidate_road = seg_name
+                    match_source = (
+                        f"breadcrumb(dwell={seg.get('dwell_seconds', 0):.0f}s)"
+                    )
+                    break
+
+        if not match_source:
+            crumb_names = [s.get("road_name") for s in pivot.get("breadcrumb", [])]
             logging.info(
-                f"[BEAD] single_road {address_road!r}: no candidate_road "
-                f"(on_wire={pivot.get('on_wire')}) → HOLD"
-            )
-            return None
-        if not _road_names_match(candidate_road, address_road):
-            logging.info(
-                f"[BEAD] single_road {address_road!r}: candidate_road "
-                f"{candidate_road!r} does not match → HOLD"
+                f"[BEAD] single_road {address_road!r}: no match "
+                f"(on_wire={pivot.get('on_wire')}, "
+                f"current={pivot.get('current_road')!r}, "
+                f"last_named={pivot.get('last_named_road')!r}, "
+                f"breadcrumb={crumb_names}) → HOLD"
             )
             return None
 
@@ -925,7 +1045,7 @@ def compute_target(
         tier = "high" if pivot.get("on_wire") else "medium"
         logging.info(
             f"[BEAD] ✅ single_road FIRE: {address_road!r} matched "
-            f"{candidate_road!r}, odometer {odometer:.2f}mi, "
+            f"{candidate_road!r} via {match_source}, odometer {odometer:.2f}mi, "
             f"cluster n={cluster['n']} spread={cluster['spread_m']:.0f}m "
             f"(limit {spread_limit:.0f}m) pivot={'on_wire' if pivot.get('on_wire') else 'off_wire'}"
         )
