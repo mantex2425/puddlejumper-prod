@@ -276,24 +276,17 @@ def confirm_dropoff():
                 pass
 
         # ── Update offer_history ──────────────────────────────────────
-        # SB3 trip-close hook (Patch 00566a Step 12, Site C):
-        # Propagate driver_trip_state.refined_dropoff_* and refinement_source
-        # into this trip's offer_history row. Values were populated at
-        # pickup-nail time by nail_manager (Sites A or B), and sm_transition
-        # (Step 11.5) clears them on p_clear_coords=TRUE so stale values from
-        # prior trips cannot leak into the current trip's audit record.
+        # Writes the actual dropoff coords/error into this trip's audit row.
+        # Previously also propagated driver_trip_state.refined_dropoff_* here
+        # (arc-band's post-nail refinement output), but arc_band.py and
+        # nail_manager.py were removed — bead-on-wire refines at heartbeat
+        # time, so there's no separate post-nail refinement to audit.
+        #
+        # FIXME [4-box violation, tracked for post-bead refactor]:
+        # This UPDATE runs from PLAN layer (endpoint handler), not EXECUTE.
+        # Defer until bead-on-wire is validated in production.
         try:
             if _audit_offer_id:
-                cur.execute("""
-                    SELECT refined_dropoff_lat, refined_dropoff_lng, refinement_source
-                    FROM app_private.driver_trip_state
-                    WHERE driver_id = %s
-                """, (driver_id,))
-                _dts_row = cur.fetchone() or {}
-                _refined_lat = _dts_row.get("refined_dropoff_lat")
-                _refined_lng = _dts_row.get("refined_dropoff_lng")
-                _refinement_source = _dts_row.get("refinement_source")
-
                 cur.execute("""
                     UPDATE app_private.offer_history
                     SET actual_dropoff_lat     = %s,
@@ -301,19 +294,13 @@ def confirm_dropoff():
                         actual_dropoff_h3      = %s,
                         actual_dropoff_at      = NOW(),
                         dropoff_error_m        = %s,
-                        dropoff_classification = %s,
-                        refined_dropoff_lat    = %s,
-                        refined_dropoff_lng    = %s,
-                        refinement_source      = %s
+                        dropoff_classification = %s
                     WHERE decision_log_id = %s::integer
                 """, (actual_lat, actual_lng, actual_h3,
                       error_m, classification,
-                      _refined_lat, _refined_lng, _refinement_source,
                       _audit_offer_id))
                 logging.info(
-                    f"✅ Offer history dropoff updated: offer={_audit_offer_id} "
-                    f"refined={'yes' if _refined_lat is not None else 'no'} "
-                    f"source={_refinement_source}"
+                    f"✅ Offer history dropoff updated: offer={_audit_offer_id}"
                 )
         except Exception as oh_err:
             logging.warning(f"⚠️ Offer history dropoff update failed: {oh_err}")
