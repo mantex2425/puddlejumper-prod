@@ -170,7 +170,6 @@ WATCHDOG_B_MAX_S       = 8
 # Passes all three enforcement gates: read-only, no DB, no sm_transition()
 from collections import deque
 import time as _time
-from routes_api import fetch_feasible_change as _fetch_feasible_change
 
 BUFFER_SECONDS = 600  # 10 min — covers 5–7 min passenger waits
 TEMPORAL_WINDOW_S = 60   # Houston-tuned: 45-50s passenger walk-ups still win
@@ -1017,9 +1016,11 @@ def _compute_scorer_b(current_lat, current_lng, current_heading,
         # invoked once per SET_CANDIDATE decision in check_convergence).
         if feasible_change_triggered(float(stopped_seconds or 0), xte_m, dist_to_target_m):
             try:
-                fc_result = _fetch_feasible_change(
-                    score_lat, score_lng, target_lat, target_lng
-                )
+                # routes_api.py / Scorer B polyline fetch removed in arc-band nuke.
+                # Feasible Change now always reports "failed" — the Scorer B
+                # status path handles this gracefully and logs accordingly.
+                # Full Scorer A/B removal is Phase 5.
+                fc_result = {'status': 'disabled_post_arc_nuke', 'latency_ms': 0}
                 data['feasible_change_fired'] = True
                 data['feasible_change_latency_ms'] = fc_result.get('latency_ms')
                 if fc_result.get('status') == 'ok' and fc_result.get('encoded_polyline'):
@@ -1177,6 +1178,48 @@ def check_convergence(driver_id, current_lat, current_lng,
                             f"orig=({_orig_lat},{_orig_lng}) "
                             f"new=({target_lat},{target_lng})"
                         )
+
+                        # ────────────────────────────────────────────────────
+                        # BMOAR FIRE: if Blind Man says "we're here" (all 3
+                        # gates passed), return the NAIL verdict directly.
+                        # Symmetric pickup/dropoff — the only diff is which
+                        # verdict tuple goes back.
+                        #
+                        # source="blind_man" or "blind_man_poi" → FIRE
+                        # source="intersection_snap" / "google_cache" → just
+                        # a geocode improvement, fall through to distance
+                        # logic below.
+                        # ────────────────────────────────────────────────────
+                        _src = _bead_result.get('source', '')
+                        if _src.startswith('blind_man'):
+                            # Compute distance at the override coord for the
+                            # returned dist_m (downstream audit consistency).
+                            cur.execute(
+                                "SELECT app_private.distance_miles(%s, %s, %s, %s) * 1609.34 AS dist_m",
+                                (current_lat, current_lng, target_lat, target_lng)
+                            )
+                            _fire_dist_m = float(cur.fetchone()['dist_m'])
+
+                            # Cluster median is the stationary position — use THAT
+                            # as the nail coord, not current_lat/lng which is a
+                            # moving snapshot. 4-tuple signals "use _extra as nail".
+                            _bmoar_coords = (target_lat, target_lng)
+                            if state == 'ENROUTE':
+                                logging.info(
+                                    f"[BEAD] ✅ INITIAL_NAIL (pickup) via Blind Man: "
+                                    f"dist_m={_fire_dist_m:.0f} source={_src} "
+                                    f"nail_at=({target_lat:.5f},{target_lng:.5f})"
+                                )
+                                return ('INITIAL_NAIL', 'IN_TRIP', _fire_dist_m, _bmoar_coords)
+                            elif state in ('IN_TRIP', 'REFINE_DROPOFF', 'STACKED'):
+                                logging.info(
+                                    f"[BEAD] ✅ DROPOFF_NAIL via Blind Man: "
+                                    f"dist_m={_fire_dist_m:.0f} source={_src} "
+                                    f"nail_at=({target_lat:.5f},{target_lng:.5f})"
+                                )
+                                return ('DROPOFF_NAIL', 'UNCOMMITTED', _fire_dist_m, _bmoar_coords)
+                            # Fall through if in some other state — unexpected
+                            # but don't force a fire in an ambiguous state.
     except Exception as _bead_err:
         logging.warning(f"[BEAD] compute_target integration failed: {_bead_err}")
     # ════════════════════════════════════════════════════════════════════════

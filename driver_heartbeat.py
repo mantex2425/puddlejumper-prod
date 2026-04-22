@@ -6,7 +6,6 @@
 import json
 import logging
 import datetime
-import concurrent.futures
 
 from flask import Blueprint, request, jsonify
 from psycopg2.extras import RealDictCursor
@@ -16,15 +15,10 @@ from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import (check_convergence, write_nailed_position,
                           classify, process_heartbeat, clear_buffer,
                           get_next_stacked_offer)
-from decisions.triangulation_enricher import refine_dropoff_background
 from state_machine import DriverStateMachine
-from decisions.triangulation_enricher import _cache_stacked_polyline_async
 from nail_it_core import write_nail_contest_event
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
-
-# ── Module-level executor — one instance, never recreated per heartbeat ────────
-_refine_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 # ── Dual-Watchdog state tracking (module-level, reset on restart) ─────────────
 _stopped_since   = None   # datetime when speed dropped below threshold
@@ -52,34 +46,6 @@ def _reset_watchdog_state(cur=None, conn=None, driver_id=None):
             conn.commit()
         except Exception as _e:
             logging.warning(f"[WATCHDOG] Failed to clear candidate in DB: {_e}")
-
-
-def _queue_refine(driver_id, plat, plng, dlat, dlng, trip_miles, label):
-    """Submit a background dropoff refinement. Never raises."""
-    try:
-        _refine_executor.submit(
-            refine_dropoff_background,
-            driver_id, float(plat), float(plng),
-            float(dlat), float(dlng), trip_miles, label
-        )
-        logging.info(f"[REFINE] {label} refinement queued")
-    except Exception as e:
-        logging.warning(f"[REFINE] Failed to queue {label}: {e}")
-
-
-def _get_trip_miles(driver_id, cur):
-    """Fetch trip_miles from most recent decision_log row."""
-    try:
-        cur.execute("""
-            SELECT trip_miles FROM app_private.decision_log
-            WHERE driver_id = %s
-            ORDER BY created_at DESC LIMIT 1
-        """, (driver_id,))
-        r = cur.fetchone()
-        return float(r['trip_miles']) if r and r['trip_miles'] else None
-    except Exception as e:
-        logging.warning(f"[HEARTBEAT] _get_trip_miles failed: {e}")
-        return None
 
 
 # _write_state_transition removed — use DriverStateMachine.transition()
@@ -214,26 +180,6 @@ def post_heartbeat():
         _dlat = state_row.get('dropoff_lat')
         _dlng = state_row.get('dropoff_lng')
 
-        # ── Background dropoff refinement ──────────────────────────────────────
-        # Queue only when refinement is needed and not already nailed
-        if (_s == 'ENROUTE'
-                and state_row.get('nailed_dropoff_lat') is None
-                and state_row.get('pickup_lat') and state_row.get('pickup_lng')):
-            tm = _get_trip_miles(driver_id, cur)
-            if tm and _dlat and _dlng:
-                _queue_refine(driver_id,
-                              state_row['pickup_lat'], state_row['pickup_lng'],
-                              _dlat, _dlng, tm, 'ENROUTE')
-
-        elif (_s == 'IN_TRIP'
-                and state_row.get('nailed_pickup_lat')
-                and state_row.get('nailed_dropoff_error_m') is None):
-            tm = _get_trip_miles(driver_id, cur)
-            if tm and _dlat and _dlng:
-                _queue_refine(driver_id,
-                              state_row['nailed_pickup_lat'], state_row['nailed_pickup_lng'],
-                              _dlat, _dlng, tm, 'IN_TRIP')
-
         # ── Convergence check ──────────────────────────────────────────────────
         _raw = check_convergence(
             driver_id, current_lat, current_lng,
@@ -260,12 +206,15 @@ def post_heartbeat():
             clear_buffer(driver_id)  # DIAGNOSE: clear stop buffer on new trip cycle
             logging.info("[WATCHDOG] State reset to UNCOMMITTED — cleared candidate stack")
         if verdict == 'INITIAL_NAIL':
-            # ENROUTE → IN_TRIP: nail pickup, transition state
+            # ENROUTE → IN_TRIP: nail pickup, transition state.
+            # If _extra carries Blind Man cluster coords (stationary nail point),
+            # use those. Otherwise fall back to current heartbeat position.
+            _nail_lat, _nail_lng = (_extra if _extra else (current_lat, current_lng))
             write_nailed_position(cur, driver_id, 'pickup',
-                                  current_lat, current_lng, new_error_m)
+                                  _nail_lat, _nail_lng, new_error_m)
             DriverStateMachine.transition(driver_id, 'gps_convergence', cur, conn,
-                nailed_pickup_lat=current_lat,
-                nailed_pickup_lng=current_lng,
+                nailed_pickup_lat=_nail_lat,
+                nailed_pickup_lng=_nail_lng,
                 nailed_pickup_error_m=new_error_m,
             )
             logging.warning(f"S29 INITIAL_NAIL: ENROUTE->IN_TRIP at {new_error_m or 0:.0f}m")
@@ -402,9 +351,13 @@ def post_heartbeat():
                     pass
 
         elif verdict == 'DROPOFF_NAIL':
-            # IN_TRIP → REFINE_DROPOFF → UNCOMMITTED: enforce linear path
+            # IN_TRIP → REFINE_DROPOFF → UNCOMMITTED: enforce linear path.
+            # If _extra carries Blind Man cluster coords (stationary nail point),
+            # use those. Otherwise fall back to current heartbeat position
+            # (watchdog_a path: driver IS at the candidate by construction).
+            _nail_lat, _nail_lng = (_extra if _extra else (current_lat, current_lng))
             write_nailed_position(cur, driver_id, 'dropoff',
-                                  current_lat, current_lng, new_error_m)
+                                  _nail_lat, _nail_lng, new_error_m)
             # ── Box 4: Close the audit loop ───────────────────────────
             _offer_id = state_row.get('current_offer_id')
             # For STACKED rides, current_offer_id points to the secondary offer.
@@ -431,7 +384,7 @@ def post_heartbeat():
             if _audit_id:
                 try:
                     cur.execute("SELECT app_private.safe_h3(%s,%s)::text AS h3",
-                                (current_lat, current_lng))
+                                (_nail_lat, _nail_lng))
                     _h3r = cur.fetchone()
                     _actual_h3 = _h3r['h3'] if _h3r else None
 
@@ -460,7 +413,7 @@ def post_heartbeat():
                             refined_dropoff_lng    = %s,
                             refinement_source      = %s
                         WHERE decision_log_id = %s::integer
-                    """, (current_lat, current_lng, _actual_h3,
+                    """, (_nail_lat, _nail_lng, _actual_h3,
                           new_error_m, 'watchdog_a',
                           _refined_lat, _refined_lng, _refinement_source,
                           _audit_id))
@@ -492,15 +445,7 @@ def post_heartbeat():
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete — new offer={_sec_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
-                # Contest Mode (Rev 00558): async polyline fetch for newly-promoted offer.
-                # Skip if coords missing or potential_cancellation flagged pre-swap.
-                if (_sec_offer_id and _sec_dlat and _sec_dlng
-                        and not state_row.get('potential_cancellation')):
-                    _refine_executor.submit(
-                        _cache_stacked_polyline_async,
-                        driver_id, _sec_offer_id, _sec_dlat, _sec_dlng
-                    )
-                    logging.info(f"[ROUTES_CACHE/STACK] submitted async fetch for offer={_sec_offer_id}")
+                # Scorer B polyline pre-cache removed with routes_api.py.
 
                 # Patch 00562: contest event for watchdog_a STACKED dropoff (primary ride end)
                 try:
@@ -666,15 +611,7 @@ def post_heartbeat():
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — offer={_offer_id}")
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
-                # Contest Mode (Rev 00558): async polyline fetch for newly-promoted offer.
-                # Skip if coords missing or potential_cancellation flagged pre-swap.
-                if (_offer_id and _sec_dlat and _sec_dlng
-                        and not state_row.get('potential_cancellation')):
-                    _refine_executor.submit(
-                        _cache_stacked_polyline_async,
-                        driver_id, _offer_id, _sec_dlat, _sec_dlng
-                    )
-                    logging.info(f"[ROUTES_CACHE/STACK] submitted async fetch (B) for offer={_offer_id}")
+                # Scorer B polyline pre-cache removed with routes_api.py.
 
                 # Patch 00562: contest event for watchdog_b STACKED dropoff (primary ride end)
                 try:
