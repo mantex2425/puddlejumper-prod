@@ -25,7 +25,7 @@ from typing import Optional
 
 # Google geocode fallback — reuse existing triangulation primitives rather
 # than reinvent. These already handle API timeout (2s), caching, and logging.
-from triangulation import (
+from geo_utils import (
     _google_geocode,
     _lookup_geocode_cache,
     _write_geocode_cache,

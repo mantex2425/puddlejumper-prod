@@ -1115,17 +1115,25 @@ def check_convergence(driver_id, current_lat, current_lng,
                 _bead_anchor_to_state = 'IN_TRIP'
                 _bead_anchor_trigger = None  # accept any transition INTO IN_TRIP
 
+            # current_offer_id in driver_trip_state is the decision_log.id
+            # stored as text. offer_history.decision_log_id is the matching
+            # FK. Direct lookup — no timestamp proximity, no ordering.
             cur.execute(f"""
-                SELECT oh.{_bead_addr_col} AS addr,
+                SELECT oh.id AS oh_id,
+                       oh.{_bead_addr_col} AS addr,
                        oh.{_bead_miles_col} AS miles
                 FROM app_private.offer_history oh
-                JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
-                WHERE dl.driver_id = %s
-                  AND oh.created_at >= NOW() - interval '6 hours'
-                ORDER BY oh.created_at DESC
+                WHERE oh.decision_log_id = %s::integer
                 LIMIT 1
-            """, (driver_id,))
+            """, (_bead_offer_id,))
             _bead_row = cur.fetchone()
+            if _bead_row:
+                logging.info(
+                    f"[BEAD] bound offer_id={_bead_offer_id} "
+                    f"oh_id={_bead_row.get('oh_id')} "
+                    f"addr={str(_bead_row.get('addr'))[:40]!r} "
+                    f"miles={_bead_row.get('miles')}"
+                )
             if _bead_row and _bead_row.get('addr') and _bead_row.get('miles'):
                 _bead_addr = _bead_row['addr']
                 _bead_miles = float(_bead_row['miles'])
