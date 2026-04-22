@@ -220,3 +220,73 @@ wire's verdict has nothing competing with it.
   dropoff_confirm.py (endpoint handlers)
 - EXECUTE: state_machine.py (DriverStateMachine), Postgres sm_transition()
 - INFRASTRUCTURE (outside 4-box): geo_utils.py, db.py, utils.py
+
+## Future Work: Design-For-Failure (DFF) Dropoff Resolution
+
+**Status:** Candidate. Build only if tomorrow's drive shows UH-class
+(address-text doesn't match actual destination) scenarios in ≥2/10 rides.
+
+### The problem
+
+BMOAR correctly HOLDs when the address text refers to a location the
+driver never reaches. Example from 2026-04-22: Uber offer said
+"Calhoun Rd, Houston" but passenger actually stopped at UH Main Campus
+entrance, 3km north on MLK Blvd. Calhoun Rd is never in the breadcrumb.
+Gate 2 cannot match. No gate heuristic solves this without false-positive
+risk.
+
+### The proposal
+
+When BMOAR has strong stop signal (gate 1 ✓, gate 3 ✓, gate 2 ✗), store
+a "Ghost" — cluster median + timestamp + offer_id — and defer the
+dropoff verdict. On the NEXT pickup nail, retroactively resolve the
+prior offer's dropoff to the ghost coord.
+
+Physics: a driver cannot start a new ride while a passenger is in the
+car. The last significant stop before a new pickup is almost always
+the prior ride's dropoff.
+
+### 4-box clean implementation (Gemini's refinement)
+
+- DIAGNOSE: check_convergence returns new verdict `UNSURE_BUT_STOPPED`
+  with cluster coord when gates 1+3 pass but gate 2 fails
+- PLAN: driver_heartbeat.py holds the ghost (probably in an
+  `app_private.ghost_dropoffs` table keyed by offer_id and driver_id)
+- EXECUTE: on next pickup nail (INITIAL_NAIL trigger), sm_transition
+  drains pending ghost for the prior offer in the same atomic write
+
+No DIAGNOSE writes. Ghost storage goes through a new sm_transition
+trigger (`ghost_dropoff_recorded` or similar).
+
+### Constraints (calibrated for real rideshare physics)
+
+Bar-hops, hot-swaps, and event pickups mean the next pickup is often
+AT or VERY NEAR the prior drop. Tighter is safer; looser risks
+attributing gas-station/coffee-stop cruises as dropoffs.
+
+- Time gap: ghost expires if ≥ 5 min elapsed without next-pickup-nail
+- Distance gap: ghost rejected if next-pickup coord > 0.5 mi from ghost
+- If either exceeded, ghost is abandoned (no retroactive resolution)
+
+Hot-swap edge case (distance gap ≈ 0m, time gap < 60s): confidence
+extremely high — passenger dropped, next passenger got in at same curb,
+driver never left the location. The cluster IS the dropoff.
+
+Optional confidence tiering:
+- 0-50m, 0-60s: confidence=high (hot-swap, same venue)
+- 50-500m, 60s-3min: confidence=high (bar block, apartment complex)
+- 500-800m, 3-5min: confidence=medium (driver repositioned slightly)
+- beyond: discard
+
+### Why not build tonight
+
+1. BMOAR itself is not yet validated in production. Adding retroactive
+   resolution on an unproven foundation obscures failure modes.
+2. UH-class frequency unknown. Might be 1/50 rides (not worth the
+   complexity) or 3/10 rides (urgent).
+3. Mortgage P&L is pending external deadline; context is finite.
+
+### Priority gate
+
+Build only after: (a) BMOAR validated on ≥1 clean drive, AND
+(b) UH-class rides observed at ≥2/10 frequency in collected data.
