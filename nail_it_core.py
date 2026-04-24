@@ -149,11 +149,52 @@ def write_nailed_position(cur, driver_id, target_type, lat, lng, error_m):
 # Convergence engine — called on every heartbeat from driver_heartbeat.py
 # ---------------------------------------------------------------------------
 
+def _log_nail_instrument(driver_id, path_name, fire_lat, fire_lng,
+                          geocode_lat, geocode_lng):
+    """Per-nail instrumentation: dist from fire coord to geocode + cluster median.
+    Pure DIAGNOSE — reads buffer, writes only to logging. No DB, no state change.
+    Fail-safe: any exception is swallowed (instrumentation must not break fires)."""
+    try:
+        # Dist to geocode
+        if geocode_lat is not None and geocode_lng is not None:
+            dlat_m = (float(geocode_lat) - float(fire_lat)) * 111320.0
+            dlng_m = (float(geocode_lng) - float(fire_lng)) * 111320.0 * \
+                     _math.cos(_math.radians(float(fire_lat)))
+            dist_geo = _math.sqrt(dlat_m ** 2 + dlng_m ** 2)
+            dist_geo_str = f"{dist_geo:.0f}m"
+        else:
+            dist_geo_str = "n/a"
+
+        # Dist to cluster median
+        buf = list(get_buffer(driver_id))
+        med_lat, med_lng, n_pts = median_centroid(buf) if buf else (None, None, 0)
+        if med_lat is not None and med_lng is not None:
+            dlat_m = (med_lat - float(fire_lat)) * 111320.0
+            dlng_m = (med_lng - float(fire_lng)) * 111320.0 * \
+                     _math.cos(_math.radians(float(fire_lat)))
+            dist_cluster = _math.sqrt(dlat_m ** 2 + dlng_m ** 2)
+            dist_cluster_str = f"{dist_cluster:.0f}m (n={n_pts})"
+        else:
+            dist_cluster_str = f"n/a (n={n_pts})"
+
+        logging.info(
+            f"[NAIL_INSTRUMENT] path={path_name} "
+            f"dist_to_geocode={dist_geo_str} "
+            f"dist_to_cluster={dist_cluster_str} "
+            f"fire_at=({float(fire_lat):.5f},{float(fire_lng):.5f})"
+        )
+    except Exception as _e:
+        logging.warning(f"[NAIL_INSTRUMENT] failed (non-fatal): {_e}")
+
+
+
 # Convergence thresholds
 ARMED_RADIUS_M         = 1000   # enter linger zone — aggressive refinement begins (S29)
-NAIL_CONFIRM_RADIUS_M  = 200    # hard lock inner zone — must be inside + slow (S29)
-NAIL_CONFIRM_SPEED_MPH = 5.0    # speed gate for INITIAL_NAIL and DROPOFF_NAIL
-STOPPED_SPEED_MPH      = 2.0    # effectively stopped threshold for final nail
+# NAIL_CONFIRM_SPEED_MPH: legacy inner-confirm speed gate, deleted from
+# check_convergence. Retained solely for detect_passenger_stops() buffer
+# segmentation — the low-speed threshold that defines a cluster segment.
+# Rename deferred; semantic move to its own constant is cleanup-pass work.
+NAIL_CONFIRM_SPEED_MPH = 5.0    # buffer segmentation threshold (detect_passenger_stops only)
 REFINE_SPEED_MPH       = 15     # must be slow to refine
 # ── NEW: Dual-Watchdog + Elastic Net for Dropoff ─────────────────────────────
 ARMED_RADIUS_NORMAL_M  = 400    # intersections, businesses
@@ -1192,6 +1233,30 @@ def check_convergence(driver_id, current_lat, current_lng,
                         # ────────────────────────────────────────────────────
                         _src = _bead_result.get('source', '')
                         if _src.startswith('blind_man'):
+                            # ────────────────────────────────────────────
+                            # GATE 1: Odometer floor (MANDATORY per spec §4)
+                            # miles_since_leg_start >= 0.9 * expected_miles
+                            # Prevents mid-trip false-fires where pivot+cluster
+                            # accidentally match at a red light near the pin.
+                            # ────────────────────────────────────────────
+                            _leg_start = state_row.get('leg_start_cumulative_miles')
+                            _leg_start_f = float(_leg_start) if _leg_start is not None else 0.0
+                            _cm = float(cumulative_miles) if cumulative_miles is not None else 0.0
+                            _miles_since_leg_start = _cm - _leg_start_f
+                            _gate1_floor = 0.9 * float(_bead_miles)
+                            if _miles_since_leg_start < _gate1_floor:
+                                logging.info(
+                                    f"[BEAD] gate 1 FAIL — blind_man fire blocked: "
+                                    f"miles_since_leg_start={_miles_since_leg_start:.2f} "
+                                    f"< floor={_gate1_floor:.2f} "
+                                    f"(expected_miles={_bead_miles:.2f}, "
+                                    f"leg_start={_leg_start_f:.2f}, "
+                                    f"cumulative={_cm:.2f})"
+                                )
+                                # Do not fire via blind_man. Fall through to
+                                # Path B (proximity) or Watchdog A.
+                                raise StopIteration("gate_1_failed")
+
                             # Compute distance at the override coord for the
                             # returned dist_m (downstream audit consistency).
                             cur.execute(
@@ -1210,6 +1275,9 @@ def check_convergence(driver_id, current_lat, current_lng,
                                     f"dist_m={_fire_dist_m:.0f} source={_src} "
                                     f"nail_at=({target_lat:.5f},{target_lng:.5f})"
                                 )
+                                _log_nail_instrument(driver_id, 'bmoar_pickup',
+                                                     target_lat, target_lng,
+                                                     _orig_lat, _orig_lng)
                                 return ('INITIAL_NAIL', 'IN_TRIP', _fire_dist_m, _bmoar_coords)
                             elif state in ('IN_TRIP', 'REFINE_DROPOFF', 'STACKED'):
                                 logging.info(
@@ -1217,9 +1285,15 @@ def check_convergence(driver_id, current_lat, current_lng,
                                     f"dist_m={_fire_dist_m:.0f} source={_src} "
                                     f"nail_at=({target_lat:.5f},{target_lng:.5f})"
                                 )
+                                _log_nail_instrument(driver_id, 'bmoar_dropoff',
+                                                     target_lat, target_lng,
+                                                     _orig_lat, _orig_lng)
                                 return ('DROPOFF_NAIL', 'UNCOMMITTED', _fire_dist_m, _bmoar_coords)
                             # Fall through if in some other state — unexpected
                             # but don't force a fire in an ambiguous state.
+    except StopIteration:
+        # Gate 1 failed — blind_man fire blocked. Falls through to Path B.
+        pass
     except Exception as _bead_err:
         logging.warning(f"[BEAD] compute_target integration failed: {_bead_err}")
     # ════════════════════════════════════════════════════════════════════════
@@ -1276,29 +1350,85 @@ def check_convergence(driver_id, current_lat, current_lng,
         except Exception as s11_err:
             logging.warning(f"S11 guard failed: {s11_err}")
 
-    # 1b. ENROUTE — refinement outside catchment, INITIAL_NAIL inside
+    # 1b. ENROUTE — BMOAR fires above; refinement + Watchdog A mercy-kill here
     if state == 'ENROUTE':
         effective_error = current_error if current_error is not None else 9999.0
 
-        pickup_address = state_row.get('pickup_address') or ""
-        confirm_radius = get_pickup_confirm_radius(pickup_address)
-        if dist_m < confirm_radius:
-            # Inner confirm zone — hard lock only if slow
-            if current_speed_mph < NAIL_CONFIRM_SPEED_MPH:
-                logging.info(
-                    f"check_convergence: INITIAL_NAIL — {dist_m:.0f}m "
-                    f"at {current_speed_mph:.1f}mph (confirmed, radius={confirm_radius}m)"
-                )
-                return ('INITIAL_NAIL', 'IN_TRIP', dist_m)
-            else:
-                # Passing through fast — hold, keep refining
-                logging.debug(
-                    f"check_convergence: HOLD (fast through confirm zone) — "
-                    f"{dist_m:.0f}m at {current_speed_mph:.1f}mph"
-                )
-                return ('HOLD', 'ENROUTE', dist_m)
+        # ════════════════════════════════════════════════════════════════
+        # PATH B — Pickup unified predicate (proximity-enable)
+        # Fires when BMOAR (Path A) didn't fire but cluster forms within
+        # 200m of target + gate 1 (odometer) passes.
+        # Per UNIFIED_INTENT spec §4: fire requires
+        #   (gate 1 odometer) AND cluster AND (proximity OR pivot-match)
+        # Path A (BMOAR above) covers the pivot-match enable.
+        # Path B (this block) covers the proximity enable.
+        # Both fire at cluster median (never current position).
+        # ════════════════════════════════════════════════════════════════
+        try:
+            from bead_on_wire import detect_cluster as _detect_cluster_b
+            from bead_on_wire import get_pivot_context as _get_pivot_context_b
 
-        elif dist_m < ARMED_RADIUS_M:
+            _b_offer_id = state_row.get('current_offer_id')
+            _b_pickup_miles = None
+            if _b_offer_id:
+                cur.execute(
+                    "SELECT pickup_miles FROM app_private.offer_history "
+                    "WHERE decision_log_id = %s::integer LIMIT 1",
+                    (_b_offer_id,)
+                )
+                _b_row = cur.fetchone()
+                if _b_row and _b_row.get('pickup_miles') is not None:
+                    _b_pickup_miles = float(_b_row['pickup_miles'])
+
+            _b_leg_start = state_row.get('leg_start_cumulative_miles')
+            _b_leg_start_f = float(_b_leg_start) if _b_leg_start is not None else 0.0
+            _b_cm = float(cumulative_miles) if cumulative_miles is not None else 0.0
+            _b_miles_since_leg_start = _b_cm - _b_leg_start_f
+
+            _b_gate1 = (_b_pickup_miles is not None
+                        and _b_miles_since_leg_start >= 0.9 * _b_pickup_miles)
+            _b_proximity = dist_m < 200.0
+
+            if _b_gate1 and _b_proximity:
+                _b_pivot = _get_pivot_context_b(driver_id, cur, anchor_time=None)
+                _b_on_wire = bool(_b_pivot.get('on_wire')) if _b_pivot else False
+                _b_spread = 25.0 if _b_on_wire else 70.0
+                _b_cluster = _detect_cluster_b(driver_id, cur, max_spread_m=_b_spread)
+
+                if _b_cluster:
+                    _b_nail_lat = float(_b_cluster['median_lat'])
+                    _b_nail_lng = float(_b_cluster['median_lng'])
+                    logging.info(
+                        f"[PATH_B] ✅ INITIAL_NAIL (pickup proximity) — "
+                        f"dist_m={dist_m:.0f} miles_since_leg={_b_miles_since_leg_start:.2f}/"
+                        f"{_b_pickup_miles:.2f} "
+                        f"cluster_n={_b_cluster.get('n')} spread={_b_cluster.get('spread_m', 0):.0f}m "
+                        f"on_wire={_b_on_wire} "
+                        f"nail_at=({_b_nail_lat:.5f},{_b_nail_lng:.5f})"
+                    )
+                    _log_nail_instrument(driver_id, 'path_b_pickup',
+                                         _b_nail_lat, _b_nail_lng,
+                                         target_lat, target_lng)
+                    return ('INITIAL_NAIL', 'IN_TRIP', dist_m, (_b_nail_lat, _b_nail_lng))
+        except Exception as _path_b_err:
+            logging.warning(f"[PATH_B] pickup predicate failed (non-fatal): {_path_b_err}")
+
+        if dist_m < ARMED_RADIUS_M:
+            # Watchdog A (pickup) — Last Resort (5 min timeout)
+            # Fires when BMOAR's gates can't pass: UH-class address mismatch,
+            # GPS jitter preventing cluster formation, legitimate long wait.
+            # Symmetric with dropoff Watchdog A below.
+            if (current_speed_mph < WATCHDOG_A_SPEED_MPH and
+                    stopped_seconds >= WATCHDOG_A_DURATION_S):
+                logging.warning(
+                    f"check_convergence: INITIAL_NAIL (Watchdog A LAST RESORT) — "
+                    f"{dist_m:.0f}m stopped {stopped_seconds}s at {current_speed_mph:.1f}mph"
+                )
+                _log_nail_instrument(driver_id, 'watchdog_a_pickup',
+                                     current_lat, current_lng,
+                                     target_lat, target_lng)
+                return ('INITIAL_NAIL', 'IN_TRIP', dist_m)
+
             # Armed zone — aggressive continuous refinement, no speed gate
             if dist_m < (effective_error - REFINEMENT_MIN_GAIN_M):
                 logging.info(
@@ -1387,19 +1517,64 @@ def check_convergence(driver_id, current_lat, current_lng,
                 return ('DROPOFF_NAIL_B', 'UNCOMMITTED', dist_from_candidate_m,
                         (candidate_lat, candidate_lng))
 
+        # ════════════════════════════════════════════════════════════════
+        # PATH B — Dropoff unified predicate (proximity-enable)
+        # Symmetric to pickup Path B above. Fires when BMOAR didn't but
+        # proximity + cluster + gate 1 all pass.
+        # ════════════════════════════════════════════════════════════════
+        try:
+            from bead_on_wire import detect_cluster as _detect_cluster_d
+            from bead_on_wire import get_pivot_context as _get_pivot_context_d
+
+            _d_offer_id = state_row.get('current_offer_id')
+            _d_trip_miles = None
+            if _d_offer_id:
+                cur.execute(
+                    "SELECT trip_miles FROM app_private.offer_history "
+                    "WHERE decision_log_id = %s::integer LIMIT 1",
+                    (_d_offer_id,)
+                )
+                _d_row = cur.fetchone()
+                if _d_row and _d_row.get('trip_miles') is not None:
+                    _d_trip_miles = float(_d_row['trip_miles'])
+
+            _d_leg_start = state_row.get('leg_start_cumulative_miles')
+            _d_leg_start_f = float(_d_leg_start) if _d_leg_start is not None else 0.0
+            _d_cm = float(cumulative_miles) if cumulative_miles is not None else 0.0
+            _d_miles_since_leg_start = _d_cm - _d_leg_start_f
+
+            _d_gate1 = (_d_trip_miles is not None
+                        and _d_miles_since_leg_start >= 0.9 * _d_trip_miles)
+            _d_proximity = dist_m < 200.0
+
+            if _d_gate1 and _d_proximity:
+                _d_pivot = _get_pivot_context_d(driver_id, cur, anchor_time=None)
+                _d_on_wire = bool(_d_pivot.get('on_wire')) if _d_pivot else False
+                _d_spread = 25.0 if _d_on_wire else 70.0
+                _d_cluster = _detect_cluster_d(driver_id, cur, max_spread_m=_d_spread)
+
+                if _d_cluster:
+                    _d_nail_lat = float(_d_cluster['median_lat'])
+                    _d_nail_lng = float(_d_cluster['median_lng'])
+                    logging.info(
+                        f"[PATH_B] ✅ DROPOFF_NAIL (dropoff proximity) — "
+                        f"dist_m={dist_m:.0f} miles_since_leg={_d_miles_since_leg_start:.2f}/"
+                        f"{_d_trip_miles:.2f} "
+                        f"cluster_n={_d_cluster.get('n')} spread={_d_cluster.get('spread_m', 0):.0f}m "
+                        f"on_wire={_d_on_wire} "
+                        f"nail_at=({_d_nail_lat:.5f},{_d_nail_lng:.5f})"
+                    )
+                    _log_nail_instrument(driver_id, 'path_b_dropoff',
+                                         _d_nail_lat, _d_nail_lng,
+                                         target_lat, target_lng)
+                    return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m, (_d_nail_lat, _d_nail_lng))
+        except Exception as _path_b_err:
+            logging.warning(f"[PATH_B] dropoff predicate failed (non-fatal): {_path_b_err}")
+
         # ── Dual-Watchdog Logic (NEW) ───────────────────────────────────────
         if dist_m < armed_radius:
-            # Inner confirm zone — hard lock regardless of stopped_seconds (preserves S15)
-            # EXCEPTION: round trips (pickup==dropoff) require Watchdog B departure
-            # detection to disambiguate stops at the circular origin.
-            if (dist_m < NAIL_CONFIRM_RADIUS_M
-                    and current_speed_mph < NAIL_CONFIRM_SPEED_MPH
-                    and not _is_round_trip):
-                logging.info(
-                    f"check_convergence: DROPOFF_NAIL (inner confirm) — "
-                    f"{dist_m:.0f}m at {current_speed_mph:.1f}mph"
-                )
-                return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m)
+            # Legacy dropoff inner-confirm removed — BMOAR owns dropoff fires.
+            # Watchdog A (below) + Watchdog B departure are the mercy-kills.
 
             # Watchdog A — Last Resort (5 min timeout, only if no candidate exists)
             # If candidate exists, trust Watchdog B departure detection instead
@@ -1410,6 +1585,9 @@ def check_convergence(driver_id, current_lat, current_lng,
                     f"{dist_m:.0f}m stopped {stopped_seconds}s at {current_speed_mph:.1f}mph "
                     f"candidate={'yes' if candidate_lat else 'no'}"
                 )
+                _log_nail_instrument(driver_id, 'watchdog_a_dropoff',
+                                     current_lat, current_lng,
+                                     target_lat, target_lng)
                 return ('DROPOFF_NAIL', 'UNCOMMITTED', dist_m)
 
             # Watchdog B — record micro-stop candidate

@@ -119,6 +119,11 @@ class DriverStateMachine:
             nailed_pickup_lat, nailed_pickup_lng, nailed_pickup_error_m
             nailed_dropoff_lat, nailed_dropoff_lng, nailed_dropoff_error_m
             offer_id, clear_coords (bool)
+            cumulative_miles (float) — AAR odometer anchor, populates leg_start
+                and per-fire columns in offer_history. None → DEFAULT NULL in
+                sm_transition, triggers [AAR_GAP] warning for leg-relevant
+                triggers (offer_accepted, gps_convergence, pickup_confirmed,
+                dropoff_confirmed, dropoff_confirmed_retroactive).
         """
         try:
             cur.execute("""
@@ -129,6 +134,7 @@ class DriverStateMachine:
                     %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
+                    %s,
                     %s
                 )
             """, (
@@ -147,6 +153,7 @@ class DriverStateMachine:
                 coords.get('nailed_dropoff_lng'),
                 coords.get('nailed_dropoff_error_m'),
                 coords.get('clear_coords', False),
+                coords.get('cumulative_miles'),  # AAR: odometer at transition moment
             ))
             result = dict(cur.fetchone())
             # Normalize 'message' → 'error' for backward compat

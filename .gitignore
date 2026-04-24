@@ -11,6 +11,7 @@ __pycache__/
 # Backup files
 *.bak
 *.bak.*
+*.bak[0-9]*
 *.prerestructure
 
 # Accidental shell output / scratch files

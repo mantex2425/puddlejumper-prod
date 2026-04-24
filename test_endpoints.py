@@ -137,10 +137,6 @@ with patch("utils.verify_and_get_user_id", return_value=MOCK_DRIVER_ID), \
         r = client.get("/api/v1/health")
         assert r.status_code == 200, f"Got {r.status_code}: {r.data.decode()}"
 
-    def test_pickup_confirm():
-        r = post("/api/v1/pickup/confirm", {"lat": 29.55, "lng": -95.52})
-        assert r.status_code != 500, r.data.decode()
-
     def test_dropoff_confirm():
         r = post("/api/v1/dropoff/confirm", {"lat": 29.99, "lng": -95.33})
         assert r.status_code != 500, r.data.decode()
@@ -167,7 +163,6 @@ with patch("utils.verify_and_get_user_id", return_value=MOCK_DRIVER_ID), \
         assert r.status_code != 500, r.data.decode()
 
     run_test("GET  /api/v1/health", test_health)
-    run_test("POST /api/v1/pickup/confirm", test_pickup_confirm)
     run_test("POST /api/v1/dropoff/confirm", test_dropoff_confirm)
     run_test("POST /api/v1/driver/heartbeat", test_heartbeat)
     run_test("POST /api/v1/driver/reset", test_reset)

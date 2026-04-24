@@ -216,6 +216,7 @@ def post_heartbeat():
                 nailed_pickup_lat=_nail_lat,
                 nailed_pickup_lng=_nail_lng,
                 nailed_pickup_error_m=new_error_m,
+                cumulative_miles=cumulative_miles,
             )
             logging.warning(f"S29 INITIAL_NAIL: ENROUTE->IN_TRIP at {new_error_m or 0:.0f}m")
             driverState = "IN_TRIP"
@@ -441,6 +442,7 @@ def post_heartbeat():
                     dropoff_lat=_sec_dlat,
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
+                    cumulative_miles=cumulative_miles,
                 )
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete — new offer={_sec_offer_id}")
                 driverState = "ENROUTE"
@@ -471,11 +473,12 @@ def post_heartbeat():
                     logging.warning(f"[CONTEST] hook3 non-fatal: {_ce}")
             else:
                 if _s == 'IN_TRIP':
-                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn, cumulative_miles=cumulative_miles)
                     _s = 'REFINE_DROPOFF'
                     logging.warning(f"S31 DROPOFF_NAIL: IN_TRIP→REFINE_DROPOFF (arm+nail same heartbeat)")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
                     clear_coords=True,
+                    cumulative_miles=cumulative_miles,
                 )
                 logging.warning(f"S31 DROPOFF_NAIL: REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
                 driverState = "UNCOMMITTED"
@@ -607,6 +610,7 @@ def post_heartbeat():
                     dropoff_lat=_sec_dlat,
                     dropoff_lng=_sec_dlng,
                     dropoff_h3=_sec_dh3,
+                    cumulative_miles=cumulative_miles,
                 )
                 logging.warning(f"[S17] STACKED→ENROUTE atomic swap complete (watchdog_b) — offer={_offer_id}")
                 driverState = "ENROUTE"
@@ -637,11 +641,12 @@ def post_heartbeat():
                     logging.warning(f"[CONTEST] hook5 non-fatal: {_ce}")
             else:
                 if _s == 'IN_TRIP':
-                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                    DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn, cumulative_miles=cumulative_miles)
                     _s = 'REFINE_DROPOFF'
                     logging.warning(f"S31 DROPOFF_NAIL_B: IN_TRIP→REFINE_DROPOFF (arm+nail same heartbeat)")
                 DriverStateMachine.transition(driver_id, 'dropoff_confirmed', cur, conn,
                     clear_coords=True,
+                    cumulative_miles=cumulative_miles,
                 )
                 logging.warning(f"S31 DROPOFF_NAIL_B (retroactive): REFINE_DROPOFF→UNCOMMITTED at {new_error_m or 0:.0f}m")
                 driverState = "UNCOMMITTED"
@@ -679,7 +684,7 @@ def post_heartbeat():
             write_nailed_position(cur, driver_id, 'dropoff',
                                   current_lat, current_lng, new_error_m)
             if _s == 'IN_TRIP':
-                DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn)
+                DriverStateMachine.transition(driver_id, 'approaching_dropoff', cur, conn, cumulative_miles=cumulative_miles)
                 driverState = 'REFINE_DROPOFF'
                 logging.warning(
                     f"[REFINE_DROPOFF ARMED] "
@@ -704,6 +709,7 @@ def post_heartbeat():
             # ENROUTE → UNCOMMITTED: driver diverged from pickup
             DriverStateMachine.transition(driver_id, 'gps_divergence', cur, conn,
                 clear_coords=True,
+                cumulative_miles=cumulative_miles,
             )
             logging.warning(f"S30 ABORT: ENROUTE->UNCOMMITTED gps_divergence")
             driverState = "UNCOMMITTED"
@@ -737,6 +743,7 @@ def post_heartbeat():
                     dropoff_lat=nearby['dropoff_lat'],
                     dropoff_lng=nearby['dropoff_lng'],
                     dropoff_h3=nearby['dropoff_h3'],
+                    cumulative_miles=cumulative_miles,
                 )
                 driverState = "ENROUTE"
                 _s = "ENROUTE"
@@ -767,6 +774,7 @@ def post_heartbeat():
                     dropoff_lat=nearby['dropoff_lat'],
                     dropoff_lng=nearby['dropoff_lng'],
                     dropoff_h3=nearby['dropoff_h3'],
+                    cumulative_miles=cumulative_miles,
                 )
                 driverState = "IN_TRIP"
 

@@ -23,6 +23,7 @@ def confirm_pickup():
         body = request.get_json()
         actual_lat = body.get("lat")
         actual_lng = body.get("lng")
+        cumulative_miles = body.get("cumulative_miles")  # AAR odometer anchor; may be None
         if actual_lat is None or actual_lng is None:
             return jsonify({"error": "lat and lng are required"}), 400
 
@@ -154,6 +155,7 @@ def confirm_pickup():
                 offer_id=str(offer_id),
                 nailed_pickup_lat=actual_lat,
                 nailed_pickup_lng=actual_lng,
+                cumulative_miles=cumulative_miles,
             )
         else:
             logging.info(f"📍 Pickup Nail It: state={current_state} — coord refinement only")

@@ -23,6 +23,7 @@ def confirm_dropoff():
         body = request.get_json()
         actual_lat = body.get("lat")
         actual_lng = body.get("lng")
+        cumulative_miles = body.get("cumulative_miles")  # AAR odometer anchor; may be None
         if actual_lat is None or actual_lng is None:
             return jsonify({"error": "lat and lng are required"}), 400
 
