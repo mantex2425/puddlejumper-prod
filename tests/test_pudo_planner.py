@@ -265,3 +265,265 @@ class TestStep52Smoke:
             driver_state_snapshot=_snapshot(),
         )
         assert isinstance(decision, PlannerDecision)
+
+
+# ============================================================================
+# Step 5.3 - Section A temporal pattern detection (24 tests)
+# ============================================================================
+#
+# Coverage of the pure-function helpers used by consume() to advance the
+# armed-candidate state machine across heartbeats.
+#
+# _make_observation              - 1 test  (TestMakeObservation)
+# _is_stable_match               - 5 tests (TestIsStableMatch)
+# _is_brief_disappearance        - 4 tests (TestIsBriefDisappearance)
+# _is_long_stop_then_departure   - 5 tests (TestIsLongStopThenDeparture)
+# _advance_armed_state           - 8 tests (TestAdvanceArmedState)
+# OBSERVATION_WINDOW invariant   - 1 test  (TestObservationWindow)
+
+from pudo_planner import (
+    _make_observation,
+    _is_stable_match,
+    _is_brief_disappearance,
+    _is_long_stop_then_departure,
+    _advance_armed_state,
+    _LastWAIObservation,
+    CANDIDATE_STALE_SECONDS,
+    OBSERVATION_WINDOW,
+)
+
+
+# ============================================================================
+# TestMakeObservation - 1 test
+# ============================================================================
+
+class TestMakeObservation:
+    def test_projects_wai_to_observation(self):
+        # _make_observation copies the 5 fields it cares about + observed_at.
+        wai = _wai(
+            status="at_current_pudo",
+            confidence=0.82,
+            offer_id="offer_xyz",
+            corrected_lat=29.62,
+            corrected_lng=-95.51,
+        )
+        obs = _make_observation(wai, now=_DEFAULT_NOW)
+        assert isinstance(obs, _LastWAIObservation)
+        assert obs.status == "at_current_pudo"
+        assert obs.confidence == 0.82
+        assert obs.offer_id == "offer_xyz"
+        assert obs.corrected_lat == 29.62
+        assert obs.corrected_lng == -95.51
+        assert obs.observed_at == _DEFAULT_NOW
+
+
+# ============================================================================
+# TestIsStableMatch - 5 tests
+# ============================================================================
+
+class TestIsStableMatch:
+    def test_status_not_at_current_pudo_false(self):
+        # Status guard short-circuits before count check.
+        state = _state(heartbeat_count=10)
+        wai = _wai(status="not_at_pudo")
+        assert _is_stable_match(state, wai, n_required=3) is False
+
+    def test_offer_id_mismatch_false(self):
+        state = _state(armed_offer_id="A", heartbeat_count=10)
+        wai = _wai(offer_id="B")
+        assert _is_stable_match(state, wai, n_required=3) is False
+
+    def test_pudo_type_mismatch_false(self):
+        state = _state(armed_pudo_type="pickup", heartbeat_count=10)
+        wai = _wai(pudo_type="dropoff")
+        assert _is_stable_match(state, wai, n_required=3) is False
+
+    def test_below_count_false(self):
+        state = _state(heartbeat_count=2)
+        wai = _wai()
+        assert _is_stable_match(state, wai, n_required=3) is False
+
+    def test_at_count_true(self):
+        # >=N: boundary returns True.
+        state = _state(heartbeat_count=3)
+        wai = _wai()
+        assert _is_stable_match(state, wai, n_required=3) is True
+
+
+# ============================================================================
+# TestIsBriefDisappearance - 4 tests
+# ============================================================================
+
+class TestIsBriefDisappearance:
+    def test_at_current_pudo_returns_false(self):
+        # Hit case is the disqualifier - this helper only fires on misses.
+        state = _state(last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="at_current_pudo")
+        assert _is_brief_disappearance(state, wai, now=_DEFAULT_NOW) is False
+
+    def test_inside_window_returns_true(self):
+        state = _state(last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=10)
+        assert _is_brief_disappearance(state, wai, now=later) is True
+
+    def test_at_window_boundary_returns_false(self):
+        # Strict < CANDIDATE_STALE_SECONDS - boundary exactly is False.
+        state = _state(last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(
+            seconds=CANDIDATE_STALE_SECONDS
+        )
+        assert _is_brief_disappearance(state, wai, now=later) is False
+
+    def test_above_window_returns_false(self):
+        state = _state(last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=20)
+        assert _is_brief_disappearance(state, wai, now=later) is False
+
+
+# ============================================================================
+# TestIsLongStopThenDeparture - 5 tests
+# ============================================================================
+
+class TestIsLongStopThenDeparture:
+    def test_at_current_pudo_returns_false(self):
+        # Even with massive gap, hit case disqualifies (driver still here).
+        state = _state(heartbeat_count=5, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="at_current_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=300)
+        assert _is_long_stop_then_departure(state, wai, now=later) is False
+
+    def test_count_zero_returns_false(self):
+        # heartbeat_count<1: never armed in earnest, ignore.
+        state = _state(heartbeat_count=0, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=30)
+        assert _is_long_stop_then_departure(state, wai, now=later) is False
+
+    def test_below_window_returns_false(self):
+        # gap < CANDIDATE_STALE_SECONDS: brief, not departure.
+        state = _state(heartbeat_count=5, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=10)
+        assert _is_long_stop_then_departure(state, wai, now=later) is False
+
+    def test_at_window_boundary_returns_true(self):
+        # >= CANDIDATE_STALE_SECONDS: boundary IS departure (mirror of brief).
+        state = _state(heartbeat_count=5, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(
+            seconds=CANDIDATE_STALE_SECONDS
+        )
+        assert _is_long_stop_then_departure(state, wai, now=later) is True
+
+    def test_above_window_returns_true(self):
+        state = _state(heartbeat_count=5, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo")
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=30)
+        assert _is_long_stop_then_departure(state, wai, now=later) is True
+
+
+# ============================================================================
+# TestAdvanceArmedState - 8 tests
+# ============================================================================
+
+class TestAdvanceArmedState:
+    def test_case1_cold_start_arms_fresh(self):
+        # state=None, wai=at_current_pudo -> fresh _DriverTemporalState.
+        result = _advance_armed_state(None, _wai(), now=_DEFAULT_NOW)
+        assert result is not None
+        assert result.heartbeat_count == 1
+        assert result.armed_offer_id == "offer_7623"
+        assert result.armed_pudo_type == "pickup"
+        assert result.armed_at == _DEFAULT_NOW
+        assert len(result.recent_observations) == 1
+
+    def test_case1a_cold_start_no_pudo_returns_none(self):
+        # state=None, wai=not_at_pudo: nothing to arm.
+        wai = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        result = _advance_armed_state(None, wai, now=_DEFAULT_NOW)
+        assert result is None
+
+    def test_case1b_cold_start_missing_offer_id_returns_none(self):
+        # Defensive guard: status="at_current_pudo" with offer_id=None
+        # is malformed WAI - refuse to arm.
+        wai = _wai(status="at_current_pudo", offer_id=None)
+        result = _advance_armed_state(None, wai, now=_DEFAULT_NOW)
+        assert result is None
+
+    def test_case2_different_offer_rearms_fresh(self):
+        # state had offer_A, wai matches offer_B -> fresh state, count=1.
+        prev = _state(armed_offer_id="A", heartbeat_count=2)
+        wai = _wai(offer_id="B")
+        result = _advance_armed_state(prev, wai, now=_DEFAULT_NOW)
+        assert result is not None
+        assert result.armed_offer_id == "B"
+        assert result.heartbeat_count == 1
+        assert result.armed_at == _DEFAULT_NOW
+
+    def test_case2b_different_pudo_type_rearms_fresh(self):
+        # state armed pickup, wai matches dropoff for same offer -> rearm.
+        prev = _state(
+            armed_offer_id="X", armed_pudo_type="pickup", heartbeat_count=2
+        )
+        wai = _wai(offer_id="X", pudo_type="dropoff")
+        result = _advance_armed_state(prev, wai, now=_DEFAULT_NOW)
+        assert result is not None
+        assert result.armed_pudo_type == "dropoff"
+        assert result.heartbeat_count == 1
+
+    def test_case3_reaffirm_increments(self):
+        # state matches, wai matches: count++ and observation appended.
+        prev = _state(heartbeat_count=2, recent_observations=())
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=5)
+        result = _advance_armed_state(prev, _wai(), now=later)
+        assert result is not None
+        assert result.heartbeat_count == 3
+        assert result.last_seen_at == later
+        assert len(result.recent_observations) == 1
+
+    def test_case4_brief_dip_preserves_last_seen_at(self):
+        # state existed, wai not_at_pudo within window:
+        # state preserved BUT last_seen_at NOT advanced. The gap-measurement
+        # reference must stay at the last hit, not advance to the dissent -
+        # otherwise brief-dip would silently extend forever as long as
+        # heartbeats kept arriving below threshold.
+        prev = _state(heartbeat_count=3, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=10)
+        result = _advance_armed_state(prev, wai, now=later)
+        assert result is not None
+        assert result.heartbeat_count == 3
+        assert result.last_seen_at == _DEFAULT_NOW
+        assert result.last_seen_status == "not_at_pudo"
+        assert len(result.recent_observations) == 1
+
+    def test_case5_long_gap_clears(self):
+        # state existed, wai not_at_pudo beyond window: candidate dies.
+        prev = _state(heartbeat_count=3, last_seen_at=_DEFAULT_NOW)
+        wai = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        later = _DEFAULT_NOW + datetime.timedelta(seconds=30)
+        result = _advance_armed_state(prev, wai, now=later)
+        assert result is None
+
+
+# ============================================================================
+# TestObservationWindow - 1 test
+# ============================================================================
+
+class TestObservationWindow:
+    def test_observations_capped_at_window(self):
+        # recent_observations slice keeps at most OBSERVATION_WINDOW entries.
+        # Drive 5 reaffirmations through _advance_armed_state and confirm
+        # the tuple stays bounded.
+        state = None
+        wai = _wai()
+        clock_t = _DEFAULT_NOW
+        for _ in range(5):
+            state = _advance_armed_state(state, wai, now=clock_t)
+            clock_t += datetime.timedelta(seconds=5)
+        assert state is not None
+        assert state.heartbeat_count == 5
+        assert len(state.recent_observations) == OBSERVATION_WINDOW
