@@ -527,3 +527,362 @@ class TestObservationWindow:
         assert state is not None
         assert state.heartbeat_count == 5
         assert len(state.recent_observations) == OBSERVATION_WINDOW
+
+
+# ============================================================================
+# Step 5.4 - Section C decision builders (13 tests)
+# ============================================================================
+#
+# One happy-path test per builder (11 builders), plus:
+#   - TestBuildCacheGhost::test_null_cluster_defensive
+#   - TestAllBuildersReturnFrozen::test_frozen_instance_error_on_mutation
+#
+# R1 enforcement (no coordinate synthesis on reconcile) is verified
+# inline in the two reconcile tests via explicit None assertions.
+#
+# Tests assert action literal correctness, field population correctness,
+# and that fields meant to be None for the action are in fact None. This
+# catches a builder accidentally setting a payload it shouldn't or
+# omitting a payload it should set.
+
+import dataclasses
+from cluster_detection import Cluster
+from pudo_planner import (
+    _build_noop,
+    _build_arm_candidate,
+    _build_cancel_candidate,
+    _build_fire_pickup,
+    _build_fire_dropoff,
+    _build_fire_retroactive,
+    _build_fire_stacked_swap,
+    _build_fire_stacked_revert,
+    _build_cache_ghost,
+    _build_reconcile_missed_pickup,
+    _build_reconcile_missed_dropoff,
+)
+
+
+# ============================================================================
+# TestBuildNoop - 1 test
+# ============================================================================
+
+class TestBuildNoop:
+    def test_returns_correct_shape(self):
+        d = _build_noop("nothing to do")
+        assert d.action == "noop"
+        assert d.offer_id is None
+        assert d.target_state is None
+        assert d.corrected_lat is None
+        assert d.corrected_lng is None
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+        assert d.reason == "nothing to do"
+
+
+# ============================================================================
+# TestBuildArmCandidate - 1 test
+# ============================================================================
+
+class TestBuildArmCandidate:
+    def test_returns_correct_shape(self):
+        d = _build_arm_candidate(
+            offer_id="offer_xyz",
+            pudo_type="pickup",
+            heartbeat_count=2,
+            reason="armed conf=0.55",
+        )
+        assert d.action == "arm_candidate"
+        assert d.offer_id == "offer_xyz"
+        assert d.target_state is None
+        assert d.corrected_lat is None
+        assert d.corrected_lng is None
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+        # Reason includes the heartbeat count and type per builder docstring.
+        assert "armed conf=0.55" in d.reason
+        assert "heartbeat 2" in d.reason
+        assert "type=pickup" in d.reason
+
+
+# ============================================================================
+# TestBuildCancelCandidate - 1 test
+# ============================================================================
+
+class TestBuildCancelCandidate:
+    def test_returns_correct_shape(self):
+        d = _build_cancel_candidate("candidate cleared (was armed for 3hb)")
+        assert d.action == "cancel_candidate"
+        assert d.offer_id is None
+        assert d.target_state is None
+        assert d.corrected_lat is None
+        assert d.corrected_lng is None
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+        assert "cleared" in d.reason
+
+
+# ============================================================================
+# TestBuildFirePickup - 1 test
+# ============================================================================
+
+class TestBuildFirePickup:
+    def test_returns_correct_shape(self):
+        d = _build_fire_pickup(
+            offer_id="offer_7623",
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            target_state="IN_TRIP",
+            reason="stable match 3hb conf=0.82",
+        )
+        assert d.action == "fire_pickup"
+        assert d.offer_id == "offer_7623"
+        assert d.target_state == "IN_TRIP"
+        assert d.corrected_lat == 29.6246
+        assert d.corrected_lng == -95.5102
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+        assert "stable match" in d.reason
+
+
+# ============================================================================
+# TestBuildFireDropoff - 1 test
+# ============================================================================
+
+class TestBuildFireDropoff:
+    def test_returns_correct_shape(self):
+        d = _build_fire_dropoff(
+            offer_id="offer_7623",
+            corrected_lat=29.7000,
+            corrected_lng=-95.4000,
+            target_state="UNCOMMITTED",
+            reason="stable match 3hb conf=0.78",
+        )
+        assert d.action == "fire_dropoff"
+        assert d.offer_id == "offer_7623"
+        assert d.target_state == "UNCOMMITTED"
+        assert d.corrected_lat == 29.7000
+        assert d.corrected_lng == -95.4000
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+
+
+# ============================================================================
+# TestBuildFireRetroactive - 1 test
+# ============================================================================
+
+class TestBuildFireRetroactive:
+    def test_returns_correct_shape(self):
+        d = _build_fire_retroactive(
+            offer_id="offer_7623",
+            pudo_type="pickup",
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            target_state="IN_TRIP",
+            reason="long stop then departure: armed for 4hb",
+        )
+        assert d.action == "fire_retroactive"
+        assert d.offer_id == "offer_7623"
+        assert d.target_state == "IN_TRIP"
+        assert d.corrected_lat == 29.6246
+        assert d.corrected_lng == -95.5102
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is None
+        # Reason annotated with the retroactive type per builder.
+        assert "retroactive pickup" in d.reason
+
+
+# ============================================================================
+# TestBuildFireStackedSwap - 1 test
+# ============================================================================
+
+class TestBuildFireStackedSwap:
+    def test_returns_correct_shape(self):
+        d = _build_fire_stacked_swap(
+            primary_offer_id="offer_PRIMARY",
+            secondary_offer_id="offer_SECONDARY",
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            reason="S32 implicit STACKED cancel",
+        )
+        assert d.action == "fire_stacked_swap"
+        # Secondary becomes the new active offer per swap semantics.
+        assert d.offer_id == "offer_SECONDARY"
+        assert d.target_state == "IN_TRIP"
+        assert d.corrected_lat == 29.6246
+        assert d.corrected_lng == -95.5102
+        assert d.ghost_insert_payload is None
+        # Payload carries both ids and the swap direction.
+        assert d.reconciliation_payload is not None
+        assert d.reconciliation_payload["swap_kind"] == "primary_to_secondary"
+        assert d.reconciliation_payload["primary_offer_id"] == "offer_PRIMARY"
+        assert (
+            d.reconciliation_payload["secondary_offer_id"] == "offer_SECONDARY"
+        )
+
+
+# ============================================================================
+# TestBuildFireStackedRevert - 1 test
+# ============================================================================
+
+class TestBuildFireStackedRevert:
+    def test_returns_correct_shape(self):
+        d = _build_fire_stacked_revert(
+            primary_offer_id="offer_PRIMARY",
+            secondary_offer_id="offer_SECONDARY",
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            reason="S35 Uber re-award",
+        )
+        assert d.action == "fire_stacked_revert"
+        # Primary restored as the active offer per revert semantics.
+        assert d.offer_id == "offer_PRIMARY"
+        assert d.target_state == "ENROUTE"
+        assert d.corrected_lat == 29.6246
+        assert d.corrected_lng == -95.5102
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is not None
+        assert d.reconciliation_payload["swap_kind"] == "secondary_to_primary"
+        assert d.reconciliation_payload["primary_offer_id"] == "offer_PRIMARY"
+        assert (
+            d.reconciliation_payload["secondary_offer_id"] == "offer_SECONDARY"
+        )
+
+
+# ============================================================================
+# TestBuildCacheGhost - 2 tests (happy + null-cluster defensive)
+# ============================================================================
+
+class TestBuildCacheGhost:
+    def test_with_cluster(self):
+        cluster = Cluster(
+            n=8,
+            median_lat=29.6246,
+            median_lng=-95.5102,
+            spread_m=18.0,
+            duration_s=42.0,
+        )
+        d = _build_cache_ghost(
+            cluster_lat=29.6246,
+            cluster_lng=-95.5102,
+            cluster=cluster,
+            state_at_time="ENROUTE",
+            confidence=0.55,
+            reason="at_unknown_pudo conf=0.55",
+        )
+        assert d.action == "cache_ghost"
+        assert d.offer_id is None
+        assert d.target_state is None
+        assert d.corrected_lat == 29.6246
+        assert d.corrected_lng == -95.5102
+        assert d.reconciliation_payload is None
+        # Payload carries cluster geometry + state + confidence.
+        assert d.ghost_insert_payload is not None
+        p = d.ghost_insert_payload
+        assert p["lat"] == 29.6246
+        assert p["lng"] == -95.5102
+        assert p["cluster_spread_m"] == 18.0
+        assert p["cluster_duration_s"] == 42.0
+        assert p["state_at_time"] == "ENROUTE"
+        assert p["confidence"] == 0.55
+
+    def test_null_cluster_defensive(self):
+        # Defensive: cluster=None should produce a payload with spread/duration
+        # as None rather than raising AttributeError on .spread_m access.
+        d = _build_cache_ghost(
+            cluster_lat=29.6246,
+            cluster_lng=-95.5102,
+            cluster=None,
+            state_at_time="UNCOMMITTED",
+            confidence=0.0,
+            reason="defensive null cluster",
+        )
+        assert d.action == "cache_ghost"
+        assert d.ghost_insert_payload is not None
+        assert d.ghost_insert_payload["cluster_spread_m"] is None
+        assert d.ghost_insert_payload["cluster_duration_s"] is None
+
+
+# ============================================================================
+# TestBuildReconcileMissedPickup - 1 test (R1 enforcement)
+# ============================================================================
+
+class TestBuildReconcileMissedPickup:
+    def test_r1_no_coordinate_synthesis(self):
+        # R1 (state-correction over coordinate-synthesis): the reconcile
+        # builder MUST emit corrected_lat/lng as None. Coordinates from the
+        # cluster median are ignored on purpose - audit-trail honesty wins
+        # over inferred location data.
+        d = _build_reconcile_missed_pickup(
+            offer_id="offer_calhoun",
+            target_state="UNCOMMITTED",
+            suspected_pudo_id=42,
+            reason="dropoff fired without prior pickup confirmation",
+        )
+        assert d.action == "reconcile_missed_pickup"
+        assert d.offer_id == "offer_calhoun"
+        assert d.target_state == "UNCOMMITTED"
+        # R1 enforcement - the load-bearing assertions of this test.
+        assert d.corrected_lat is None
+        assert d.corrected_lng is None
+        assert d.ghost_insert_payload is None
+        # Payload carries the reconciliation instructions for EXECUTE.
+        assert d.reconciliation_payload is not None
+        p = d.reconciliation_payload
+        assert p["missed_pudo_type"] == "pickup"
+        assert p["offer_id"] == "offer_calhoun"
+        assert p["suspected_pudo_id"] == 42
+        assert p["offer_history_updates"]["pickup_missed"] is True
+        assert (
+            p["offer_history_updates"]["pickup_inference_source"]
+            == "dropoff_completed"
+        )
+
+
+# ============================================================================
+# TestBuildReconcileMissedDropoff - 1 test (R1 enforcement, symmetric)
+# ============================================================================
+
+class TestBuildReconcileMissedDropoff:
+    def test_r1_no_coordinate_synthesis(self):
+        # Symmetric to test_r1_no_coordinate_synthesis above. Same R1 policy:
+        # the next-ride pickup fired successfully, but the prior ride's
+        # dropoff was never confirmed. EXECUTE must update offer_history
+        # honestly without synthesizing the missed dropoff coords.
+        d = _build_reconcile_missed_dropoff(
+            offer_id="offer_prior",
+            target_state="ENROUTE",
+            suspected_pudo_id=None,
+            reason="next pickup fired without prior dropoff confirmation",
+        )
+        assert d.action == "reconcile_missed_dropoff"
+        assert d.offer_id == "offer_prior"
+        assert d.target_state == "ENROUTE"
+        # R1 enforcement.
+        assert d.corrected_lat is None
+        assert d.corrected_lng is None
+        assert d.ghost_insert_payload is None
+        assert d.reconciliation_payload is not None
+        p = d.reconciliation_payload
+        assert p["missed_pudo_type"] == "dropoff"
+        assert p["offer_id"] == "offer_prior"
+        assert p["suspected_pudo_id"] is None
+        assert p["offer_history_updates"]["dropoff_missed"] is True
+        assert (
+            p["offer_history_updates"]["dropoff_inference_source"]
+            == "next_pickup_completed"
+        )
+
+
+# ============================================================================
+# TestAllBuildersReturnFrozen - 1 test
+# ============================================================================
+
+class TestAllBuildersReturnFrozen:
+    def test_frozen_instance_error_on_mutation(self):
+        # PlannerDecision is frozen=True. Any builder's output must raise
+        # FrozenInstanceError on attribute mutation. _build_noop is the
+        # cheapest sentinel; the frozen-ness is a property of the dataclass
+        # not the builder, so one sentinel proves the contract.
+        d = _build_noop("sentinel")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            d.action = "fire_pickup"  # type: ignore
