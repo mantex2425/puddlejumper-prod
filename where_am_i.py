@@ -442,3 +442,252 @@ def _validate_target(target, class_name: str) -> Optional[_MatchOutcome]:
             signals=None,
         )
     return None
+
+
+# =============================================================================
+# Section C - Per-class matchers and dispatch
+# =============================================================================
+#
+# Five orchestrator functions, one per address class, plus the _CLASS_DISPATCH
+# table that evaluate() (Section D) uses to route a target to its matcher.
+#
+# Each matcher follows the same shape:
+#   1. Validate the target (fail-closed if NULL coords)
+#   2. Compute the 6 signals via _compute_signals helper
+#   3. Sum signals * class-specific weights via _weighted_confidence
+#   4. Render reason string via _render_reason
+#   5. Build _MatchOutcome
+#
+# Class-specific behavior is entirely in (a) which proximity threshold gets
+# passed to _compute_signals and (b) which _CONFIDENCE_WEIGHTS row applies.
+# Per Gemini Step 3 ratification: the weights table is the only "knob"; all
+# matchers share the same orchestration shape.
+#
+# _RoadTopology is brought forward from Section D (Gemini Step 5.4 Q1
+# ruling). It's a frozen dataclass with the topology fields the matchers
+# need. Section D's _compute_road_topology adapter constructs instances
+# from get_pivot_context() output; tests construct them directly.
+
+
+@dataclass(frozen=True)
+class _RoadTopology:
+    """Snapshot of the driver's road-network context at a single heartbeat.
+
+    Constructed in production by _compute_road_topology (Section D) from
+    pivot_context.get_pivot_context() output. Constructed in tests
+    directly. Frozen because the snapshot is taken at a moment in time
+    and shouldn't mutate as the matchers reason about it.
+
+    on_target_road is NOT a field here (Q1 ruling, Step 2). It's
+    relationship between topology and a specific TargetSpec, computed
+    inside each matcher via _signal_on_target_road.
+    """
+    on_wire: bool                       # currently snapped to a named road?
+    current_road: Optional[str]         # name of the snapped road, else None
+    last_named_road: Optional[str]      # most recent named road touched
+    off_wire_duration_s: int            # 0 when on_wire; else seconds since pivot
+    breadcrumb: tuple[str, ...]         # raw road names, recent -> older
+
+
+def _compute_signals(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+    threshold_m: float,
+) -> dict[str, float]:
+    """Build the 6-signal dict for a matcher.
+
+    Eliminates duplication across the 5 matchers (otherwise each would
+    have the same 6-line construction block). The class-specific knobs
+    are the proximity threshold (passed in) and the weights row applied
+    downstream — never the signals themselves.
+
+    target must have lat, lng, named_roads attributes (TargetSpec).
+    Validation that lat/lng are non-None happens BEFORE this is called,
+    in _validate_target.
+    """
+    return {
+        "proximity": _signal_proximity(
+            cluster, target.lat, target.lng, threshold_m,
+        ),
+        "breadcrumb_match": _signal_breadcrumb_match(
+            topo.breadcrumb, target.named_roads,
+        ),
+        "cluster_tightness": _signal_cluster_tightness(cluster),
+        "cluster_duration": _signal_cluster_duration(cluster),
+        "on_target_road": _signal_on_target_road(
+            topo.current_road, target.named_roads,
+        ),
+        "off_wire_pivot": _signal_off_wire_pivot(
+            on_wire=topo.on_wire,
+            last_named_road=topo.last_named_road,
+            off_wire_duration_s=topo.off_wire_duration_s,
+            target_road_names=target.named_roads,
+        ),
+    }
+
+
+def _build_outcome(
+    cluster: Cluster,
+    target,
+    class_name: str,
+    signals: dict[str, float],
+    confidence: float,
+) -> _MatchOutcome:
+    """Assemble a _MatchOutcome from computed signals + confidence.
+
+    Common tail of every matcher. The matched flag is True iff confidence
+    clears MIN_REPORT_THRESHOLD (Step 1 Q4 lock); below that, the matcher
+    reports "tried but didn't match" so evaluate() can fall through to
+    ghost-match or at_unknown_pudo.
+    """
+    reason = _render_reason(class_name, signals, confidence)
+    return _MatchOutcome(
+        matched=confidence >= MIN_REPORT_THRESHOLD,
+        confidence=confidence,
+        corrected_lat=cluster.median_lat,
+        corrected_lng=cluster.median_lng,
+        reason=reason,
+        pudo_type=None,           # Set by _match_current_pudo orchestrator (Step 5.5)
+        target_address=getattr(target, "address", None),
+        signals=signals,
+    )
+
+
+def _match_intersection(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+) -> _MatchOutcome:
+    """Match an intersection-class target ("Joan St & Settemont Rd")."""
+    if (skip := _validate_target(target, "intersection")) is not None:
+        return skip
+
+    signals = _compute_signals(cluster, topo, target, INTERSECTION_RADIUS_M)
+    confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["intersection"])
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[WAI matcher=intersection] %s",
+            _render_reason("intersection", signals, confidence),
+        )
+
+    return _build_outcome(cluster, target, "intersection", signals, confidence)
+
+
+def _match_single_road(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+) -> _MatchOutcome:
+    """Match a single_road target ("fondren rd")."""
+    if (skip := _validate_target(target, "single_road")) is not None:
+        return skip
+
+    signals = _compute_signals(cluster, topo, target, SINGLE_ROAD_RADIUS_M)
+    confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["single_road"])
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[WAI matcher=single_road] %s",
+            _render_reason("single_road", signals, confidence),
+        )
+
+    return _build_outcome(cluster, target, "single_road", signals, confidence)
+
+
+def _match_number_on_street(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+) -> _MatchOutcome:
+    """Match a number_on_street target ("1234 Main St").
+
+    Tightest proximity threshold of any class (50m) because Google's
+    house-number geocode is precise to within a few meters typically.
+    """
+    if (skip := _validate_target(target, "number_on_street")) is not None:
+        return skip
+
+    signals = _compute_signals(cluster, topo, target, NUMBER_ON_STREET_RADIUS_M)
+    confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["number_on_street"])
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[WAI matcher=number_on_street] %s",
+            _render_reason("number_on_street", signals, confidence),
+        )
+
+    return _build_outcome(cluster, target, "number_on_street", signals, confidence)
+
+
+def _match_apartment_complex(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+) -> _MatchOutcome:
+    """Match an apartment_complex target.
+
+    Generous proximity threshold (300m) because Google often pins the
+    leasing office or a generic centroid rather than the actual unit.
+    The off_wire_pivot signal carries 40% of the weight here — the
+    classic "drove off the target road into a parking lot" pattern.
+    """
+    if (skip := _validate_target(target, "apartment_complex")) is not None:
+        return skip
+
+    signals = _compute_signals(cluster, topo, target, APARTMENT_RADIUS_M)
+    confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["apartment_complex"])
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[WAI matcher=apartment_complex] %s",
+            _render_reason("apartment_complex", signals, confidence),
+        )
+
+    return _build_outcome(cluster, target, "apartment_complex", signals, confidence)
+
+
+def _match_poi_stub(
+    cluster: Cluster,
+    topo: _RoadTopology,
+    target,
+) -> _MatchOutcome:
+    """Stub for poi-class targets (airports, named businesses).
+
+    Per Step 1 Q4 lock and Gemini Step 5.4 Q3 ratification: returns
+    not_at_pudo semantics with WARN log. The cluster falls through to
+    ghost match -> at_unknown_pudo in evaluate(), and the WARN log
+    surfaces the POI miss rate in shadow-mode aggregates.
+
+    POI matching deferred to v1.1 per RFC v2.4.7. Polygon-based
+    matching (airport curbs, business footprints) is a separate
+    architectural conversation from point-proximity matching.
+    """
+    log.warning(
+        "[WAI matcher=poi_stub] target=%r class=poi - match deferred to v1.1, "
+        "falling through to ghost / at_unknown_pudo",
+        getattr(target, "address", None),
+    )
+    return _MatchOutcome(
+        matched=False,
+        confidence=0.0,
+        corrected_lat=None,
+        corrected_lng=None,
+        reason="poi_stub",
+        pudo_type=None,
+        target_address=getattr(target, "address", None),
+        signals=None,
+    )
+
+
+# Dispatch table — Section D's _match_current_pudo uses this to route a
+# TargetSpec to its class-appropriate matcher. .get() returns None for
+# unknown classes; the orchestrator logs and skips in that case.
+_CLASS_DISPATCH = {
+    "intersection":      _match_intersection,
+    "single_road":       _match_single_road,
+    "number_on_street":  _match_number_on_street,
+    "apartment_complex": _match_apartment_complex,
+    "poi":               _match_poi_stub,
+}
