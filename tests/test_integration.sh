@@ -282,7 +282,7 @@ check "T16" "Setup: IN_TRIP with nailed pickup" "$STATE" "IN_TRIP"
 # Backdate state so grace period satisfied — disable timestamp trigger first
 psql -h 10.128.0.2 -U postgres -d puddlejumper -q << 'SQLEOF'
 ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;
-UPDATE app_private.driver_trip_state SET state_updated_at = NOW() AT TIME ZONE 'America/Chicago' - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
+UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
 ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;
 SQLEOF
 
@@ -422,7 +422,7 @@ check "T30" "Watchdog setup: IN_TRIP" "$STATE" "IN_TRIP"
 
 # Backdate state 95 minutes — disable timestamp trigger to prevent overwrite
 psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "UPDATE app_private.driver_trip_state SET state_updated_at = NOW() AT TIME ZONE 'America/Chicago' - INTERVAL '95 minutes' WHERE driver_id = '$DRIVER';" 2>/dev/null
+psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '95 minutes' WHERE driver_id = '$DRIVER';" 2>/dev/null
 psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
 
 # Trigger watchdog — no auth needed, internal endpoint
@@ -488,7 +488,7 @@ check "T38" "ABORT setup: ENROUTE, pickup not nailed" "$STATE" "ENROUTE"
 # Backdate state 90s so grace period satisfied — disable timestamp trigger first
 psql -h 10.128.0.2 -U postgres -d puddlejumper -q << 'SQLEOF'
 ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;
-UPDATE app_private.driver_trip_state SET state_updated_at = NOW() AT TIME ZONE 'America/Chicago' - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
+UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
 ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;
 SQLEOF
 
