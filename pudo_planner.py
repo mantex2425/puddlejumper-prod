@@ -923,20 +923,103 @@ class PudoPlanner:
         wai_result: WhereAmIResult,
         snapshot: DriverStateSnapshot,
     ) -> Optional[PlannerDecision]:
-        """Section B placeholder — returns None in Step 3.4.
+        """Section B: STACKED contradiction detection (S32 / S35).
 
-        Step 4 implements the coordinate-only proximity check that
-        distinguishes S32 (fire_stacked_swap) from S35
-        (fire_stacked_revert) when the driver is in STACKED state and
-        WAI's corrected coordinates contradict what the state machine
-        believes is current_offer_id.
+        Identity-based detection (R1 ratified, revised from earlier
+        coord-proximity ruling). WAI in STACKED state returns ONE
+        at_current_pudo with the winning offer_id (primary or secondary,
+        pickup or dropoff). PLAN interprets the identity:
 
-        Until Step 4 lands, this returns None and the dispatch in
-        _decide() falls through to its normal stable-match logic. This
-        means STACKED scenarios will fire normal fire_pickup decisions
-        — correct for hot-swap (S34) but wrong for S32/S35. The gap is
-        acknowledged in consume()'s docstring under "KNOWN GAPS".
+          primary's dropoff   -> normal progression, return None
+          secondary's pickup  -> S32: driver bypassed primary dropoff.
+                                  fire_stacked_swap (close primary,
+                                  promote secondary).
+          primary's pickup    -> S35: Uber re-awarded primary. driver
+                                  went BACK to primary's pickup.
+                                  fire_stacked_revert (close secondary,
+                                  restore primary).
+          secondary's dropoff -> sequence violation (secondary's pickup
+                                  hasn't fired). Return None per
+                                  Gemini R2 fail-closed ruling. Backlog
+                                  B-14: Sequence Violation Detector for
+                                  forensic alert.
+
+        Returns:
+          PlannerDecision if S32 or S35 detected, otherwise None
+          (caller's _decide falls through to normal dispatch).
         """
+        # Guard 1: only applies in STACKED state.
+        if snapshot.state != "STACKED":
+            return None
+
+        # Guard 2: only applies when WAI matched a target.
+        if wai_result.status != "at_current_pudo":
+            return None
+
+        # Guard 3: malformed WAI (no offer_id) -> bail.
+        if wai_result.offer_id is None or wai_result.pudo_type is None:
+            return None
+
+        # Guard 4: snapshot must carry both offer ids for STACKED logic.
+        # Phase F is responsible for assembly; if either is missing,
+        # something's wrong upstream and we fail closed.
+        if (
+            snapshot.primary_offer_id is None
+            or snapshot.current_offer_id is None
+        ):
+            return None
+
+        is_primary = (wai_result.offer_id == snapshot.primary_offer_id)
+        is_secondary = (wai_result.offer_id == snapshot.current_offer_id)
+        is_pickup = (wai_result.pudo_type == "pickup")
+        is_dropoff = (wai_result.pudo_type == "dropoff")
+
+        # Case A: primary's dropoff -> normal progression. Not a contradiction.
+        # Falls through to _decide()'s stable-match path.
+        if is_primary and is_dropoff:
+            return None
+
+        # Case B (S32): secondary's pickup. Driver bypassed primary's dropoff
+        # which never fired — the implicit-cancel pattern.
+        if is_secondary and is_pickup:
+            return _build_fire_stacked_swap(
+                primary_offer_id=snapshot.primary_offer_id,
+                secondary_offer_id=snapshot.current_offer_id,
+                corrected_lat=wai_result.corrected_lat,
+                corrected_lng=wai_result.corrected_lng,
+                reason=(
+                    f"S32 implicit STACKED cancel: WAI at secondary pickup "
+                    f"({snapshot.current_offer_id}) without primary dropoff "
+                    f"({snapshot.primary_offer_id}) firing first"
+                ),
+            )
+
+        # Case C (S35): primary's pickup. Uber re-awarded primary; driver
+        # went back to primary's pickup. Secondary was never actually
+        # awarded.
+        if is_primary and is_pickup:
+            return _build_fire_stacked_revert(
+                primary_offer_id=snapshot.primary_offer_id,
+                secondary_offer_id=snapshot.current_offer_id,
+                corrected_lat=wai_result.corrected_lat,
+                corrected_lng=wai_result.corrected_lng,
+                reason=(
+                    f"S35 Uber re-award: WAI at primary pickup "
+                    f"({snapshot.primary_offer_id}) while state expected "
+                    f"secondary ({snapshot.current_offer_id}) — secondary "
+                    f"unawarded by Uber"
+                ),
+            )
+
+        # Case D: secondary's dropoff. Sequence violation — secondary's
+        # pickup hasn't fired. Per Gemini R2: fail closed (return None).
+        # Backlog B-14: Sequence Violation Detector for forensic alert.
+        if is_secondary and is_dropoff:
+            return None
+
+        # Anything else: WAI matched a target with offer_id we don't
+        # recognize relative to the snapshot. Could be a stale offer_id
+        # or a third stacked offer in some edge case. Fall through.
         return None
 
     # -- private helpers ---------------------------------------------------
