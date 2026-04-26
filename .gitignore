@@ -18,3 +18,13 @@ __pycache__/
 audit.txt
 locationtests
 scenarios_raw.tsv
+
+# Test run output logs
+tests/test_run_*.txt
+
+# Stop Atlas ingestion logs (output, not source)
+scripts/stop_atlas_ingestion/logs/
+
+# Python bytecode caches under patches/ and scripts/
+patches/__pycache__/
+scripts/**/__pycache__/
