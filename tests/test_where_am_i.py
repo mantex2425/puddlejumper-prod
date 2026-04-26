@@ -927,3 +927,420 @@ class TestClassDispatch:
         # .get() returns None for unknown classes; orchestrator handles this
         assert _CLASS_DISPATCH.get("unknown_class") is None
         assert _CLASS_DISPATCH.get("") is None
+
+
+# =============================================================================
+# Step 5.5 orchestrator tests — WhereAmI class, evaluate(), helpers
+# =============================================================================
+
+from where_am_i import WhereAmI
+from pudo_types import Offer, States
+import datetime
+
+
+# Lightweight fake cursor (Gemini Q1 ruling: hand-rolled over MagicMock)
+class _FakeCursor:
+    """Test fixture for ghost-cache SELECT.
+
+    Records the last execute() call and returns a predetermined row from
+    fetchone(). Hand-rolled rather than MagicMock-based per Gemini Q1
+    ruling — explicit fakes are easier to reason about than mocks.
+    """
+    def __init__(self, ghost_row=None):
+        self.ghost_row = ghost_row
+        self.last_query = None
+        self.last_params = None
+
+    def execute(self, sql, params):
+        self.last_query = sql
+        self.last_params = params
+
+    def fetchone(self):
+        return self.ghost_row
+
+
+# Test fixture builders for evaluate() inputs
+
+def _fake_pivot(
+    on_wire: bool = True,
+    current_road: str | None = "Settemont Road",
+    last_named_road: str | None = "Settemont Road",
+    pivot_time=None,
+    breadcrumb: list = None,
+):
+    """Build a fake pivot_context return dict for tests."""
+    if breadcrumb is None:
+        breadcrumb = ["Settemont Road"]
+    def _pivot_fn(driver_id, cur, anchor_time=None):
+        return {
+            "on_wire": on_wire,
+            "current_road": current_road,
+            "last_named_road": last_named_road,
+            "pivot_time": pivot_time,
+            "breadcrumb": breadcrumb,
+        }
+    return _pivot_fn
+
+
+def _fake_cluster_fn(cluster_to_return):
+    """Build a fake cluster_fn that always returns the given cluster (or None)."""
+    def _cluster_fn(driver_id, cur):
+        return cluster_to_return
+    return _cluster_fn
+
+
+def _offer(
+    offer_id: str = "test_offer",
+    pickup: TargetSpec | None = None,
+    dropoff: TargetSpec | None = None,
+    secondary_dropoff: TargetSpec | None = None,
+) -> Offer:
+    """Build an Offer with sensible defaults."""
+    if pickup is None:
+        pickup = _target(named_roads=("Settemont Rd", "Joan St"))
+    if dropoff is None:
+        dropoff = _target(
+            lat=29.7000, lng=-95.4000,
+            address_class="number_on_street",
+            named_roads=("Main St",),
+        )
+    return Offer(
+        offer_id=offer_id,
+        pickup=pickup,
+        dropoff=dropoff,
+        secondary_dropoff=secondary_dropoff,
+    )
+
+
+# =============================================================================
+# TestComputeRoadTopology - 4 tests
+# =============================================================================
+
+class TestComputeRoadTopology:
+    def test_on_wire_zero_duration(self):
+        # When on_wire=True, off_wire_duration_s should be 0 regardless of pivot_time
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(None),
+            _pivot_fn=_fake_pivot(on_wire=True),
+        )
+        topo = wai._compute_road_topology("driver1")
+        assert topo.on_wire is True
+        assert topo.off_wire_duration_s == 0
+        assert topo.current_road == "Settemont Road"
+
+    def test_off_wire_with_pivot_time(self):
+        # off_wire with pivot_time 30s ago -> duration ~30
+        ago_30s = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(None),
+            _pivot_fn=_fake_pivot(on_wire=False, pivot_time=ago_30s),
+        )
+        topo = wai._compute_road_topology("driver1")
+        assert topo.on_wire is False
+        assert 28 <= topo.off_wire_duration_s <= 32  # allow test latency
+
+    def test_off_wire_no_pivot_time_fails_closed(self):
+        # off_wire with pivot_time=None -> duration=0 (fail-closed apartment matchers)
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(None),
+            _pivot_fn=_fake_pivot(on_wire=False, pivot_time=None),
+        )
+        topo = wai._compute_road_topology("driver1")
+        assert topo.off_wire_duration_s == 0
+
+    def test_negative_duration_clamps(self):
+        # If pivot_time is in the future (clock skew), max(0, ...) clamps to 0
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60)
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(None),
+            _pivot_fn=_fake_pivot(on_wire=False, pivot_time=future),
+        )
+        topo = wai._compute_road_topology("driver1")
+        assert topo.off_wire_duration_s == 0
+
+
+# =============================================================================
+# TestTargetsForState - 5 tests
+# =============================================================================
+
+class TestTargetsForState:
+    def _make_wai(self):
+        return WhereAmI(_FakeCursor(), _cluster_fn=_fake_cluster_fn(None),
+                        _pivot_fn=_fake_pivot())
+
+    def test_uncommitted_returns_empty(self):
+        # UNCOMMITTED has no current offer in scope; S11 is EXECUTE's job
+        wai = self._make_wai()
+        targets = wai._targets_for_state(_offer(), States.UNCOMMITTED)
+        assert targets == []
+
+    def test_enroute_returns_pickup(self):
+        offer = _offer()
+        wai = self._make_wai()
+        targets = wai._targets_for_state(offer, States.ENROUTE)
+        assert len(targets) == 1
+        assert targets[0][0] is offer.pickup
+        assert targets[0][1] == "pickup"
+
+    def test_in_trip_returns_dropoff(self):
+        offer = _offer()
+        wai = self._make_wai()
+        targets = wai._targets_for_state(offer, States.IN_TRIP)
+        assert len(targets) == 1
+        assert targets[0][0] is offer.dropoff
+        assert targets[0][1] == "dropoff"
+
+    def test_refine_dropoff_returns_dropoff(self):
+        # Synonym ruling (Step 4): REFINE_DROPOFF behaves identically to IN_TRIP
+        offer = _offer()
+        wai = self._make_wai()
+        targets = wai._targets_for_state(offer, States.REFINE_DROPOFF)
+        assert len(targets) == 1
+        assert targets[0][0] is offer.dropoff
+        assert targets[0][1] == "dropoff"
+
+    def test_stacked_returns_both(self):
+        # Both primary and secondary, in priority order
+        secondary = _target(lat=29.7, lng=-95.5, address_class="intersection",
+                            named_roads=("Other St", "Other Ave"))
+        offer = _offer(secondary_dropoff=secondary)
+        wai = self._make_wai()
+        targets = wai._targets_for_state(offer, States.STACKED)
+        assert len(targets) == 2
+        assert targets[0][0] is offer.dropoff   # primary first
+        assert targets[1][0] is secondary       # secondary second
+
+
+# =============================================================================
+# TestMatchCurrentPudo - 4 tests
+# =============================================================================
+
+class TestMatchCurrentPudo:
+    def test_no_match_when_no_targets(self):
+        # UNCOMMITTED returns no targets -> _match_current_pudo returns None
+        cluster = _cluster()
+        cur = _FakeCursor()
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        result = wai._match_current_pudo(cluster, topo, _offer(), States.UNCOMMITTED)
+        assert result is None
+
+    def test_intersection_match_returns_outcome(self):
+        # ENROUTE + intersection target at cluster -> matched outcome
+        cluster = _cluster()
+        cur = _FakeCursor()
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        outcome = wai._match_current_pudo(cluster, topo, _offer(), States.ENROUTE)
+        assert outcome is not None
+        assert outcome.matched is True
+        assert outcome.pudo_type == "pickup"
+
+    def test_stacked_higher_confidence_wins(self):
+        # STACKED with secondary much closer to cluster -> secondary wins
+        cluster = _cluster()
+        primary_far = _target(
+            lat=29.8, lng=-95.3,
+            address_class="number_on_street",
+            named_roads=("Far Road",),
+        )
+        secondary_close = _target(
+            lat=29.6246, lng=-95.5102,
+            address_class="intersection",
+            named_roads=("Settemont Rd", "Joan St"),
+        )
+        offer = _offer(dropoff=primary_far, secondary_dropoff=secondary_close)
+        cur = _FakeCursor()
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        outcome = wai._match_current_pudo(cluster, topo, offer, States.STACKED)
+        assert outcome is not None
+        assert outcome.matched is True
+        # Secondary should have won — high confidence, intersection class
+        assert outcome.confidence > STRONG_MATCH_CONFIDENCE
+
+    def test_unknown_address_class_logs_skip(self, caplog):
+        # If a target has an address_class not in _CLASS_DISPATCH, it's skipped
+        # with a WARN log
+        weird = _target(address_class="unknown_class")
+        offer = _offer(pickup=weird)
+        cluster = _cluster()
+        cur = _FakeCursor()
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        with caplog.at_level(logging.WARNING, logger="where_am_i"):
+            outcome = wai._match_current_pudo(cluster, topo, offer, States.ENROUTE)
+        # All targets skipped -> outcome is None
+        assert outcome is None
+        # WARN log should have fired
+        assert any("unknown address_class" in record.message
+                   for record in caplog.records)
+
+
+# =============================================================================
+# TestMatchGhostCache - 3 tests
+# =============================================================================
+
+class TestMatchGhostCache:
+    def test_no_ghost_returns_none(self):
+        cluster = _cluster()
+        cur = _FakeCursor(ghost_row=None)
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        assert result is None
+        # SQL was issued
+        assert "suspected_pudos" in cur.last_query
+        # Driver ID and coords were passed
+        assert cur.last_params[0] == "driver1"
+        assert cur.last_params[1] == cluster.median_lat
+        assert cur.last_params[2] == cluster.median_lng
+
+    def test_active_ghost_returns_at_previous_pudo(self):
+        cluster = _cluster()
+        ghost_row = (
+            42,                          # ghost_id
+            29.6246, -95.5102,           # lat, lng
+            "ghost_offer_xyz",           # offer_id_at_time
+            0.65,                        # confidence
+            "2026-04-26 12:00:00+00",    # detected_at
+        )
+        cur = _FakeCursor(ghost_row=ghost_row)
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        topo = wai._compute_road_topology("driver1")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        assert result is not None
+        assert result.status == "at_previous_pudo"
+        assert result.ghost_id == 42
+        assert result.offer_id == "ghost_offer_xyz"
+        assert result.confidence == 0.65
+
+    def test_topology_threaded_into_result(self):
+        # Q2 ruling: topology threaded into ghost result for forensic context
+        cluster = _cluster()
+        ghost_row = (10, 29.6246, -95.5102, "off1", 0.5, "2026-04-26")
+        cur = _FakeCursor(ghost_row=ghost_row)
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(cluster),
+            _pivot_fn=_fake_pivot(on_wire=True, current_road="Settemont Road"),
+        )
+        topo = wai._compute_road_topology("driver1")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        assert result.on_wire is True
+        assert result.current_road == "Settemont Road"
+
+
+# =============================================================================
+# TestEvaluate - 5 tests (the orchestrator end-to-end)
+# =============================================================================
+
+class TestEvaluate:
+    def test_no_cluster_returns_not_at_pudo(self):
+        cur = _FakeCursor()
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(None),
+                       _pivot_fn=_fake_pivot())
+        result = wai.evaluate("driver1", _offer(), States.ENROUTE)
+        assert result.status == "not_at_pudo"
+        assert result.cluster is None
+
+    def test_cluster_at_target_returns_at_current_pudo(self):
+        # Forum Park 7623 — full evaluate() path
+        cluster = _cluster()
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(cluster),
+            _pivot_fn=_fake_pivot(
+                on_wire=True,
+                current_road="Settemont Road",
+                breadcrumb=["Settemont Road", "Fondren Road"],
+            ),
+        )
+        # Pickup is the canonical 205m intersection target
+        pickup = _target(
+            lat=29.6246 + 0.00184,
+            lng=-95.5102,
+            named_roads=("Settemont Rd", "Joan St"),
+        )
+        offer = _offer(pickup=pickup)
+        result = wai.evaluate("driver1", offer, States.ENROUTE)
+        assert result.status == "at_current_pudo"
+        assert result.pudo_type == "pickup"
+        assert result.confidence > STRONG_MATCH_CONFIDENCE
+        assert result.on_target_road is True
+
+    def test_cluster_no_offer_returns_at_unknown_pudo(self):
+        # cluster + UNCOMMITTED + no ghost -> at_unknown_pudo
+        cluster = _cluster()
+        cur = _FakeCursor(ghost_row=None)
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
+        assert result.status == "at_unknown_pudo"
+        assert result.cluster is not None
+        assert result.confidence == 0.0
+
+    def test_uncommitted_falls_through(self):
+        # Even with an offer, UNCOMMITTED state has no targets
+        # (S11 is EXECUTE's job). Cluster falls through to ghost / unknown.
+        cluster = _cluster()
+        cur = _FakeCursor(ghost_row=None)
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        result = wai.evaluate("driver1", _offer(), States.UNCOMMITTED)
+        assert result.status == "at_unknown_pudo"
+
+    def test_off_ride_with_ghost_match(self):
+        # No current offer + ghost present -> at_previous_pudo
+        cluster = _cluster()
+        ghost_row = (99, 29.6246, -95.5102, "old_offer", 0.55, "2026-04-26")
+        cur = _FakeCursor(ghost_row=ghost_row)
+        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
+                       _pivot_fn=_fake_pivot())
+        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
+        assert result.status == "at_previous_pudo"
+        assert result.ghost_id == 99
+
+
+# =============================================================================
+# TestWhereAmIInjection - 3 tests
+# =============================================================================
+
+class TestWhereAmIInjection:
+    def test_default_uses_real_dependencies(self):
+        # No injection -> uses production cluster_detection.detect_cluster
+        # and pivot_context.get_pivot_context
+        from cluster_detection import detect_cluster
+        from pivot_context import get_pivot_context
+        cur = _FakeCursor()
+        wai = WhereAmI(cur)
+        assert wai._cluster_fn is detect_cluster
+        assert wai._pivot_fn is get_pivot_context
+
+    def test_cluster_fn_injection(self):
+        # Custom _cluster_fn should be used
+        marker = _cluster(spread_m=99.0)  # distinct fingerprint
+        wai = WhereAmI(_FakeCursor(), _cluster_fn=_fake_cluster_fn(marker))
+        # Direct check — call through evaluate with a no-cluster path is too indirect
+        assert wai._cluster_fn("driver1", None) is marker
+
+    def test_pivot_fn_injection(self):
+        sentinel_pivot = _fake_pivot(current_road="Sentinel Road")
+        wai = WhereAmI(_FakeCursor(), _pivot_fn=sentinel_pivot)
+        result = wai._pivot_fn("driver1", None)
+        assert result["current_road"] == "Sentinel Road"
