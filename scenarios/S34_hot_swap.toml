@@ -1,0 +1,57 @@
+id = "S34"
+description = """
+Hot-swap (collapse failure typology). Driver arrives at primary dropoff;
+the stacked-ride passenger is waiting at the curb and gets in immediately
+with zero or near-zero physical movement. The primary dropoff and the
+secondary pickup occur at the same physical cluster — potentially within
+the same continuous heartbeat sequence.
+
+Failure mode: WAI returns one WhereAmIResult per heartbeat. After PLAN
+fires fire_dropoff for the primary, the next heartbeat is still at the
+same cluster. Without explicit re-evaluation logic, PLAN's temporal
+pattern detector ("stable for N heartbeats") may not recognize the
+secondary-pickup match because the match candidate looks identical to
+the just-fired primary-dropoff cluster.
+
+Production observation (Andrew, recollection uncertain): "System
+recognizes the dropoff, but not the pickup." Reproducer fixture deferred
+until the case can be reliably captured.
+
+Resolution policy: After any fire_pickup or fire_dropoff action, the
+heartbeat loop must re-invoke WhereAmI.evaluate() within the same tick
+(or the immediate next tick) with the post-transition state. PLAN must
+reset its temporal-pattern counter and treat the same cluster as a
+potential match for the new state's expected PUDO. The fix lives in
+PLAN's temporal logic and Phase F's heartbeat loop sequencing — not in
+WAI itself.
+
+Distinct from S31 (single PUDO at distance), S32 (state-vs-reality
+contradiction at a moment), and S33 (post-hoc reconciliation of an
+unobserved PUDO).
+"""
+status = "AWAITING_PHASE_E"
+notes = """
+Phase E PLAN consumer's temporal-logic functions must implement
+"post-fire re-evaluation": after emitting fire_pickup or fire_dropoff,
+the planner clears its armed-candidate state for the just-fired event
+AND immediately re-evaluates the same cluster against the new state's
+expected PUDOs. If a match exists, arm a new candidate.
+
+Forensic fixture deferred. Andrew's overnight driving sessions may
+reproduce; if not, a synthetic generator can construct the heartbeat
+sequence (continuous cluster, identity-preserving across the state
+transition).
+"""
+
+[start]
+state = "STACKED"
+
+[trigger]
+event = "dropoff_and_secondary_pickup_at_same_cluster"
+verdict = "COLLAPSE_HOT_SWAP"
+
+[expected]
+state = "IN_TRIP"
+potential_cancellation = false
+anchor_coord = "shared cluster median (primary dropoff = secondary pickup)"
+offer_status = "primary_completed_secondary_active"

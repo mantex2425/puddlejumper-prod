@@ -1,0 +1,54 @@
+id = "S35"
+description = """
+Uber stacked re-award (structural failure, inverse of S32). Driver gets
+matched offer A; system accepts → ENROUTE to A's pickup. Uber sends
+matched offer B; system also accepts → STACKED, current_offer_id = B.
+Driver heading to B's pickup. Uber then re-awards offer A to this
+driver (offer B was never actually awarded — Uber's matching ran
+ahead of the driver's confirmation, or some other Uber-side race).
+
+Driver navigates to A's pickup. WAI in STACKED state with current_offer_id=B
+reports at_current_pudo with corrected_lat/lng matching A's pickup
+coordinates (not B's pickup, which is what state machine expects).
+This contradicts what the state machine claims is happening.
+
+Resolution: PLAN detects via coordinate-only proximity check — WAI's
+corrected coords are closer to the primary's pickup (offer A) than to
+the secondary's pickup (offer B). Action: fire_stacked_revert. Close
+offer B (it was never actually awarded), restore state to ENROUTE
+with offer A as current_offer_id. The atomic swap goes the OTHER way
+from S32.
+
+Distinct from S32: S32 closes A and promotes B (driver is at B's
+pickup, state thinks A). S35 closes B and restores A (driver is at A's
+pickup, state thinks B). Same coordinate-only detection primitive,
+opposite resolution.
+"""
+status = "AWAITING_PHASE_E"
+notes = """
+Phase E PLAN consumer owns the coordinate-only proximity check that
+distinguishes S32 from S35. Both use WAI's corrected_lat/lng compared
+against snapshot.{primary_pickup, secondary_pickup, dropoff} coords;
+whichever is closest determines the resolution.
+
+S35 is the canonical case Andrew cited as motivating WAI's existence:
+"the 2nd matched offer is by definition not awarded to the driver,
+but the 1st one is."
+
+Forensic fixture deferred. Andrew's overnight driving sessions may
+reproduce; the trigger requires Uber-side re-award behavior that we
+don't control.
+"""
+
+[start]
+state = "STACKED"
+
+[trigger]
+event = "wai_match_primary_pickup_while_stacked"
+verdict = "IMPLICIT_SECONDARY_REVERT"
+
+[expected]
+state = "ENROUTE"
+potential_cancellation = true
+anchor_coord = "primary_offer_pickup"
+offer_status = "secondary_implicitly_unawarded"
