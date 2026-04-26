@@ -319,3 +319,126 @@ def _signal_off_wire_pivot(
     return (off_wire_duration_s - _PIVOT_MIN_OFF_WIRE_S) / (
         _PIVOT_FULL_OFF_WIRE_S - _PIVOT_MIN_OFF_WIRE_S
     )
+
+
+# =============================================================================
+# Section B - Plumbing
+# =============================================================================
+#
+# Internal types and pure helpers used by the per-class matchers (Section C)
+# and the WhereAmI orchestrator (Section D). All private to this module —
+# tests import them as "special friends" per Gemini Q6.
+#
+# _MatchOutcome is the contract between matchers and evaluate(): every
+# matcher returns one. evaluate() reads the fields directly to assemble
+# the final WhereAmIResult.
+#
+# Field ordering follows Gemini Step 5.3 Q1 ruling: verdict first
+# (matched, confidence), then geography (corrected coords), then
+# context (reason, attribution), then metadata (signals).
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class _MatchOutcome:
+    """Internal carrier between per-class matchers and evaluate().
+
+    Every _match_<class> function returns one of these. evaluate()
+    consumes the fields directly when assembling the final
+    WhereAmIResult. Frozen because the structure is immutable post-
+    construction; mutability would invite subtle bugs in the
+    STACKED tie-break path (Q3) where multiple outcomes are
+    compared by confidence.
+
+    All fields can be None except matched / confidence / reason —
+    these are always populated, even by fail-closed validators.
+    """
+    # --- Verdict (always populated) ---------------------------------------
+    matched: bool
+    confidence: float
+
+    # --- Geography (None if no match) -------------------------------------
+    corrected_lat: Optional[float]
+    corrected_lng: Optional[float]
+
+    # --- Context (always populated) ---------------------------------------
+    reason: str
+
+    # --- Attribution (None when not at_current_pudo) ----------------------
+    pudo_type: Optional[str]
+    target_address: Optional[str]
+
+    # --- Metadata (None for fail-closed outcomes) -------------------------
+    # Per Gemini Q5: stashing the per-signal score breakdown on the
+    # outcome lets evaluate() preserve the dominant-signal forensic trail
+    # all the way through to the WhereAmIResult.
+    signals: Optional[dict[str, float]]
+
+
+def _weighted_confidence(
+    signals: dict[str, float],
+    weights: dict[str, float],
+) -> float:
+    """Sum of (signal * weight) across the six confidence components.
+
+    Per-class weights live in _CONFIDENCE_WEIGHTS. Each row sums to 1.0.
+
+    Defensive: if `signals` is missing a key that `weights` requires,
+    raises KeyError loudly rather than silently substituting 0.0 — a
+    matcher that forgets a signal is a bug, not a tunable parameter.
+    """
+    return sum(signals[k] * w for k, w in weights.items())
+
+
+def _render_reason(
+    class_name: str,
+    signals: dict[str, float],
+    confidence: float,
+) -> str:
+    """Human-readable summary used in WhereAmIResult.reason and
+    [WAI matcher=...] debug log lines.
+
+    Format (Gemini Q2 lock — .2f precision):
+        "{class_name} conf={conf:.2f} [signal=score, signal=score, ...]"
+
+    Signals are sorted by score descending so the dominant signal
+    appears first — when a fire is forensically wrong, the log
+    immediately reveals which signal carried the decision.
+    """
+    sorted_signals = sorted(signals.items(), key=lambda kv: -kv[1])
+    parts = ", ".join(f"{k}={v:.2f}" for k, v in sorted_signals)
+    return f"{class_name} conf={confidence:.2f} [{parts}]"
+
+
+def _validate_target(target, class_name: str) -> Optional[_MatchOutcome]:
+    """Fail-closed guard against unusable targets.
+
+    Returns None if `target` is usable (matcher should proceed to
+    compute signals). Returns a fail-closed _MatchOutcome if the
+    target has NULL coords — happens in production when triangulation
+    failed (S27 from the canonical scenarios doc).
+
+    Per the canonical contract (Step 5 inspection), TargetSpec.lat
+    and TargetSpec.lng can legitimately be None when triangulation
+    failed for an offer. WAI must never crash on this; it must
+    produce a fail-closed outcome that PLAN can reason about.
+
+    Empty target.named_roads is NOT a validation failure — that's
+    valid for poi-class targets. Class-specific signal computation
+    handles missing road names gracefully (returns 0.0 for breadcrumb
+    and on_target_road signals).
+    """
+    if target.lat is None or target.lng is None:
+        return _MatchOutcome(
+            matched=False,
+            confidence=0.0,
+            corrected_lat=None,
+            corrected_lng=None,
+            reason=f"{class_name} skipped: NULL target coords",
+            pudo_type=None,
+            target_address=getattr(target, "address", None),
+            signals=None,
+        )
+    return None

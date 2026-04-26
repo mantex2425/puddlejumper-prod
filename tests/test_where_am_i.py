@@ -382,3 +382,185 @@ class TestForumPark7623SanityCheck:
             f"Forum Park 7623 confidence {confidence:.3f} should be >= 0.70 "
             f"(STRONG_MATCH_CONFIDENCE). Signals: {signals}"
         )
+
+
+# =============================================================================
+# Step 5.3 plumbing tests — _MatchOutcome, _weighted_confidence,
+# _render_reason, _validate_target
+# =============================================================================
+
+from where_am_i import (
+    _MatchOutcome,
+    _weighted_confidence,
+    _render_reason,
+    _validate_target,
+)
+from pudo_types import TargetSpec
+import dataclasses
+
+
+# =============================================================================
+# TestMatchOutcome - 3 tests
+# =============================================================================
+
+class TestMatchOutcome:
+    def test_construction_with_all_fields(self):
+        outcome = _MatchOutcome(
+            matched=True,
+            confidence=0.78,
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            reason="intersection conf=0.78 [...]",
+            pudo_type="pickup",
+            target_address="Joan St & Settemont Rd",
+            signals={"proximity": 0.18, "breadcrumb_match": 1.0},
+        )
+        assert outcome.matched is True
+        assert outcome.confidence == 0.78
+        assert outcome.signals["breadcrumb_match"] == 1.0
+
+    def test_construction_with_minimal_fields(self):
+        # All fields are non-default (consistent with WhereAmIResult style),
+        # so "minimal" means populating optionals with None.
+        outcome = _MatchOutcome(
+            matched=False,
+            confidence=0.0,
+            corrected_lat=None,
+            corrected_lng=None,
+            reason="not matched",
+            pudo_type=None,
+            target_address=None,
+            signals=None,
+        )
+        assert outcome.matched is False
+        assert outcome.signals is None
+
+    def test_frozen(self):
+        # Dataclass should be immutable post-construction
+        outcome = _MatchOutcome(
+            matched=True, confidence=0.5,
+            corrected_lat=None, corrected_lng=None,
+            reason="test", pudo_type=None,
+            target_address=None, signals=None,
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            outcome.matched = False  # type: ignore
+
+
+# =============================================================================
+# TestWeightedConfidence - 4 tests
+# =============================================================================
+
+class TestWeightedConfidence:
+    def test_simple_sum(self):
+        # All signals 1.0, weights sum to 1.0, expect 1.0
+        signals = {"a": 1.0, "b": 1.0, "c": 1.0}
+        weights = {"a": 0.5, "b": 0.3, "c": 0.2}
+        assert _weighted_confidence(signals, weights) == pytest.approx(1.0)
+
+    def test_zero_signals(self):
+        # All signals 0.0 -> weighted sum is 0.0
+        signals = {"a": 0.0, "b": 0.0, "c": 0.0}
+        weights = {"a": 0.5, "b": 0.3, "c": 0.2}
+        assert _weighted_confidence(signals, weights) == 0.0
+
+    def test_partial_signals(self):
+        # Mixed signals: 1.0*0.5 + 0.5*0.3 + 0.0*0.2 = 0.65
+        signals = {"a": 1.0, "b": 0.5, "c": 0.0}
+        weights = {"a": 0.5, "b": 0.3, "c": 0.2}
+        assert _weighted_confidence(signals, weights) == pytest.approx(0.65)
+
+    def test_missing_signal_raises_keyerror(self):
+        # Defensive: missing signal key should raise loudly, not silently
+        # substitute 0.0. A matcher that forgets to compute a signal is a
+        # bug, not a tunable parameter.
+        signals = {"a": 1.0}  # missing "b"
+        weights = {"a": 0.5, "b": 0.5}
+        with pytest.raises(KeyError):
+            _weighted_confidence(signals, weights)
+
+
+# =============================================================================
+# TestRenderReason - 3 tests
+# =============================================================================
+
+class TestRenderReason:
+    def test_basic_format(self):
+        signals = {"a": 0.5, "b": 0.3}
+        result = _render_reason("intersection", signals, 0.42)
+        # Must contain class name, conf token, and signal values
+        assert result.startswith("intersection conf=0.42 [")
+        assert result.endswith("]")
+        assert "a=0.50" in result
+        assert "b=0.30" in result
+
+    def test_signals_sorted_descending(self):
+        # Dominant signal must appear first (Gemini Step 3 ruling)
+        signals = {
+            "low": 0.0,
+            "high": 1.0,
+            "mid": 0.5,
+        }
+        result = _render_reason("test", signals, 0.5)
+        # Find positions of each signal in the output
+        high_pos = result.index("high=")
+        mid_pos = result.index("mid=")
+        low_pos = result.index("low=")
+        # high should come before mid, mid before low
+        assert high_pos < mid_pos < low_pos
+
+    def test_zero_signals(self):
+        # 0.00 values should still be listed with 2-decimal precision
+        signals = {"all_zero": 0.0}
+        result = _render_reason("poi", signals, 0.0)
+        assert "all_zero=0.00" in result
+        assert "conf=0.00" in result
+
+
+# =============================================================================
+# TestValidateTarget - 4 tests
+# =============================================================================
+
+# Target factory for validation tests — a TargetSpec with address attribute.
+# Real TargetSpec doesn't have `address`; this test uses a SimpleNamespace-style
+# object with the fields _validate_target reads.
+
+class _FakeTarget:
+    """Test fixture mimicking TargetSpec's surface as _validate_target sees it."""
+    def __init__(self, lat, lng, address=""):
+        self.lat = lat
+        self.lng = lng
+        self.address = address
+
+
+class TestValidateTarget:
+    def test_valid_target_returns_none(self):
+        # Valid lat/lng → matcher should proceed (returns None to signal "go")
+        target = _FakeTarget(29.6246, -95.5102, "Joan St & Settemont Rd")
+        assert _validate_target(target, "intersection") is None
+
+    def test_null_lat_returns_failclosed(self):
+        # NULL lat from triangulation failure → fail-closed outcome
+        target = _FakeTarget(None, -95.5102, "Bad geocode")
+        result = _validate_target(target, "single_road")
+        assert result is not None
+        assert result.matched is False
+        assert result.confidence == 0.0
+        assert "single_road skipped: NULL target coords" in result.reason
+        assert result.target_address == "Bad geocode"
+
+    def test_null_lng_returns_failclosed(self):
+        # NULL lng → same fail-closed pattern
+        target = _FakeTarget(29.6246, None, "Bad geocode 2")
+        result = _validate_target(target, "intersection")
+        assert result is not None
+        assert result.matched is False
+        assert "intersection skipped" in result.reason
+
+    def test_both_null_returns_failclosed(self):
+        # Both None → fail-closed (same as either alone)
+        target = _FakeTarget(None, None, "Total fail")
+        result = _validate_target(target, "apartment_complex")
+        assert result is not None
+        assert result.matched is False
+        assert result.signals is None  # no signals computed for fail-closed
