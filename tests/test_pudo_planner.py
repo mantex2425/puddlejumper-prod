@@ -1529,3 +1529,122 @@ class TestStateStore:
         assert set(store.keys()) == {"driver_A", "driver_B"}
         assert store["driver_A"].heartbeat_count == 3
         assert store["driver_B"].heartbeat_count == 1
+
+
+# ============================================================================
+# Step 5.7 - Contract introspection (3 tests)
+# ============================================================================
+#
+# Pure introspection: no dispatch, no consume() calls. Tests assert
+# structural properties of the PlannerDecision contract itself.
+#
+# Phase E Step 5 closes here. Floor: 250.
+
+import typing
+
+
+# Expected set of action Literal values, mirroring the contract in
+# pudo_types.PlannerDecision.action. Defining it once at module scope
+# makes the two coverage tests below symmetric: one walks the type
+# system, the other walks the builders, both must produce this set.
+_EXPECTED_ACTIONS = frozenset({
+    "noop",
+    "arm_candidate",
+    "cancel_candidate",
+    "fire_pickup",
+    "fire_dropoff",
+    "fire_retroactive",
+    "fire_stacked_swap",
+    "fire_stacked_revert",
+    "cache_ghost",
+    "reconcile_missed_pickup",
+    "reconcile_missed_dropoff",
+})
+
+
+class TestContractIntrospection:
+    def test_action_literal_has_eleven_values(self):
+        # Walk the type system: the action Literal must contain exactly
+        # the 11 expected strings. typing.get_args extracts the Literal's
+        # arguments at runtime.
+        action_field_type = PlannerDecision.__annotations__["action"]
+        actual = frozenset(typing.get_args(action_field_type))
+        assert actual == _EXPECTED_ACTIONS, (
+            f"PlannerDecision.action Literal has {len(actual)} values, "
+            f"expected 11. Diff:\n"
+            f"  unexpected: {actual - _EXPECTED_ACTIONS}\n"
+            f"  missing:    {_EXPECTED_ACTIONS - actual}"
+        )
+
+    def test_all_eleven_builders_emit_distinct_action_literal_values(self):
+        # Walk the builders: each of the 11 builders, called with
+        # minimal-valid arguments, emits an action that's in the Literal.
+        # The set of emitted actions must equal the Literal's args -
+        # no builder emits something outside the contract, no Literal
+        # value is unreachable from a builder.
+        emitted = {
+            _build_noop("sentinel").action,
+            _build_arm_candidate(
+                offer_id="o", pudo_type="pickup",
+                heartbeat_count=1, reason="r",
+            ).action,
+            _build_cancel_candidate("r").action,
+            _build_fire_pickup(
+                offer_id="o", corrected_lat=29.6, corrected_lng=-95.5,
+                target_state="IN_TRIP", reason="r",
+            ).action,
+            _build_fire_dropoff(
+                offer_id="o", corrected_lat=29.6, corrected_lng=-95.5,
+                target_state="UNCOMMITTED", reason="r",
+            ).action,
+            _build_fire_retroactive(
+                offer_id="o", pudo_type="pickup",
+                corrected_lat=29.6, corrected_lng=-95.5,
+                target_state="IN_TRIP", reason="r",
+            ).action,
+            _build_fire_stacked_swap(
+                primary_offer_id="p", secondary_offer_id="s",
+                corrected_lat=29.6, corrected_lng=-95.5, reason="r",
+            ).action,
+            _build_fire_stacked_revert(
+                primary_offer_id="p", secondary_offer_id="s",
+                corrected_lat=29.6, corrected_lng=-95.5, reason="r",
+            ).action,
+            _build_cache_ghost(
+                cluster_lat=29.6, cluster_lng=-95.5, cluster=None,
+                state_at_time="UNCOMMITTED", confidence=0.0, reason="r",
+            ).action,
+            _build_reconcile_missed_pickup(
+                offer_id="o", target_state="UNCOMMITTED",
+                suspected_pudo_id=None, reason="r",
+            ).action,
+            _build_reconcile_missed_dropoff(
+                offer_id="o", target_state="ENROUTE",
+                suspected_pudo_id=None, reason="r",
+            ).action,
+        }
+        # Set of emitted actions must equal the Literal contract.
+        assert emitted == _EXPECTED_ACTIONS, (
+            f"Builders emit {len(emitted)} distinct actions, expected 11.\n"
+            f"  emitted but not in Literal: {emitted - _EXPECTED_ACTIONS}\n"
+            f"  in Literal but not emitted: {_EXPECTED_ACTIONS - emitted}"
+        )
+
+    def test_planner_decision_is_frozen(self):
+        # PlannerDecision must be a frozen dataclass. Mutation raises
+        # FrozenInstanceError. Distinct from the 5.4 builder-frozen test
+        # which used _build_noop as a sentinel - this one constructs
+        # the dataclass directly to test the property in isolation from
+        # any builder.
+        decision = PlannerDecision(
+            action="noop",
+            offer_id=None,
+            target_state=None,
+            corrected_lat=None,
+            corrected_lng=None,
+            ghost_insert_payload=None,
+            reconciliation_payload=None,
+            reason="frozen-check sentinel",
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            decision.action = "fire_pickup"  # type: ignore
