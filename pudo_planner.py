@@ -96,6 +96,242 @@ class _DriverTemporalState:
     last_seen_status: str        # last WAI status that touched this candidate
     last_seen_at: datetime
 
+    # Forensic trajectory: the last N WAI observations that touched this
+    # candidate, oldest-first. Capped at OBSERVATION_WINDOW (=3, matching
+    # N_HEARTBEATS_TO_FIRE so a fire decision logs its full triggering
+    # sequence). Default empty tuple means "no observations yet" — used
+    # at construction time before _advance_armed_state populates it.
+    recent_observations: tuple = ()
+
+
+# ============================================================================
+# _LastWAIObservation — forensic snapshot of one heartbeat's WAI verdict
+# ============================================================================
+
+@dataclass(frozen=True)
+class _LastWAIObservation:
+    """A lightweight snapshot of one WAI observation, stored on
+    _DriverTemporalState.recent_observations for forensic trajectories.
+
+    Frozen so we can safely store these in tuples without aliasing
+    surprises. The full WhereAmIResult is intentionally NOT stored —
+    it's a 14-field dataclass containing Cluster, signals, etc.
+    Storing a tuple of those per-driver costs kilobytes; this snapshot
+    is ~40 bytes, captures what forensics actually need: the verdict,
+    the confidence, the offer matched (if any), and where the driver
+    was at the time.
+
+    Per canonical rule "Distance over Geocode", corrected_lat/lng are
+    the ground-truth physical location at observation time and are the
+    most diagnostically valuable fields for shadow-mode replay.
+    """
+    status: str                       # WAI status: at_current_pudo, etc.
+    confidence: float                 # WAI confidence score
+    offer_id: Optional[str]           # Which offer matched (None if not)
+    corrected_lat: Optional[float]    # Cluster median lat at observation
+    corrected_lng: Optional[float]    # Cluster median lng at observation
+    observed_at: datetime             # When this heartbeat happened
+
+
+# Window size for _DriverTemporalState.recent_observations. Chosen to
+# match N_HEARTBEATS_TO_FIRE so a fire decision's log includes the
+# complete triggering sequence.
+OBSERVATION_WINDOW: int = 3
+
+
+# ============================================================================
+# Section A — temporal pattern detection (pure functions)
+# ============================================================================
+
+def _make_observation(
+    wai_result: WhereAmIResult,
+    *,
+    now: datetime,
+) -> _LastWAIObservation:
+    """Project a WhereAmIResult into a forensic snapshot.
+
+    Pure function. No side effects. Used by _advance_armed_state to
+    record the trajectory.
+    """
+    return _LastWAIObservation(
+        status=wai_result.status,
+        confidence=wai_result.confidence,
+        offer_id=wai_result.offer_id,
+        corrected_lat=wai_result.corrected_lat,
+        corrected_lng=wai_result.corrected_lng,
+        observed_at=now,
+    )
+
+
+def _is_stable_match(
+    state: _DriverTemporalState,
+    current_wai: WhereAmIResult,
+    *,
+    n_required: int,
+) -> bool:
+    """True when the armed candidate has been reaffirmed enough heartbeats.
+
+    "Reaffirmed" means: WAI's current status is at_current_pudo with the
+    same offer_id and the same pudo_type as what's armed, AND the
+    heartbeat count has reached n_required.
+
+    The actual count is updated by _advance_armed_state (which calls this
+    helper after incrementing). _is_stable_match itself only inspects
+    state.heartbeat_count — it does NOT mutate.
+    """
+    if current_wai.status != "at_current_pudo":
+        return False
+    if current_wai.offer_id != state.armed_offer_id:
+        return False
+    if current_wai.pudo_type != state.armed_pudo_type:
+        return False
+    return state.heartbeat_count >= n_required
+
+
+def _is_brief_disappearance(
+    state: _DriverTemporalState,
+    current_wai: WhereAmIResult,
+    *,
+    now: datetime,
+) -> bool:
+    """True when WAI flipped to not_at_pudo but the gap is short.
+
+    The "traffic light" pattern: driver was at_current_pudo, the cluster
+    momentarily dispersed (rolled forward at a stoplight, brief sensor
+    drift), but the disappearance is shorter than CANDIDATE_STALE_SECONDS.
+    PLAN keeps the candidate armed across the gap rather than treating
+    it as a cancellation.
+    """
+    if current_wai.status == "at_current_pudo":
+        return False
+    gap_seconds = (now - state.last_seen_at).total_seconds()
+    return gap_seconds < CANDIDATE_STALE_SECONDS
+
+
+def _is_long_stop_then_departure(
+    state: _DriverTemporalState,
+    current_wai: WhereAmIResult,
+    *,
+    now: datetime,
+) -> bool:
+    """True when a long-stopped armed candidate has now departed.
+
+    The "implicit fire" pattern: driver stopped at a PUDO long enough to
+    plausibly complete the action, but PLAN didn't fire (perhaps because
+    confidence stayed below STRONG_MATCH_CONFIDENCE the whole time, or
+    because we're below n_required). Now WAI reports the driver moving
+    AND the gap from last_seen_at is >= CANDIDATE_STALE_SECONDS. The
+    window for a real-time fire has closed; PLAN may still want to
+    reconcile retroactively (e.g., emit fire_retroactive).
+    """
+    if current_wai.status == "at_current_pudo":
+        return False
+    if state.heartbeat_count < 1:
+        return False
+    gap_seconds = (now - state.last_seen_at).total_seconds()
+    return gap_seconds >= CANDIDATE_STALE_SECONDS
+
+
+def _advance_armed_state(
+    state: Optional[_DriverTemporalState],
+    current_wai: WhereAmIResult,
+    *,
+    now: datetime,
+) -> Optional[_DriverTemporalState]:
+    """Compute the next _DriverTemporalState given the current observation.
+
+    The state machine for the armed candidate, expressed as a pure
+    function:
+      - If current WAI is at_current_pudo and matches armed offer/type:
+        increment heartbeat_count, append observation, advance last_seen_at.
+      - If current WAI is at_current_pudo but for a DIFFERENT offer/type:
+        re-arm fresh on the new candidate (clear count, start observation
+        trajectory anew).
+      - If current WAI is at_current_pudo and state was None: arm fresh.
+      - If current WAI is not at_current_pudo and the gap is brief: keep
+        the armed state but append the dissenting observation (so forensics
+        can see the dip).
+      - If current WAI is not at_current_pudo and the gap is long: clear
+        (return None). The candidate is dead.
+
+    No side effects. Caller is responsible for calling
+    self._set_temporal_state(driver_id, returned_state) (or
+    _clear_temporal_state if None is returned).
+    """
+    obs = _make_observation(current_wai, now=now)
+
+    # Case 1: state was None, current WAI is at_current_pudo -> arm fresh.
+    if state is None:
+        if current_wai.status != "at_current_pudo":
+            return None
+        if current_wai.offer_id is None or current_wai.pudo_type is None:
+            return None
+        return _DriverTemporalState(
+            armed_at=now,
+            armed_offer_id=current_wai.offer_id,
+            armed_pudo_type=current_wai.pudo_type,
+            heartbeat_count=1,
+            last_seen_status=current_wai.status,
+            last_seen_at=now,
+            recent_observations=(obs,),
+        )
+
+    # Case 2: state existed, but current WAI matches a DIFFERENT offer/type.
+    # Re-arm fresh on the new candidate.
+    if (
+        current_wai.status == "at_current_pudo"
+        and current_wai.offer_id is not None
+        and current_wai.pudo_type is not None
+        and (
+            current_wai.offer_id != state.armed_offer_id
+            or current_wai.pudo_type != state.armed_pudo_type
+        )
+    ):
+        return _DriverTemporalState(
+            armed_at=now,
+            armed_offer_id=current_wai.offer_id,
+            armed_pudo_type=current_wai.pudo_type,
+            heartbeat_count=1,
+            last_seen_status=current_wai.status,
+            last_seen_at=now,
+            recent_observations=(obs,),
+        )
+
+    # Case 3: state existed, current WAI matches armed candidate -> reaffirm.
+    if (
+        current_wai.status == "at_current_pudo"
+        and current_wai.offer_id == state.armed_offer_id
+        and current_wai.pudo_type == state.armed_pudo_type
+    ):
+        new_obs = (state.recent_observations + (obs,))[-OBSERVATION_WINDOW:]
+        return _DriverTemporalState(
+            armed_at=state.armed_at,
+            armed_offer_id=state.armed_offer_id,
+            armed_pudo_type=state.armed_pudo_type,
+            heartbeat_count=state.heartbeat_count + 1,
+            last_seen_status=current_wai.status,
+            last_seen_at=now,
+            recent_observations=new_obs,
+        )
+
+    # Case 4: state existed, WAI now reports something else (not_at_pudo,
+    # at_unknown_pudo, etc.). Decide based on gap.
+    if _is_brief_disappearance(state, current_wai, now=now):
+        # Keep the armed state but record the dissent.
+        new_obs = (state.recent_observations + (obs,))[-OBSERVATION_WINDOW:]
+        return _DriverTemporalState(
+            armed_at=state.armed_at,
+            armed_offer_id=state.armed_offer_id,
+            armed_pudo_type=state.armed_pudo_type,
+            heartbeat_count=state.heartbeat_count,
+            last_seen_status=current_wai.status,
+            last_seen_at=state.last_seen_at,  # don't advance — gap is the gap
+            recent_observations=new_obs,
+        )
+
+    # Case 5: long gap or otherwise clearly dead -> clear.
+    return None
+
 
 # ============================================================================
 # PudoPlanner — the orchestrator
