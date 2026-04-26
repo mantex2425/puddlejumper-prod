@@ -334,6 +334,318 @@ def _advance_armed_state(
 
 
 # ============================================================================
+# Section C — decision builders (one factory per action)
+# ============================================================================
+#
+# Each builder is pure: takes its required inputs and returns a frozen
+# PlannerDecision. Builders do NOT decide whether to fire — that's
+# Section D's job (consume() dispatch in Step 3.4). They just package
+# decisions with the right fields populated for EXECUTE to act on.
+#
+# All builders return the same shape: a PlannerDecision with all 9
+# fields set explicitly (no defaults), even if a field is None for
+# this action. This keeps the contract honest — readers can see at a
+# glance what each action carries.
+
+
+def _build_noop(reason: str) -> PlannerDecision:
+    """Nothing to do this heartbeat."""
+    return PlannerDecision(
+        action="noop",
+        offer_id=None,
+        target_state=None,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_arm_candidate(
+    *,
+    offer_id: str,
+    pudo_type: str,
+    heartbeat_count: int,
+    reason: str,
+) -> PlannerDecision:
+    """Section A returned a fresh or incrementing armed state.
+
+    Phase F may use this to update a UI indicator ("we think we're at the
+    pickup, gathering confidence"). EXECUTE does not write the DB on this
+    action — there is no state transition yet.
+    """
+    return PlannerDecision(
+        action="arm_candidate",
+        offer_id=offer_id,
+        target_state=None,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=f"{reason} (heartbeat {heartbeat_count}, type={pudo_type})",
+    )
+
+
+def _build_cancel_candidate(reason: str) -> PlannerDecision:
+    """An armed candidate is being abandoned (long miss or scope change).
+
+    Phase F may use this to clear any "candidate detected" UI. EXECUTE
+    does not write the DB on this action.
+    """
+    return PlannerDecision(
+        action="cancel_candidate",
+        offer_id=None,
+        target_state=None,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_fire_pickup(
+    *,
+    offer_id: str,
+    corrected_lat: Optional[float],
+    corrected_lng: Optional[float],
+    target_state: str,
+    reason: str,
+) -> PlannerDecision:
+    """Stable match on a pickup target. EXECUTE will call sm_transition
+    to the supplied target_state and record the pickup using
+    corrected_lat/lng.
+    """
+    return PlannerDecision(
+        action="fire_pickup",
+        offer_id=offer_id,
+        target_state=target_state,
+        corrected_lat=corrected_lat,
+        corrected_lng=corrected_lng,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_fire_dropoff(
+    *,
+    offer_id: str,
+    corrected_lat: Optional[float],
+    corrected_lng: Optional[float],
+    target_state: str,
+    reason: str,
+) -> PlannerDecision:
+    """Stable match on a dropoff target. Mirrors _build_fire_pickup."""
+    return PlannerDecision(
+        action="fire_dropoff",
+        offer_id=offer_id,
+        target_state=target_state,
+        corrected_lat=corrected_lat,
+        corrected_lng=corrected_lng,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_fire_retroactive(
+    *,
+    offer_id: str,
+    pudo_type: str,
+    corrected_lat: Optional[float],
+    corrected_lng: Optional[float],
+    target_state: str,
+    reason: str,
+) -> PlannerDecision:
+    """Driver stopped long enough to plausibly complete a PUDO but PLAN
+    didn't fire in real time, and the driver has now departed.
+    EXECUTE fires the missed PUDO retroactively using corrected_lat/lng
+    from the trajectory.
+    """
+    return PlannerDecision(
+        action="fire_retroactive",
+        offer_id=offer_id,
+        target_state=target_state,
+        corrected_lat=corrected_lat,
+        corrected_lng=corrected_lng,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=f"{reason} (retroactive {pudo_type})",
+    )
+
+
+def _build_fire_stacked_swap(
+    *,
+    primary_offer_id: str,
+    secondary_offer_id: str,
+    corrected_lat: Optional[float],
+    corrected_lng: Optional[float],
+    reason: str,
+) -> PlannerDecision:
+    """B-11 / S32: WAI matched the secondary's pickup while state machine
+    thinks primary is alive. Close primary (mark missed dropoff or
+    appropriate audit), promote secondary as current_offer_id, transition
+    to the secondary's pickup state.
+
+    Step 4 implements the detection logic that calls this builder.
+    EXECUTE handles the atomic swap via sm_transition.
+    """
+    return PlannerDecision(
+        action="fire_stacked_swap",
+        offer_id=secondary_offer_id,
+        target_state="IN_TRIP",  # post-swap, secondary's pickup just landed
+        corrected_lat=corrected_lat,
+        corrected_lng=corrected_lng,
+        ghost_insert_payload=None,
+        reconciliation_payload={
+            "swap_kind": "primary_to_secondary",
+            "primary_offer_id": primary_offer_id,
+            "secondary_offer_id": secondary_offer_id,
+        },
+        reason=reason,
+    )
+
+
+def _build_fire_stacked_revert(
+    *,
+    primary_offer_id: str,
+    secondary_offer_id: str,
+    corrected_lat: Optional[float],
+    corrected_lng: Optional[float],
+    reason: str,
+) -> PlannerDecision:
+    """S35: Uber re-awarded primary while state machine thinks secondary
+    is alive. Close secondary (it was never actually awarded), restore
+    primary as current_offer_id, revert state to ENROUTE on primary's
+    pickup.
+
+    Symmetric inverse of _build_fire_stacked_swap.
+    """
+    return PlannerDecision(
+        action="fire_stacked_revert",
+        offer_id=primary_offer_id,
+        target_state="ENROUTE",  # post-revert, driving to primary's pickup
+        corrected_lat=corrected_lat,
+        corrected_lng=corrected_lng,
+        ghost_insert_payload=None,
+        reconciliation_payload={
+            "swap_kind": "secondary_to_primary",
+            "primary_offer_id": primary_offer_id,
+            "secondary_offer_id": secondary_offer_id,
+        },
+        reason=reason,
+    )
+
+
+def _build_cache_ghost(
+    *,
+    cluster_lat: float,
+    cluster_lng: float,
+    cluster,
+    state_at_time: str,
+    confidence: float,
+    reason: str,
+) -> PlannerDecision:
+    """WAI returned at_unknown_pudo: a real cluster but no offer explains
+    it. EXECUTE inserts a row in app_private.suspected_pudos using
+    ghost_insert_payload — PLAN does NOT touch the DB (per R2 ruling).
+
+    cluster is the underlying Cluster object from WAI. Phase F passes
+    this through; EXECUTE projects it into the row's geometry / spread /
+    duration columns.
+    """
+    return PlannerDecision(
+        action="cache_ghost",
+        offer_id=None,
+        target_state=None,
+        corrected_lat=cluster_lat,
+        corrected_lng=cluster_lng,
+        ghost_insert_payload={
+            "lat": cluster_lat,
+            "lng": cluster_lng,
+            "cluster_spread_m": cluster.spread_m if cluster is not None else None,
+            "cluster_duration_s": cluster.duration_s if cluster is not None else None,
+            "state_at_time": state_at_time,
+            "confidence": confidence,
+        },
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_reconcile_missed_pickup(
+    *,
+    offer_id: str,
+    target_state: str,
+    suspected_pudo_id: Optional[int],
+    reason: str,
+) -> PlannerDecision:
+    """S33 (Calhoun): dropoff fired successfully but actual_pickup_at is
+    NULL and an unresolved suspected_pudo from earlier in this offer's
+    lifecycle exists. EXECUTE corrects offer_history honestly per R1
+    (state-correction over coordinate-synthesis):
+      - actual_pickup_lat/lng remain NULL
+      - pickup_missed = true
+      - suspected_pudo row resolved as 'inferred_pickup_no_retroactive_nail'
+
+    NO coordinates are passed to EXECUTE. This is intentional — R1
+    forbids synthesizing a pickup point from inference. The audit trail
+    stays honest: 'ride completed, pickup unobserved'.
+    """
+    return PlannerDecision(
+        action="reconcile_missed_pickup",
+        offer_id=offer_id,
+        target_state=target_state,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload={
+            "missed_pudo_type": "pickup",
+            "offer_id": offer_id,
+            "suspected_pudo_id": suspected_pudo_id,
+            "offer_history_updates": {
+                "pickup_missed": True,
+                "pickup_inference_source": "dropoff_completed",
+            },
+        },
+        reason=reason,
+    )
+
+
+def _build_reconcile_missed_dropoff(
+    *,
+    offer_id: str,
+    target_state: str,
+    suspected_pudo_id: Optional[int],
+    reason: str,
+) -> PlannerDecision:
+    """Symmetric to _build_reconcile_missed_pickup for the missed-dropoff
+    case (next-ride pickup fires successfully on a ride whose dropoff
+    was never observed). Same R1 policy — no coordinate synthesis.
+    """
+    return PlannerDecision(
+        action="reconcile_missed_dropoff",
+        offer_id=offer_id,
+        target_state=target_state,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload={
+            "missed_pudo_type": "dropoff",
+            "offer_id": offer_id,
+            "suspected_pudo_id": suspected_pudo_id,
+            "offer_history_updates": {
+                "dropoff_missed": True,
+                "dropoff_inference_source": "next_pickup_completed",
+            },
+        },
+        reason=reason,
+    )
+
+
+# ============================================================================
 # PudoPlanner — the orchestrator
 # ============================================================================
 
