@@ -1,4 +1,0 @@
- time | fare | trip_miles | pickup_miles | trip_minutes | pickup_minutes | mode | verdict | reason | hourly | dpm | trace_data 
-------+------+------------+--------------+--------------+----------------+------+---------+--------+--------+-----+------------
-(0 rows)
-
