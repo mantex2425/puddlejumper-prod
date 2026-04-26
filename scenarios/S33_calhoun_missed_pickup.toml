@@ -1,0 +1,63 @@
+id = "S33"
+description = """
+Missed-pickup reconciliation (the "Calhoun" case). Uber provides a pickup
+address that geocodes to the wrong location (rider error, Uber address-
+database staleness, or rider-app typo). Driver navigates per Uber's nav,
+which routes to the actual physical pickup somewhere else (e.g. MLK
+instead of Calhoun). Driver picks up the rider at the correct physical
+location. WAI reports at_unknown_pudo at that location because the
+cluster doesn't match the geocoded pickup target. PLAN caches a
+suspected_pudo. Pickup never auto-fires.
+
+Driver completes the ride. WAI reports at_current_pudo for the dropoff
+with strong confidence. PLAN fires dropoff successfully via sm_transition.
+
+At dropoff-fire time, PLAN detects the contradiction: this offer's
+actual_pickup_at is NULL, but the dropoff just succeeded. An unresolved
+suspected_pudo from earlier in the same offer's lifecycle exists. Ground
+truth: the pickup happened, we just didn't auto-confirm it. The Uber-
+provided pickup address was wrong from the start.
+
+Resolution policy (R1, ratified 2026-04-26): correct the state machine,
+do NOT retroactively synthesize a pickup at the cluster point. Update
+offer_history with pickup_missed=true, leave actual_pickup_lat/lng NULL,
+mark the suspected_pudo resolved as 'inferred_pickup_no_retroactive_nail'.
+The audit trail stays honest: 'ride completed, pickup unobserved' is the
+truthful label.
+
+Distinct from S32: S32 is contradiction-at-the-moment (WAI matches
+secondary's pickup while state machine claims primary is active). S33 is
+contradiction-after-the-fact (dropoff fired successfully but pickup was
+never observed within the same offer's lifecycle).
+"""
+status = "AWAITING_PHASE_E"
+notes = """
+Phase E PLAN consumer owns the post-dropoff-fire reconciliation scan.
+Triggered when 'fire_dropoff' (or 'fire_pickup' on a NEXT offer)
+succeeds AND offer_history.actual_pickup_at IS NULL on the same offer
+AND an unresolved suspected_pudo exists for the same offer_id within
+the lifecycle window.
+
+Forensic fixture deferred per S32 precedent. Andrew's production Calhoun
+incident pre-dates the heartbeat-capture infrastructure. Synthetic
+generator may be the only path to a fixture, since reproducing requires
+an Uber address-database error we don't control.
+
+The corresponding 'reconcile_missed_dropoff' action in PlannerDecision
+handles the symmetric case (next-ride pickup fires successfully on a
+ride whose dropoff was never confirmed) and would be covered by a
+future S34 if a production case justifies one.
+"""
+
+[start]
+state = "IN_TRIP"
+
+[trigger]
+event = "fire_dropoff_with_unobserved_pickup"
+verdict = "RECONCILE_MISSED_PICKUP"
+
+[expected]
+state = "UNCOMMITTED"
+potential_cancellation = false
+anchor_coord = "dropoff cluster median"
+offer_status = "completed_pickup_missed"
