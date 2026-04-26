@@ -41,7 +41,7 @@
 HEAD:                49ea6c8 (Phase E Step 5.7 — Contract introspection. Step 5 closes.)
 Branch:              patch-00566a-unified-refinement (clean working tree, in lockstep with origin)
 Tests pytest:        250/250 passing
-Tests integration:   Live count TBD via Step 6 sub-step 0 (legacy 22/61 figure used a counting convention that included gaps; live ID count is 47)
+Tests integration:   22/61 passing (39 failing) per sub-step 0.1 baseline run 2026-04-26
 Live-PG smoke:       4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
 pudo_planner.py:     1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
 test_pudo_planner.py: 1650 lines, 68 tests across 6 sub-step blocks
@@ -284,9 +284,10 @@ Three deliverables in one session:
 
 1. **Baseline run.** `bash tests/test_integration.sh 2>&1 | tee
    /tmp/integration_baseline.txt`. Count `❌ FAIL` and `✅ PASS` lines.
-   Record actual live count. The legacy 22/61 figure used a counting
-   convention that included gaps and commented-out IDs; live ID count
-   is 47.
+   Record actual live count. The 22/61 figure is canonical; my Step 4 forensic read of the
+   source file undercounted IDs at 47. Sub-step 0.1 baseline run
+   2026-04-26 verified the live count is 22 passing / 39 failing
+   / 61 total.
 2. **Group E inventory.** Close the long-standing TODO in
    `tests/TEST_SUITE_STATUS.md` by categorizing all T01-T42 failures
    into Groups A-D (or new groups as needed).
@@ -386,7 +387,7 @@ implements the dispatch path that emits `reconcile_missed_pickup` and
 
 ### Sub-step 6a — Legacy triage classification (decision)
 
-Per-ID classification of all 47 live IDs in `tests/test_integration.sh`
+Per-ID classification of all 61 live IDs in `tests/test_integration.sh`
 against the sub-step 0 baseline. Output: a new section in
 `tests/TEST_SUITE_STATUS.md` with the per-ID classification table.
 
@@ -534,6 +535,14 @@ No "borrowed" coordinates from prior test runs without declared
 provenance. The provenance check is a verification gate at sub-step
 authoring time.
 
+### L-6 corollary — Forensic count provenance (NEW, Phase E Step 6 sub-step 0.1)
+
+**Parent lesson:** L-6 (Inspect production artifacts before authoring assertions) lives in PHASE_D_RETRO.md. This corollary extends L-6 to cover forensic counts asserted in design documents.
+
+**Observation:** Step 4-era forensic read of `tests/test_integration.sh` undercounted live test IDs at 47. The 47 figure was asserted in PHASE_E_PROGRESS.md and PHASE_E_STEP_6_DESIGN.md, both ratified by Gemini 2026-04-26. Sub-step 0.1's live baseline run revealed the true count is 61 (matching the long-standing 22/61 figure that had been catalogued as "stale" in the design but was actually canonical). The design documents asserted the wrong count for ~12 hours.
+
+**Protocol change:** Forensic counts asserted in design documents must be sourced from a live run or a binary-locked tool, not from a pattern-grepped read of source text. Pattern-grepping a 850-line shell script for ID strings produced a 23% undercount; the live run produced the truth in 57 seconds. For any count claim in a ratified design document: run the canonical script that produces the count, paste the output verbatim, cite the run timestamp.
+
 ### L-10 — Gate threshold provenance traceability (NEW, Phase E Step 6 design)
 
 **Observation:** Step 6 design discussion surfaced a proposed 60-second
@@ -631,7 +640,7 @@ mechanism for surgical edits regardless of size.
 > Step 6 is the integration bridge — synthetic-heartbeat tests for the
 > Five Pillars (T70-T74), the Round-trip block (T75-T79), STACKED-via-WAI
 > (T80-T89), and the legacy REPLACE/RETIRE/PRESERVE/CASCADE/
-> PRESERVE-ASSERTION triage of all 47 live IDs in
+> PRESERVE-ASSERTION triage of all 61 live IDs in
 > `tests/test_integration.sh`. Step 6 spans 2-3 sessions.
 >
 > Please read in order:

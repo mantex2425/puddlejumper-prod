@@ -36,7 +36,7 @@ the paired-programming protocol that has carried Phase E through 18 commits.
    - **T90-T99:** Reconcile reservation (placeholders only; dispatch is Step 7)
    - **Two safety tests:** Double-fire safety + T79 single-cluster guard
 
-3. **Legacy triage** of all 47 live IDs in `tests/test_integration.sh`
+3. **Legacy triage** of all 61 live IDs in `tests/test_integration.sh`
    per the REPLACE/RETIRE/PRESERVE/CASCADE/PRESERVE-ASSERTION rubric.
 
 4. **One micro-commit** (UTC anchor patch on T16/T30/T38) BEFORE Step 6
@@ -180,7 +180,7 @@ finding is recorded in sub-step 0's commit body.
 
 **Verification gates (sub-step 0):**
 - Baseline run completes (live ❌/✅ counts recorded)
-- Group E inventory captured (47 - already-categorized = new
+- Group E inventory captured (61 - already-categorized = new
   classifications)
 - `where_am_i.py` finding documented in commit body with file:line
   references
@@ -403,7 +403,7 @@ reservation is a one-line stub in `tests/test_planner_integration.py`:
 
 ### Sub-step 6a — Legacy triage classification (Session 3)
 
-Per-ID classification of all 47 live IDs in `tests/test_integration.sh`
+Per-ID classification of all 61 live IDs in `tests/test_integration.sh`
 against the sub-step 0 baseline. Output: a new section in
 `tests/TEST_SUITE_STATUS.md` with the per-ID classification table.
 
@@ -440,7 +440,7 @@ artifacts of a state-machine bug, not specifications. Future maintainers
 reading `git log` will see the rationale.
 
 **Verification gates (sub-step 6a):**
-- All 47 IDs classified
+- All 61 IDs classified
 - TEST_SUITE_STATUS.md updated with the full per-ID table
 - **No deletions in this commit** — triage decision only
 - L-9 check: RETIRE rationale recorded for T44-T49 in TEST_SUITE_STATUS.md
