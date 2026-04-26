@@ -295,6 +295,7 @@ class PlannerDecision:
         "fire_dropoff",
         "fire_retroactive",
         "fire_stacked_swap",
+        "fire_stacked_revert",
         "cache_ghost",
         "reconcile_missed_pickup",
         "reconcile_missed_dropoff",
