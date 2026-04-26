@@ -1,0 +1,43 @@
+id = "S32"
+description = """
+Implicit STACKED cancellation. Driver accepts offer A, arrives at A's pickup
+(state -> IN_TRIP). A's address turns out to be wrong (rider entered the
+incorrect address); driver cancels A in the Uber app. PuddleJumper has no
+signal of this cancellation - Uber's app does not push it to us. Then offer
+B arrives. Per current STACKED logic, the new offer transitions state to
+STACKED with A as primary (dropoff slot) and B's pickup as the next move.
+Driver arrives at B's pickup. Cluster fires. Ground truth: A is dead, B is
+the active offer - but our state machine still believes A is in progress.
+
+The implicit-cancel signal is the WAI match pattern: in STACKED state, WAI
+returns at_current_pudo with target_address matching the SECONDARY's pickup
+(not the primary's dropoff). This contradicts what the state machine claims
+is happening. PLAN must detect this and drive sm_transition to close A and
+promote B from queued to active.
+"""
+status = "AWAITING_PHASE_E"
+notes = """
+Phase D / WAI v1.0 reports the truth without disambiguation. WAI's max()-based
+STACKED handling already returns the correct best-target outcome - the
+B.pickup match wins because it has higher confidence than A.dropoff. Phase E
+PLAN consumer owns the contradiction-detection logic and the sm_transition
+that closes A.
+
+Forensic fixture deferred until Phase E is under construction (Phase D has no
+heartbeat data for this scenario; capturing one requires a real driver session
+or a synthetic generator). This file documents the scenario so it survives
+into the Phase E planning conversation.
+"""
+
+[start]
+state = "STACKED"
+
+[trigger]
+event = "wai_match_secondary_pickup"
+verdict = "IMPLICIT_PRIMARY_CANCEL"
+
+[expected]
+state = "ENROUTE"
+potential_cancellation = true
+anchor_coord = "secondary_offer_pickup"
+offer_status = "primary_implicitly_cancelled"
