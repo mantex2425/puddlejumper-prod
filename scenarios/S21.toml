@@ -1,0 +1,17 @@
+id = """S21"""
+description = """Driver taps Nail It but no active offer in state machine — misfire"""
+status = """PASS"""
+notes = """404 returned — state IN guard (ENROUTE/IN_TRIP/STACKED) prevents match — no state change"""
+
+[start]
+state = """UNCOMMITTED"""
+
+[trigger]
+event = """pickup_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """—"""

@@ -1,0 +1,17 @@
+id = """S23"""
+description = """Dropoff Nail It fires while STACKED — Android transitions to ENROUTE and re-arms Auto Nail It toward stacked offer pickup"""
+status = """PENDING"""
+notes = """Android must reset cumulativeMiles=0 and swap cached stacked offer coords into active target on STACKED→ENROUTE response — server state correct via buffer swap — heartbeat propagates odometer reset within 5 seconds — no new endpoint needed"""
+
+[start]
+state = """STACKED"""
+
+[trigger]
+event = """dropoff_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Dropoff of stacked (now primary) offer"""
+offer_status = """completed (primary)"""

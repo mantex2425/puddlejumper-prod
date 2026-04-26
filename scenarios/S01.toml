@@ -1,0 +1,17 @@
+id = """S01"""
+description = """Start of shift - app turned on at home"""
+status = """PASS"""
+notes = """Baseline state"""
+
+[start]
+state = """UNCOMMITTED"""
+
+[trigger]
+event = """none"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """—"""

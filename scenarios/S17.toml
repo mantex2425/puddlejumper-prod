@@ -1,0 +1,17 @@
+id = """S17"""
+description = """GPS arrives at primary dropoff while STACKED — pivot to secondary"""
+status = """PASS"""
+notes = """Buffer swap via GPS — same as S09 but triggered by GPS not Nail It"""
+
+[start]
+state = """STACKED"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Dropoff of secondary (now primary) ride"""
+offer_status = """—"""

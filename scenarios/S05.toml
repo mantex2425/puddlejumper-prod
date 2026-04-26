@@ -1,0 +1,17 @@
+id = """S05"""
+description = """STACKED + gps_convergence at pickup — CANNOT HAPPEN"""
+status = """N/A"""
+notes = """Uber only presents stack offers near dropoff of active IN_TRIP — ENROUTE cannot reach STACKED"""
+
+[start]
+state = """INVALID"""
+
+[trigger]
+event = """—"""
+verdict = """—"""
+
+[expected]
+state = """INVALID"""
+potential_cancellation = false
+anchor_coord = """—"""
+offer_status = """—"""

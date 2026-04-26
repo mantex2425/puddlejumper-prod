@@ -1,0 +1,17 @@
+id = """S12"""
+description = """GPS arrives at unexpected pickup — primary cancelled driver at secondary pickup"""
+status = """PASS"""
+notes = """Primary cancelled mid-trip — secondary promoted — includes no-show scenario"""
+
+[start]
+state = """IN_TRIP or STACKED"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of secondary (now primary) ride"""
+offer_status = """pending"""

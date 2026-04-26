@@ -1,0 +1,17 @@
+id = """S28"""
+description = """Driver declines a stacked offer while IN_TRIP — primary ride still active"""
+status = """PASS"""
+notes = """Critical fix — DECLINE while IN_TRIP previously reset to UNCOMMITTED incorrectly — now stays IN_TRIP — primary ride unaffected — valid_state_transitions updated to remove IN_TRIP+offer_declined transition"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """offer_declined"""
+verdict = """DECLINE"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of primary offer"""
+offer_status = """pending"""

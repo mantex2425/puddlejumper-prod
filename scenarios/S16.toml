@@ -1,0 +1,17 @@
+id = """S16"""
+description = """New offer arrives while ENROUTE — implicit cancellation — any verdict"""
+status = """PASS"""
+notes = """S04 extended — covers both ACCEPT and DECLINE verdicts on new offer — fires before decision engine SQL"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """offer_accepted or offer_declined"""
+verdict = """ACCEPT or DECLINE"""
+
+[expected]
+state = """UNCOMMITTED then ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Driver GPS then new dropoff"""
+offer_status = """cancelled (old) / pending (new)"""

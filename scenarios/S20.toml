@@ -1,0 +1,17 @@
+id = """S20"""
+description = """Manual Nail It after Auto Nail It already fired — driver provides more accurate GPS"""
+status = """PASS"""
+notes = """Manual overrides auto with better GPS — updates actual_pickup_lat/lng and triangulation_error_m — no state re-transition — matched via current_offer_id not offer_status"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """pickup_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of active offer"""
+offer_status = """completed (coords updated)"""

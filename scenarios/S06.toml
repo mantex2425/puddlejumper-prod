@@ -1,0 +1,17 @@
+id = """S06"""
+description = """Third offer arrives while STACKED — one ride cancelled unknown which"""
+status = """PASS"""
+notes = """Stay STACKED — raise potential_cancellation — resolution at next pickup or dropoff"""
+
+[start]
+state = """STACKED"""
+
+[trigger]
+event = """offer_declined"""
+verdict = """DECLINE"""
+
+[expected]
+state = """STACKED"""
+potential_cancellation = true
+anchor_coord = """Dropoff of second offer"""
+offer_status = """pending"""

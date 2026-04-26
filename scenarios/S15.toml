@@ -1,0 +1,17 @@
+id = """S15"""
+description = """Driver arrives at dropoff via GPS without tapping Nail It"""
+status = """PASS"""
+notes = """GPS convergence at dropoff — valid transition without manual Nail It"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """—"""

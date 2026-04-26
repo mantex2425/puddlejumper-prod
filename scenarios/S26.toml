@@ -1,0 +1,17 @@
+id = """S26"""
+description = """Same offer arrives twice — network retry or double-tap"""
+status = """PASS"""
+notes = """Duplicate detected via proximity check (dist < 0.1mi) — second update silently ignored — state stays ENROUTE"""
+
+[start]
+state = """UNCOMMITTED or ENROUTE"""
+
+[trigger]
+event = """offer_accepted"""
+verdict = """ACCEPT"""
+
+[expected]
+state = """ENROUTE unchanged"""
+potential_cancellation = false
+anchor_coord = """Dropoff of original offer"""
+offer_status = """pending"""

@@ -1,0 +1,17 @@
+id = """S13"""
+description = """Driver long-holds reset button"""
+status = """PASS"""
+notes = """Clears all state and resets odometer"""
+
+[start]
+state = """ANY"""
+
+[trigger]
+event = """manual_reset"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

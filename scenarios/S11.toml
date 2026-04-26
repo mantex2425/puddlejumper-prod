@@ -1,0 +1,17 @@
+id = """S11"""
+description = """System declined but driver manually accepted — GPS arrives at declined offer pickup"""
+status = """PASS"""
+notes = """_find_nearby_recent_offer scan promotes declined offer to primary IN_TRIP"""
+
+[start]
+state = """UNCOMMITTED"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of override offer"""
+offer_status = """pending"""

@@ -1,0 +1,17 @@
+id = """S08"""
+description = """Nail It dropoff on solo ride"""
+status = """PASS"""
+notes = """No stacked ride - return to free"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """dropoff_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """completed"""

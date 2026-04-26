@@ -1,0 +1,17 @@
+id = """S19"""
+description = """Rider cancels while ENROUTE — next offer arrival triggers S04 — or GPS convergence at a nearby offer pickup triggers S11"""
+status = """PASS"""
+notes = """Resolves automatically — no explicit cancel signal from Uber needed"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

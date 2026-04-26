@@ -1,0 +1,17 @@
+id = """S04"""
+description = """New offer arrives while ENROUTE — matched offer was cancelled"""
+status = """PASS"""
+notes = """Uber never sends offers while ENROUTE unless primary ride cancelled — fires BEFORE decision engine SQL — works even when geocode hallucinated"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """offer_cancelled_implicit"""
+verdict = """DECLINE or ACCEPT"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

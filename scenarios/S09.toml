@@ -1,0 +1,17 @@
+id = """S09"""
+description = """Nail It dropoff with stacked secondary ride"""
+status = """PASS"""
+notes = """Buffer swap - secondary becomes primary - arc center pivots to secondary dropoff"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """dropoff_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Dropoff of secondary (now primary) ride"""
+offer_status = """completed (primary) / pending (secondary)"""

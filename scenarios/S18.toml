@@ -1,0 +1,17 @@
+id = """S18"""
+description = """Match offer won by another driver — Uber goes silent — ENROUTE for 15+ minutes"""
+status = """PASS"""
+notes = """15-minute ENROUTE-specific watchdog in AutoNailItManager — shorter than 90min IN_TRIP watchdog"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """watchdog_auto_reset"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

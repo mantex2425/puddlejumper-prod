@@ -1,0 +1,17 @@
+id = """S14"""
+description = """Watchdog fires after 90 minutes stuck in active state"""
+status = """PASS"""
+notes = """Auto-recovery for stuck states - logged to driver_trip_state_log"""
+
+[start]
+state = """IN_TRIP or STACKED"""
+
+[trigger]
+event = """watchdog_auto_reset"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

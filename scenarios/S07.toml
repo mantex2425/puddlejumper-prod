@@ -1,0 +1,17 @@
+id = """S07"""
+description = """Nail It at pickup of second ride while potential_cancellation=TRUE"""
+status = """PASS"""
+notes = """Second ride confirmed alive - first was cancelled - flag cleared"""
+
+[start]
+state = """STACKED"""
+
+[trigger]
+event = """pickup_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of second (now primary) ride"""
+offer_status = """pending"""

@@ -1,0 +1,17 @@
+id = """S02"""
+description = """Regular offer arrives and system declines"""
+status = """PASS"""
+notes = """State unchanged - offer logged as declined"""
+
+[start]
+state = """UNCOMMITTED"""
+
+[trigger]
+event = """offer_declined"""
+verdict = """DECLINE"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """declined"""

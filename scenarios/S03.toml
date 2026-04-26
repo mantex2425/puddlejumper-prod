@@ -1,0 +1,17 @@
+id = """S03"""
+description = """New regular offer arrives and system accepts"""
+status = """PASS"""
+notes = """UNCOMMITTED → ENROUTE"""
+
+[start]
+state = """UNCOMMITTED"""
+
+[trigger]
+event = """offer_accepted"""
+verdict = """ACCEPT"""
+
+[expected]
+state = """ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Dropoff of accepted offer"""
+offer_status = """pending"""

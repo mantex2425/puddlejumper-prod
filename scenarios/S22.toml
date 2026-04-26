@@ -1,0 +1,17 @@
+id = """S22"""
+description = """State reset fires — verify driver_trip_state_log entry created with correct from_state"""
+status = """PASS"""
+notes = """Previously reset_state() never logged to driver_trip_state_log and hardcoded from_state as 'IN_TRIP or STACKED' in Discord. Now captures actual from_state before reset — covers both manual_reset (driver long-hold) and watchdog_auto_reset (90min stuck)"""
+
+[start]
+state = """ANY"""
+
+[trigger]
+event = """manual_reset or watchdog_auto_reset"""
+verdict = """—"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

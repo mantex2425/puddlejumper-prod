@@ -1,0 +1,17 @@
+id = """S27"""
+description = """GPS arrives at pickup while pickup_lat is NULL — triangulation failed"""
+status = """PASS"""
+notes = """GPS convergence cannot fire without stored pickup coords — this is correct behavior — Nail It (S24) or S04 implicit cancel are the only resolution paths — 15min ENROUTE watchdog (S18) as final backstop"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """gps_convergence"""
+verdict = """—"""
+
+[expected]
+state = """ENROUTE"""
+potential_cancellation = false
+anchor_coord = """Dropoff of active offer"""
+offer_status = """pending"""

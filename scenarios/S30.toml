@@ -1,0 +1,17 @@
+id = """S30"""
+description = """Driver moves > 1.2km from pickup at speed"""
+status = """PENDING"""
+notes = """Safety valve — resets stuck ENROUTE if trajectory diverges"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """gps_divergence"""
+verdict = """ABORT"""
+
+[expected]
+state = """UNCOMMITTED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS"""
+offer_status = """cancelled"""

@@ -1,0 +1,24 @@
+id = """S31"""
+description = """Driver stops at intersection-class PUDO (Settemont Rd) @ 205m. BMOAR 200m proximity gate fails. WAI reports at_current_pudo via weighted confidence: breadcrumb_match=1.0 (Settemont in trail), cluster_duration=1.0 (30s stop), proximity=0.18 (205/250m), on_target_road=1.0. Confidence >= 0.7 triggers PLAN INITIAL_NAIL."""
+status = """PASS"""
+notes = """Phase D north star — Forum Park 7623 forensic replay fixture"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """gps_convergence_wai"""
+verdict = """INITIAL_NAIL"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of active offer"""
+offer_status = """pending"""
+
+[fixture]
+heartbeats = "tests/fixtures/7623_heartbeats.json"
+expected_status = "at_current_pudo"
+expected_pudo_type = "pickup"
+expected_confidence_min = 0.7
+expected_signals_minimum = { breadcrumb_match = 1.0, on_target_road = 1.0 }

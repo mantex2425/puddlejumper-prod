@@ -17,3 +17,4 @@ __pycache__/
 # Accidental shell output / scratch files
 audit.txt
 locationtests
+scenarios_raw.tsv

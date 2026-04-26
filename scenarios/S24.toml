@@ -1,0 +1,17 @@
+id = """S24"""
+description = """Manual Nail It fires while ENROUTE with NULL pickup coords — triangulation failed"""
+status = """PASS"""
+notes = """confirm_pickup_arrival uses actual GPS coords from Nail It tap — NULL pickup_lat not a blocker — transitions correctly to IN_TRIP"""
+
+[start]
+state = """ENROUTE"""
+
+[trigger]
+event = """pickup_confirmed"""
+verdict = """—"""
+
+[expected]
+state = """IN_TRIP"""
+potential_cancellation = false
+anchor_coord = """Dropoff of active offer"""
+offer_status = """completed"""

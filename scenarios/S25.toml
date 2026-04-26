@@ -1,0 +1,17 @@
+id = """S25"""
+description = """Driver accepts stacked offer while primary ride has NULL dropoff coords — triangulation failed for primary"""
+status = """PASS"""
+notes = """STACKED state correctly set — dropoff_lat preserved as NULL — arc center falls back to driver GPS — acceptable degradation — stacked offer search still works"""
+
+[start]
+state = """IN_TRIP"""
+
+[trigger]
+event = """offer_accepted"""
+verdict = """ACCEPT"""
+
+[expected]
+state = """STACKED"""
+potential_cancellation = false
+anchor_coord = """Driver GPS (fallback — no dropoff coords to use as arc center)"""
+offer_status = """pending"""
