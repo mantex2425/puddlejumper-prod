@@ -23,6 +23,8 @@ import re
 import logging
 from typing import Optional
 from cluster_detection import detect_cluster, Cluster
+from address_utils import canonicalize_address
+from pivot_context import get_pivot_context, _road_names_match
 
 # Google geocode fallback — reuse existing triangulation primitives rather
 # than reinvent. These already handle API timeout (2s), caching, and logging.
@@ -234,44 +236,6 @@ def classify_address(text: str) -> dict:
 # PRIMITIVE 2 — snap_to_intersection
 # ============================================================================
 
-# Cache-key canonicalization: map all spelled-out road suffixes to their
-# abbreviated forms so "4th Street" and "4th St" hit the same cache entry.
-# Ordered longest-first so "Boulevard" matches before "Blvd".
-_SUFFIX_CANONICAL = [
-    (r"\bstreet\b",    "st"),
-    (r"\bavenue\b",    "ave"),
-    (r"\bboulevard\b", "blvd"),
-    (r"\bdrive\b",     "dr"),
-    (r"\broad\b",      "rd"),
-    (r"\blane\b",      "ln"),
-    (r"\bcourt\b",     "ct"),
-    (r"\bplace\b",     "pl"),
-    (r"\bparkway\b",   "pkwy"),
-    (r"\bfreeway\b",   "fwy"),
-    (r"\bhighway\b",   "hwy"),
-    (r"\btrail\b",     "trl"),
-    (r"\bcircle\b",    "cir"),
-    (r"\bterrace\b",   "ter"),
-    (r"\btrace\b",     "trce"),
-    (r"\bcrossing\b",  "xing"),
-    (r"\bpoint\b",     "pt"),
-]
-
-
-def _canonicalize_address(addr: str) -> str:
-    """Normalize an address for cache keying.
-
-    Lowercases, collapses whitespace, and abbreviates spelled-out road
-    suffixes. "4th Street & Orchard Street, Missouri City" and
-    "4th St & Orchard St, Missouri City" produce identical canonical forms.
-    """
-    s = addr.lower().strip()
-    s = re.sub(r"\s+", " ", s)
-    for pattern, repl in _SUFFIX_CANONICAL:
-        s = re.sub(pattern, repl, s)
-    return s
-
-
 def _google_intersection_fallback(road_a: str, road_b: str, city: str,
                                  cur) -> Optional[dict]:
     """When houston_ways doesn't have the intersection, try Google geocoding.
@@ -284,7 +248,7 @@ def _google_intersection_fallback(road_a: str, road_b: str, city: str,
     full_address = f"{road_a} & {road_b}"
     if city:
         full_address = f"{full_address}, {city}, Texas"
-    canonical_key = _canonicalize_address(full_address)
+    canonical_key = canonicalize_address(full_address)
 
     import time
     # 1. Cache lookup (fast path — no API call)
@@ -506,223 +470,6 @@ def odometer_miles_since(driver_id: str, since_time, cur,
 
 
 # ============================================================================
-# PRIMITIVE 5 — get_pivot_context
-# ============================================================================
-
-
-def _build_breadcrumb(rows, min_dwell_sec: float = 10.0,
-                      max_age_sec: float = 300.0,
-                      max_segments: int = 4) -> list:
-    """Aggregate DESC-ordered heartbeat rows into named-road segments.
-
-    Args:
-        rows: heartbeat rows ordered DESC, each with .logged_at and .road_name
-        min_dwell_sec: skip segments where entered_at and exited_at differ by
-                       less than this (filters out brief intersection crossings)
-        max_age_sec: skip segments where exited_at is older than this from the
-                     most recent heartbeat (rolling window)
-        max_segments: cap return list at this many most-recent segments
-
-    Returns:
-        List of {road_name, dwell_seconds, entered_at, exited_at}, most
-        recent first. Empty list if rows empty or no qualifying segments.
-
-    Used by compute_target gate 2 to support the "re-route to other side"
-    edge case: driver arrives at PUDO, passenger redirects, driver takes
-    a different access road back. The CORRECT named road (matching the
-    offer's single_road address) is not the most recent, but is within
-    the recent breadcrumb trail.
-    """
-    if not rows:
-        return []
-
-    # Rows arrive DESC (most recent first). Walk through them, grouping
-    # consecutive same-name rows into segments. None entries (off-wire)
-    # break segments.
-    segments = []  # each: {road_name, exited_at, entered_at}
-    current_seg = None
-    for row in rows:
-        name = row.get("road_name")
-        ts = row.get("logged_at")
-        if name is None:
-            # off-wire — close any open segment
-            if current_seg is not None:
-                segments.append(current_seg)
-                current_seg = None
-            continue
-        if current_seg is None:
-            # start a new segment (this is the most recent row on this road)
-            current_seg = {
-                "road_name": name,
-                "exited_at": ts,
-                "entered_at": ts,
-            }
-        elif current_seg["road_name"] == name:
-            # extend — push entered_at earlier
-            current_seg["entered_at"] = ts
-        else:
-            # different named road — close current, start new
-            segments.append(current_seg)
-            current_seg = {
-                "road_name": name,
-                "exited_at": ts,
-                "entered_at": ts,
-            }
-    if current_seg is not None:
-        segments.append(current_seg)
-
-    if not segments:
-        return []
-
-    # Compute dwell + age; filter
-    most_recent_ts = rows[0].get("logged_at")
-    result = []
-    for seg in segments:
-        dwell = (seg["exited_at"] - seg["entered_at"]).total_seconds()
-        age   = (most_recent_ts - seg["exited_at"]).total_seconds()
-        if dwell < min_dwell_sec:
-            continue
-        if age > max_age_sec:
-            continue
-        result.append({
-            "road_name": seg["road_name"],
-            "dwell_seconds": dwell,
-            "entered_at": seg["entered_at"],
-            "exited_at": seg["exited_at"],
-        })
-        if len(result) >= max_segments:
-            break
-    return result
-
-
-def get_pivot_context(driver_id: str, cur,
-                      anchor_time=None) -> dict:
-    """Determine whether driver is on-wire, and the last named road touched.
-
-    Implements the "Blind Man's hand" tracking. Looks back through heartbeat
-    history (bounded by anchor_time to the current ride only) to find:
-
-      - Whether the most recent heartbeat is on a named road (on_wire)
-      - The name of that current road, if any
-      - The name of the last named road the driver was on (could be current)
-      - The time the driver pivoted off the last named road (None if still on it)
-
-    Returns: {on_wire: bool, current_road: str|None,
-              last_named_road: str|None, pivot_time: timestamp|None}
-
-    anchor_time bounds the lookback to the current ride (e.g., the IN_TRIP
-    transition). Without it, we could pick up the last named road from a
-    prior ride. Required for correctness across stacked rides.
-    """
-    if not driver_id:
-        return {"on_wire": False, "current_road": None,
-                "last_named_road": None, "pivot_time": None,
-                "breadcrumb": []}
-
-    try:
-        # Query: most recent N heartbeats in this ride, with each one's snap.
-        # We do the snap inline as a LATERAL join so we get road_name per tick.
-        anchor_clause = ""
-        params = [driver_id]
-        if anchor_time is not None:
-            anchor_clause = "AND hb.logged_at >= %s::timestamptz"
-            params.append(anchor_time)
-        params_tuple = tuple(params)
-
-        cur.execute(f"""
-            WITH recent AS (
-                SELECT
-                    hb.logged_at,
-                    hb.lat,
-                    hb.lng
-                FROM app_private.heartbeat_log hb
-                WHERE hb.driver_id = %s
-                  {anchor_clause}
-                ORDER BY hb.logged_at DESC
-                LIMIT 60
-            ),
-            snapped AS (
-                SELECT
-                    r.logged_at,
-                    r.lat, r.lng,
-                    (
-                        SELECT hw.name
-                        FROM routing.houston_ways hw
-                        WHERE hw.name IS NOT NULL
-                          AND hw.length_m < 20000
-                          AND ST_DWithin(
-                            hw.the_geom::geography,
-                            app_private.coords_to_point(r.lat, r.lng)::geography,
-                            40
-                          )
-                        ORDER BY hw.the_geom <-> app_private.coords_to_point(r.lat, r.lng)
-                        LIMIT 1
-                    ) AS road_name
-                FROM recent r
-            )
-            SELECT logged_at, road_name FROM snapped
-            ORDER BY logged_at DESC;
-        """, params_tuple)
-        rows = cur.fetchall()
-
-        if not rows:
-            return {"on_wire": False, "current_road": None,
-                    "last_named_road": None, "pivot_time": None,
-                    "breadcrumb": []}
-
-        # Most recent heartbeat
-        current = rows[0]
-        on_wire = current["road_name"] is not None
-        current_road = current["road_name"]
-
-        # Build breadcrumb of recent named-road segments (for re-route cases
-        # where the relevant road is not the most recent named road — e.g.,
-        # driver arrives, passenger redirects to "other side", driver takes a
-        # different access road back to the lot).
-        #
-        # rules: segments must have dwell >= 10s AND be within last 5min,
-        # and we keep at most 4 most recent.
-        breadcrumb = _build_breadcrumb(rows, min_dwell_sec=10.0,
-                                        max_age_sec=300.0, max_segments=4)
-
-        if on_wire:
-            # Still on a named road — pivot hasn't happened
-            return {
-                "on_wire": True,
-                "current_road": current_road,
-                "last_named_road": current_road,
-                "pivot_time": None,
-                "breadcrumb": breadcrumb,
-            }
-
-        # Off-wire — walk backwards to find the last named road and when we left it
-        last_named_road = None
-        pivot_time = None
-        for i, row in enumerate(rows):
-            if row["road_name"] is not None:
-                last_named_road = row["road_name"]
-                # pivot_time = time of the LATER heartbeat (just after leaving)
-                if i > 0:
-                    pivot_time = rows[i - 1]["logged_at"]
-                else:
-                    pivot_time = row["logged_at"]
-                break
-
-        return {
-            "on_wire": False,
-            "current_road": None,
-            "last_named_road": last_named_road,
-            "pivot_time": pivot_time,
-            "breadcrumb": breadcrumb,
-        }
-    except Exception as e:
-        logging.warning(f"[BEAD] get_pivot_context failed: {e}")
-        return {"on_wire": False, "current_road": None,
-                "last_named_road": None, "pivot_time": None,
-                "breadcrumb": []}
-
-
-# ============================================================================
 # PRIMITIVE 7 — compute_target (the orchestrator)
 # ============================================================================
 
@@ -732,22 +479,6 @@ def get_pivot_context(driver_id: str, cur,
 # the reported trip_miles, and we should still fire when the cluster forms
 # near the target road.
 _BLIND_MAN_TORT_MIN = 0.9
-
-
-def _road_names_match(snapped_name: str, address_road: str) -> bool:
-    """Fuzzy match between an OSM road name and a YOLO'd address road name.
-
-    Both get lowercased and abbreviation-normalized via _canonicalize_address.
-    Match if either contains the other (to absorb OSM adding directional or
-    county qualifiers that Uber's text doesn't include, and vice versa).
-    """
-    if not snapped_name or not address_road:
-        return False
-    s = _canonicalize_address(snapped_name).strip()
-    a = _canonicalize_address(address_road).strip()
-    if not s or not a:
-        return False
-    return s in a or a in s
 
 
 def compute_target(

@@ -1365,8 +1365,8 @@ def check_convergence(driver_id, current_lat, current_lng,
         # Both fire at cluster median (never current position).
         # ════════════════════════════════════════════════════════════════
         try:
-            from bead_on_wire import detect_cluster as _detect_cluster_b
-            from bead_on_wire import get_pivot_context as _get_pivot_context_b
+            from cluster_detection import detect_cluster as _detect_cluster_b
+            from pivot_context import get_pivot_context as _get_pivot_context_b
 
             _b_offer_id = state_row.get('current_offer_id')
             _b_pickup_miles = None
@@ -1523,8 +1523,8 @@ def check_convergence(driver_id, current_lat, current_lng,
         # proximity + cluster + gate 1 all pass.
         # ════════════════════════════════════════════════════════════════
         try:
-            from bead_on_wire import detect_cluster as _detect_cluster_d
-            from bead_on_wire import get_pivot_context as _get_pivot_context_d
+            from cluster_detection import detect_cluster as _detect_cluster_d
+            from pivot_context import get_pivot_context as _get_pivot_context_d
 
             _d_offer_id = state_row.get('current_offer_id')
             _d_trip_miles = None

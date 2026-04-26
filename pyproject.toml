@@ -1,0 +1,9 @@
+# Minimum config so pytest discovers the project root for imports.
+# Without this, tests/ files that `from cluster_detection import ...`
+# fail with ModuleNotFoundError unless invoked with PYTHONPATH=.
+#
+# Added 2026-04-25 during Phase D.0 baseline capture, after discovering
+# that the documented "21/21 pass" only held with the env-var ritual.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
