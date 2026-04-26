@@ -700,10 +700,71 @@ class PudoPlanner:
         *,
         driver_state_snapshot: DriverStateSnapshot,
     ) -> PlannerDecision:
-        """Per-heartbeat decision call.
+        """Per-heartbeat decision call. THE PUBLIC ENTRY POINT.
 
-        Step 3.1 stub: returns 'noop' for every input. Steps 3.2-3.4
-        replace this with the real dispatch logic.
+        Six-step dispatch (Gemini-ratified ordering, 2026-04-26):
+
+          1. Always: advance temporal state via _advance_armed_state and
+             persist to _state_store. This step happens before any
+             decision is made — the trajectory must be recorded even on
+             noop heartbeats so forensic logs show the sequence.
+
+          2. If wai_result.status == 'at_unknown_pudo': short-circuit
+             to _build_cache_ghost. A cluster with no offer explanation
+             is its own track and never interacts with armed candidates.
+
+          3. STACKED disambiguation (Step 4 / Section B placeholder):
+             _attempt_stacked_disambiguation returns None in Step 3.4.
+             When Step 4 lands, it implements the coordinate-only proximity
+             check that distinguishes S32 (fire_stacked_swap) from S35
+             (fire_stacked_revert) and returns the appropriate
+             PlannerDecision. Until then this is a no-op.
+
+          4. Long-stop-then-departure: if next_state was just cleared
+             (the candidate "died" because of a long miss) AND the
+             previous state existed AND _is_long_stop_then_departure
+             returns True, build fire_retroactive using prev_state's
+             trajectory. CRITICAL: Step 4 (this step in the dispatch,
+             not Phase E Step 4) MUST come before Step 5 because
+             prev_state is needed; if we evaluated stable-match first,
+             the fall-through in Step 6 would emit cancel_candidate and
+             we'd lose the retroactive-fire opportunity.
+
+          5. Stable match: if next_state is non-None and _is_stable_match
+             returns True at N_HEARTBEATS_TO_FIRE, dispatch to
+             _build_fire_pickup or _build_fire_dropoff based on
+             armed_pudo_type. target_state is determined by the type:
+             pickup -> 'IN_TRIP', dropoff -> 'UNCOMMITTED'.
+
+          6. Fall-through:
+             - next_state cleared but prev_state existed -> cancel_candidate
+             - next_state armed/incrementing but not stable -> arm_candidate
+             - both None -> noop
+
+        KNOWN GAPS (Step 4 Section B closes these):
+
+          - S32 implicit STACKED cancel: when WAI matches the secondary's
+            pickup while state machine claims primary is alive, this
+            dispatch will fire a normal fire_pickup for the secondary.
+            That's wrong for S32 — the primary should be closed first
+            via fire_stacked_swap. Step 4 inserts the contradiction
+            detection into Step 3 above.
+
+          - S35 Uber stacked re-award: the symmetric inverse of S32.
+            Same problem: this dispatch fires a normal fire_pickup
+            instead of fire_stacked_revert.
+
+          - S34 hot swap: this dispatch handles it correctly within a
+            single heartbeat *if* Phase F's heartbeat loop calls WAI a
+            second time after a state transition (post-fire re-evaluation).
+            Without that double-tap, the secondary pickup is missed.
+            Phase F backlog item B-13.
+
+        LOGGING: this method does NOT emit logs. The 'reason' field on
+        the returned PlannerDecision is populated meaningfully on every
+        non-noop decision; Phase F's heartbeat loop wraps consume() in
+        its existing structured-logging pipeline. Keeping consume() pure
+        (no I/O) is per Gemini's R2 ratification.
 
         Args:
           driver_id: identifies the driver whose temporal state to read/write.
@@ -713,16 +774,170 @@ class PudoPlanner:
         Returns:
           A PlannerDecision the heartbeat loop hands to EXECUTE.
         """
-        return PlannerDecision(
-            action="noop",
-            offer_id=None,
-            target_state=None,
-            corrected_lat=None,
-            corrected_lng=None,
-            ghost_insert_payload=None,
-            reconciliation_payload=None,
-            reason="step_3_1_skeleton_stub",
+        now = self._now_fn()
+        prev_state = self._get_temporal_state(driver_id)
+
+        # Step 1: advance temporal state (always)
+        next_state = _advance_armed_state(prev_state, wai_result, now=now)
+        if next_state is None:
+            self._clear_temporal_state(driver_id)
+        else:
+            self._set_temporal_state(driver_id, next_state)
+
+        # Hand off to pure decision logic. _decide takes everything as
+        # arguments — no state-store reads inside. Makes _decide
+        # independently unit-testable.
+        return self._decide(
+            wai_result=wai_result,
+            snapshot=driver_state_snapshot,
+            prev_state=prev_state,
+            next_state=next_state,
+            now=now,
         )
+
+    def _decide(
+        self,
+        *,
+        wai_result: WhereAmIResult,
+        snapshot: DriverStateSnapshot,
+        prev_state: Optional[_DriverTemporalState],
+        next_state: Optional[_DriverTemporalState],
+        now: datetime,
+    ) -> PlannerDecision:
+        """Pure dispatch — no state-store side effects.
+
+        Implements steps 2-6 of the consume() dispatch. Caller (consume)
+        is responsible for steps 1 (advancing temporal state) and for
+        persisting next_state.
+        """
+        # Step 2: at_unknown_pudo -> cache_ghost (short-circuit)
+        if wai_result.status == "at_unknown_pudo":
+            if (
+                wai_result.corrected_lat is not None
+                and wai_result.corrected_lng is not None
+            ):
+                return _build_cache_ghost(
+                    cluster_lat=wai_result.corrected_lat,
+                    cluster_lng=wai_result.corrected_lng,
+                    cluster=wai_result.cluster,
+                    state_at_time=snapshot.state,
+                    confidence=wai_result.confidence,
+                    reason=f"at_unknown_pudo conf={wai_result.confidence:.2f}",
+                )
+            # at_unknown_pudo without coords is malformed; fall through to noop.
+            return _build_noop(
+                "at_unknown_pudo without corrected coords (malformed WAI result)"
+            )
+
+        # Step 3: STACKED disambiguation (Section B / Step 4 placeholder)
+        stacked_decision = self._attempt_stacked_disambiguation(
+            wai_result=wai_result,
+            snapshot=snapshot,
+        )
+        if stacked_decision is not None:
+            return stacked_decision
+
+        # Step 4: long-stop-then-departure -> fire_retroactive
+        # This MUST come before Step 5 because prev_state is needed and
+        # next_state is None by definition in this case.
+        if (
+            next_state is None
+            and prev_state is not None
+            and _is_long_stop_then_departure(prev_state, wai_result, now=now)
+        ):
+            # Use the most recent observation in prev_state's trajectory
+            # for corrected coords. Per R1, retroactive fires DO use
+            # observed coords (this is not coordinate synthesis — these
+            # are coordinates WAI actually reported during the stop).
+            obs = (
+                prev_state.recent_observations[-1]
+                if prev_state.recent_observations
+                else None
+            )
+            target_state = (
+                "IN_TRIP" if prev_state.armed_pudo_type == "pickup"
+                else "UNCOMMITTED"
+            )
+            return _build_fire_retroactive(
+                offer_id=prev_state.armed_offer_id,
+                pudo_type=prev_state.armed_pudo_type,
+                corrected_lat=obs.corrected_lat if obs else None,
+                corrected_lng=obs.corrected_lng if obs else None,
+                target_state=target_state,
+                reason=(
+                    f"long stop then departure: armed for "
+                    f"{prev_state.heartbeat_count}hb, gap exceeded "
+                    f"{CANDIDATE_STALE_SECONDS}s"
+                ),
+            )
+
+        # Step 5: stable match -> fire_pickup / fire_dropoff
+        if (
+            next_state is not None
+            and _is_stable_match(
+                next_state, wai_result, n_required=N_HEARTBEATS_TO_FIRE
+            )
+        ):
+            reason = (
+                f"stable match {N_HEARTBEATS_TO_FIRE}hb conf="
+                f"{wai_result.confidence:.2f}"
+            )
+            if next_state.armed_pudo_type == "pickup":
+                return _build_fire_pickup(
+                    offer_id=next_state.armed_offer_id,
+                    corrected_lat=wai_result.corrected_lat,
+                    corrected_lng=wai_result.corrected_lng,
+                    target_state="IN_TRIP",
+                    reason=reason,
+                )
+            else:
+                return _build_fire_dropoff(
+                    offer_id=next_state.armed_offer_id,
+                    corrected_lat=wai_result.corrected_lat,
+                    corrected_lng=wai_result.corrected_lng,
+                    target_state="UNCOMMITTED",
+                    reason=reason,
+                )
+
+        # Step 6: fall-through
+        if next_state is None and prev_state is not None:
+            return _build_cancel_candidate(
+                f"candidate cleared (was armed for "
+                f"{prev_state.heartbeat_count}hb on "
+                f"{prev_state.armed_offer_id}/{prev_state.armed_pudo_type})"
+            )
+
+        if next_state is not None:
+            return _build_arm_candidate(
+                offer_id=next_state.armed_offer_id,
+                pudo_type=next_state.armed_pudo_type,
+                heartbeat_count=next_state.heartbeat_count,
+                reason=f"armed conf={wai_result.confidence:.2f}",
+            )
+
+        return _build_noop(f"no candidate, status={wai_result.status}")
+
+    def _attempt_stacked_disambiguation(
+        self,
+        *,
+        wai_result: WhereAmIResult,
+        snapshot: DriverStateSnapshot,
+    ) -> Optional[PlannerDecision]:
+        """Section B placeholder — returns None in Step 3.4.
+
+        Step 4 implements the coordinate-only proximity check that
+        distinguishes S32 (fire_stacked_swap) from S35
+        (fire_stacked_revert) when the driver is in STACKED state and
+        WAI's corrected coordinates contradict what the state machine
+        believes is current_offer_id.
+
+        Until Step 4 lands, this returns None and the dispatch in
+        _decide() falls through to its normal stable-match logic. This
+        means STACKED scenarios will fire normal fire_pickup decisions
+        — correct for hot-swap (S34) but wrong for S32/S35. The gap is
+        acknowledged in consume()'s docstring under "KNOWN GAPS".
+        """
+        return None
 
     # -- private helpers ---------------------------------------------------
 
