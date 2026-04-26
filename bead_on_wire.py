@@ -22,6 +22,7 @@ This module deliberately reuses primitives from:
 import re
 import logging
 from typing import Optional
+from cluster_detection import detect_cluster, Cluster
 
 # Google geocode fallback — reuse existing triangulation primitives rather
 # than reinvent. These already handle API timeout (2s), caching, and logging.
@@ -722,116 +723,6 @@ def get_pivot_context(driver_id: str, cur,
 
 
 # ============================================================================
-# PRIMITIVE 6 — detect_cluster
-# ============================================================================
-
-def detect_cluster(driver_id: str, cur,
-                   window_sec: int = 60,
-                   min_samples: int = 3,
-                   max_speed_mph: float = 10.0,
-                   max_spread_m: float = 25.0) -> Optional[dict]:
-    """Check if driver has a tight low-speed cluster in the recent past.
-
-    Cluster criteria (all must hold):
-      - >= min_samples heartbeats in the last window_sec seconds
-      - all at speed < max_speed_mph
-      - all within max_spread_m of the cluster median
-
-    Returns: {n, median_lat, median_lng, spread_m, duration_sec} or None.
-
-    None means driver isn't in a stopped cluster — blind man should hold.
-    """
-    if not driver_id:
-        return None
-
-    try:
-        # Find the most recent CONSECUTIVE run of low-speed heartbeats.
-        # This is the "current stopped state" — not "everything slow in the
-        # last minute" which can conflate a red light earlier with a curb
-        # stop now.
-        cur.execute("""
-            WITH recent AS (
-                SELECT lat, lng, speed_mph, logged_at
-                FROM app_private.heartbeat_log
-                WHERE driver_id = %s
-                  AND logged_at >= NOW() - make_interval(secs => %s)
-                ORDER BY logged_at DESC
-            ),
-            tagged AS (
-                SELECT *,
-                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
-                         OVER (ORDER BY logged_at DESC
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-                         AS breaks_before
-                FROM recent
-            ),
-            current_run AS (
-                SELECT lat, lng, speed_mph, logged_at
-                FROM tagged
-                WHERE breaks_before = 0    -- zero high-speed samples between
-                                            -- this row and the most recent one
-                  AND speed_mph < %s
-            )
-            SELECT
-                COUNT(*)::int AS n,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY lat)  AS median_lat,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY lng)  AS median_lng,
-                MIN(logged_at) AS earliest,
-                MAX(logged_at) AS latest
-            FROM current_run;
-        """, (driver_id, window_sec, max_speed_mph, max_speed_mph))
-        row = cur.fetchone()
-        if not row or row["n"] is None or row["n"] < min_samples:
-            return None
-
-        median_lat = float(row["median_lat"])
-        median_lng = float(row["median_lng"])
-
-        # Spread check — spread of CURRENT low-speed run only
-        cur.execute("""
-            WITH recent AS (
-                SELECT lat, lng, speed_mph, logged_at
-                FROM app_private.heartbeat_log
-                WHERE driver_id = %s
-                  AND logged_at >= NOW() - make_interval(secs => %s)
-                ORDER BY logged_at DESC
-            ),
-            tagged AS (
-                SELECT *,
-                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
-                         OVER (ORDER BY logged_at DESC
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-                         AS breaks_before
-                FROM recent
-            )
-            SELECT MAX(
-                app_private.distance_miles(lat, lng, %s, %s) * 1609.34
-            ) AS max_dist_m
-            FROM tagged
-            WHERE breaks_before = 0 AND speed_mph < %s;
-        """, (driver_id, window_sec, max_speed_mph,
-              median_lat, median_lng, max_speed_mph))
-        sr = cur.fetchone()
-        if not sr or sr["max_dist_m"] is None:
-            return None
-        spread_m = float(sr["max_dist_m"])
-        if spread_m > max_spread_m:
-            return None
-
-        duration_sec = (row["latest"] - row["earliest"]).total_seconds()
-        return {
-            "n": int(row["n"]),
-            "median_lat": median_lat,
-            "median_lng": median_lng,
-            "spread_m": spread_m,
-            "duration_sec": duration_sec,
-        }
-    except Exception as e:
-        logging.warning(f"[BEAD] detect_cluster failed: {e}")
-        return None
-
-
-# ============================================================================
 # PRIMITIVE 7 — compute_target (the orchestrator)
 # ============================================================================
 
@@ -957,17 +848,17 @@ def compute_target(
         logging.info(
             f"[BEAD] ✅ poi FIRE: {address_text!r}, odometer {odometer:.2f}mi, "
             f"off-wire (pivot from {pivot.get('last_named_road')!r}), "
-            f"cluster n={cluster['n']} spread={cluster['spread_m']:.0f}m"
+            f"cluster n={cluster.n} spread={cluster.spread_m:.0f}m"
         )
         return {
-            "lat": cluster["median_lat"],
-            "lng": cluster["median_lng"],
+            "lat": cluster.median_lat,
+            "lng": cluster.median_lng,
             "source": "blind_man_poi",
             "confidence": "medium",
             "tier": "medium",
             "reason": (
                 f"poi {address_text[:40]}, odometer={odometer:.1f}mi, "
-                f"off-wire cluster n={cluster['n']}"
+                f"off-wire cluster n={cluster.n}"
             ),
         }
 
@@ -1046,18 +937,18 @@ def compute_target(
         logging.info(
             f"[BEAD] ✅ single_road FIRE: {address_road!r} matched "
             f"{candidate_road!r} via {match_source}, odometer {odometer:.2f}mi, "
-            f"cluster n={cluster['n']} spread={cluster['spread_m']:.0f}m "
+            f"cluster n={cluster.n} spread={cluster.spread_m:.0f}m "
             f"(limit {spread_limit:.0f}m) pivot={'on_wire' if pivot.get('on_wire') else 'off_wire'}"
         )
         return {
-            "lat": cluster["median_lat"],
-            "lng": cluster["median_lng"],
+            "lat": cluster.median_lat,
+            "lng": cluster.median_lng,
             "source": "blind_man",
             "confidence": tier,
             "tier": tier,
             "reason": (
                 f"single_road match {address_road}→{candidate_road}, "
-                f"odometer={odometer:.1f}mi, cluster n={cluster['n']}"
+                f"odometer={odometer:.1f}mi, cluster n={cluster.n}"
             ),
         }
 
