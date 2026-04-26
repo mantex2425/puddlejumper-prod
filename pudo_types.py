@@ -193,3 +193,116 @@ class WhereAmIResult:
     # the architectural reason Phase C extracted detect_cluster() into a
     # shared primitive in the first place.
     cluster: Optional[Cluster]
+
+
+# ============================================================================
+# DriverStateSnapshot — Input to PudoPlanner.consume()
+# ============================================================================
+
+@dataclass(frozen=True)
+class DriverStateSnapshot:
+    """A point-in-time view of driver state and active targets.
+
+    Assembled by the heartbeat loop (Phase F) and handed to
+    PudoPlanner.consume(). Contains all the context PLAN needs for
+    high-level planning decisions without further DB reads — keeping
+    pudo_planner.py "database-blind" per Gemini ruling on Phase E
+    architecture.
+
+    STACKED-state semantics:
+      - current_offer_id is the SECONDARY (live pointer per canonical rule)
+      - primary_offer_id is the offer whose dropoff is being completed
+      - dropoff_lat/lng = primary's dropoff (the one actively being driven to)
+      - secondary_pickup_lat/lng = the SECONDARY ride's pickup location
+      - secondary_dropoff_lat/lng = the SECONDARY ride's eventual dropoff
+
+    Non-STACKED states populate primary_offer_id == current_offer_id and
+    leave the secondary_* coordinate pairs as None.
+
+    The secondary_pickup_lat/lng pair was added per R3 ruling for B-11
+    (implicit STACKED cancel) coordinate-only proximity check, since
+    TargetSpec.address is not yet populated (Phase F TODO).
+    """
+    state: str
+    current_offer_id: Optional[str]
+    primary_offer_id: Optional[str]
+
+    # Active offer's coordinates (the one PLAN is currently reasoning about)
+    pickup_lat: Optional[float]
+    pickup_lng: Optional[float]
+    dropoff_lat: Optional[float]
+    dropoff_lng: Optional[float]
+
+    # Secondary offer's coordinates (STACKED only)
+    secondary_pickup_lat: Optional[float]
+    secondary_pickup_lng: Optional[float]
+    secondary_dropoff_lat: Optional[float]
+    secondary_dropoff_lng: Optional[float]
+
+
+# ============================================================================
+# PlannerDecision — Output from PudoPlanner.consume()
+# ============================================================================
+
+@dataclass(frozen=True)
+class PlannerDecision:
+    """Strategic intent produced by the PLAN layer.
+
+    EXECUTE (state_machine.py / driver_heartbeat.py write paths) reads this
+    and performs the required writes. PLAN never writes to the DB —
+    "database-blind" per Phase E architecture.
+
+    Action semantics:
+      noop                      -- nothing to do this heartbeat
+      arm_candidate             -- WAI saw at_current_pudo; start/increment
+                                   the N-heartbeat stable-match counter
+      cancel_candidate          -- brief at_current_pudo -> not_at_pudo
+                                   transition (traffic light); abandon
+                                   the armed candidate
+      fire_pickup               -- stable match; transition to PICKUP_CONFIRMED
+      fire_dropoff              -- stable match; transition to DROPOFF_CONFIRMED
+      fire_retroactive          -- ghost match; fire a previously-missed PUDO
+      fire_stacked_swap         -- B-11 implicit STACKED cancel: close primary,
+                                   promote secondary
+      cache_ghost               -- at_unknown_pudo; EXECUTE inserts a
+                                   suspected_pudos row using ghost_insert_payload
+      reconcile_missed_pickup   -- "Calhoun" case (R1/R2): dropoff just fired
+                                   successfully, but the pickup was never
+                                   confirmed. EXECUTE corrects offer_history
+                                   honestly via reconciliation_payload.
+                                   Coordinates are NOT synthesized.
+      reconcile_missed_dropoff  -- symmetric to above for the missed-dropoff
+                                   case (next-ride pickup fires on a ride
+                                   whose dropoff was never confirmed)
+
+    Payload semantics:
+      ghost_insert_payload      -- non-None only when action == 'cache_ghost'.
+                                   Carries the row data for the
+                                   suspected_pudos INSERT.
+      reconciliation_payload    -- non-None only when action in
+                                   {'reconcile_missed_pickup',
+                                    'reconcile_missed_dropoff'}. Carries the
+                                   offer_id, the missed-PUDO type, the
+                                   suspected_pudos row id (if any) to mark
+                                   resolved, and the offer_history column
+                                   updates (e.g. pickup_missed=true).
+    """
+    action: Literal[
+        "noop",
+        "arm_candidate",
+        "cancel_candidate",
+        "fire_pickup",
+        "fire_dropoff",
+        "fire_retroactive",
+        "fire_stacked_swap",
+        "cache_ghost",
+        "reconcile_missed_pickup",
+        "reconcile_missed_dropoff",
+    ]
+    offer_id: Optional[str]
+    target_state: Optional[str]
+    corrected_lat: Optional[float]
+    corrected_lng: Optional[float]
+    ghost_insert_payload: Optional[dict]
+    reconciliation_payload: Optional[dict]
+    reason: str
