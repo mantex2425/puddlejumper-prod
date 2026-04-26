@@ -1,3 +1,41 @@
+<!--
+================================================================================
+v2.5 AMENDMENT — Phase D shipped
+Date: 2026-04-26
+Branch: patch-00566a-unified-refinement
+Final commit: 5eed55c (Step 5.7.2 — wai_smoke.py)
+
+Phase D is complete. The continuous awareness primitive `where_am_i.py` is
+shipped, tested, and verified against the production database with the
+production cursor convention.
+
+The contents below are the v2.4 RFC as proposed and ratified BEFORE Phase D
+implementation began. They remain accurate as historical context for the
+v1.0 design and should not be re-litigated. For the implementation record —
+what actually shipped, the verification trail, lessons learned, and the
+backlog for Phase E — see PHASE_D_RETRO.md at the repo root.
+
+Two specific corrections to v2.4 that surfaced during implementation:
+
+  1. The Step 4 Q1 ruling about cursor types ("tuple unpacking for perf")
+     was made without auditing production conventions. Production uses
+     psycopg2.extras.RealDictCursor everywhere. WAI's _match_ghost_cache
+     was corrected to dict access in Step 5.7.1 (commit 01211f8). The
+     reasoning below for Q1 is preserved as historical record but is
+     superseded by the audit-driven ruling in PHASE_D_RETRO.md L-7.
+
+  2. The TargetSpec `address` field that v2.4 implies exists is not
+     currently in the dataclass. WAI's _build_outcome uses
+     getattr(target, "address", None) which always returns None until
+     Phase F adds the field. Logged as a Phase F TODO.
+
+Phase E (PLAN consumer / pudo_planner.py) is the next major construction.
+Its scope is unchanged from v2.4's deferred section, with the addition of
+B-11 (implicit STACKED cancellation detection) as a primary concern. See
+PHASE_D_RETRO.md for the full backlog.
+================================================================================
+-->
+
 
 # RFC: `where_am_i()` — Continuous Location Awareness Primitive
 
