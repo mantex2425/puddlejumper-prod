@@ -28,6 +28,36 @@ from cluster_detection import Cluster
 
 
 # ============================================================================
+# States — canonical Python constants for driver-state names
+# ============================================================================
+
+class States:
+    """Canonical Python constants for driver-state names.
+
+    PG remains the source of truth (valid_state_transitions table).
+    These constants exist so Python-side comparisons don't typo-drift
+    out of sync with PG. Adding consumers progressively across the
+    codebase is v2.2 backlog item B-5.
+
+    REFINE_DROPOFF: legacy armed-state from the pre-WAI two-zone linger
+    loop. Still alive in production (April refactor preserved it). WAI
+    treats REFINE_DROPOFF as a synonym for IN_TRIP per Step 4 lock —
+    both mean "trip in progress, dropoff target." Eventual deprecation
+    is v2.2 backlog item B-8 once shadow-mode data shows whether the
+    armed-state binary adds value beyond WAI's continuous confidence.
+
+    REFINE_PICKUP is intentionally absent — per fact-check 2026-04-26
+    it appears only as a verdict label returned by check_convergence(),
+    never as a sustained driver state.
+    """
+    UNCOMMITTED      = "UNCOMMITTED"
+    ENROUTE          = "ENROUTE"
+    IN_TRIP          = "IN_TRIP"
+    REFINE_DROPOFF   = "REFINE_DROPOFF"
+    STACKED          = "STACKED"
+
+
+# ============================================================================
 # TargetSpec — a single PUDO target (pickup or dropoff)
 # ============================================================================
 
@@ -139,6 +169,15 @@ class WhereAmIResult:
     # --- Confidence ---------------------------------------------------------
     confidence: float   # 0.0 to 1.0
     reason: str         # Human-readable; includes breakdown components inline
+
+    # --- Target attribution -------------------------------------------------
+    # The address string of the matched target's TargetSpec, primarily useful
+    # for STACKED disambiguation: when both primary and secondary dropoffs
+    # match, target_address tells PLAN which one won the higher-confidence
+    # tie-break (Q3 ruling). Non-None only when status == "at_current_pudo".
+    # Declared with no default to match the style of every other Optional[]
+    # field on this dataclass — explicit None at construction is required.
+    target_address: Optional[str]
 
     # --- Ghost recovery -----------------------------------------------------
     # ghost_id is non-None only when status == "at_previous_pudo" AND the
