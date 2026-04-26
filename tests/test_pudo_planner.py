@@ -886,3 +886,223 @@ class TestAllBuildersReturnFrozen:
         d = _build_noop("sentinel")
         with pytest.raises(dataclasses.FrozenInstanceError):
             d.action = "fire_pickup"  # type: ignore
+
+
+# ============================================================================
+# Step 5.5 - Section B STACKED disambiguation (8 tests)
+# ============================================================================
+#
+# Tests _attempt_stacked_disambiguation directly. Covers the 4 guards
+# (TestSectionBGuards) and the 4 dispatch cases (TestSectionBCases).
+#
+# R3-revised: PLAN interprets WAI's verdict-by-offer_id, never re-derives
+# the geometry. target_address is not read by the dispatch and is None
+# today per backlog B-15. All assertions are on offer_id identity.
+#
+# Tests construct PudoPlanner with default fixtures and call
+# _attempt_stacked_disambiguation directly. Section D (Step 5.6) covers
+# the consume() dispatch path that wraps this method.
+
+
+def _planner_for_section_b():
+    """Build a PudoPlanner with a fresh state store. Section B doesn't
+    use the temporal state store, but the constructor signature requires
+    something. Hand-rolled for the 4 tests that need it.
+    """
+    return PudoPlanner(_now_fn=_FakeClock(), _state_store={})
+
+
+def _stacked_snapshot(
+    *,
+    primary_offer_id: str = "offer_PRIMARY",
+    current_offer_id: str = "offer_SECONDARY",
+):
+    """STACKED-state snapshot helper. Defaults wire primary != current per
+    the canonical-rule semantics: current_offer_id is the secondary in
+    STACKED state, primary_offer_id is the offer being completed.
+    """
+    return _snapshot(
+        state=States.STACKED,
+        primary_offer_id=primary_offer_id,
+        current_offer_id=current_offer_id,
+        # Secondary's pickup coords for STACKED. Used for forensic
+        # attribution in fire_stacked_swap reconciliation_payload but not
+        # for any geometry decision (R3-revised: identity not proximity).
+        secondary_pickup_lat=29.7000,
+        secondary_pickup_lng=-95.4500,
+        secondary_dropoff_lat=29.7500,
+        secondary_dropoff_lng=-95.4200,
+    )
+
+
+# ============================================================================
+# TestSectionBGuards - 4 tests
+# ============================================================================
+
+class TestSectionBGuards:
+    def test_not_stacked_returns_none(self):
+        # Guard 1: state != STACKED. Even with a perfect S32 setup
+        # (secondary's pickup matched), Section B must not fire.
+        planner = _planner_for_section_b()
+        snapshot = _snapshot(state=States.ENROUTE)  # not STACKED
+        wai = _wai(offer_id="offer_SECONDARY", pudo_type="pickup")
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
+
+    def test_status_not_at_current_pudo_returns_none(self):
+        # Guard 2: WAI didn't match. Section B reads identity from
+        # status=at_current_pudo only - any other status falls through.
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
+
+    def test_missing_wai_offer_id_returns_none(self):
+        # Guard 3: WAI status=at_current_pudo but offer_id=None is malformed.
+        # Refuse to dispatch on identity we don't have.
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(
+            status="at_current_pudo",
+            offer_id=None,           # malformed
+            pudo_type="pickup",
+        )
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
+
+    def test_missing_primary_offer_id_returns_none(self):
+        # Guard 4: snapshot incomplete - primary_offer_id None means
+        # Phase F's assembly didn't populate the STACKED context. Fail
+        # closed: return None and let consume() fall through to normal
+        # dispatch rather than try to swap based on partial state.
+        planner = _planner_for_section_b()
+        snapshot = _snapshot(
+            state=States.STACKED,
+            primary_offer_id=None,             # missing
+            current_offer_id="offer_SECONDARY",
+        )
+        wai = _wai(offer_id="offer_SECONDARY", pudo_type="pickup")
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
+
+
+# ============================================================================
+# TestSectionBCases - 4 tests
+# ============================================================================
+
+class TestSectionBCases:
+    def test_case_a_primary_dropoff_falls_through(self):
+        # Case A: WAI matched primary's dropoff. Normal progression in
+        # STACKED state - the driver completed the primary ride. Not a
+        # contradiction, return None and let consume() fall through to
+        # the stable-match dispatch path (which fires fire_dropoff).
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(
+            offer_id="offer_PRIMARY",   # primary
+            pudo_type="dropoff",        # dropoff
+        )
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
+
+    def test_case_b_secondary_pickup_fires_stacked_swap(self):
+        # Case B - S32: WAI matched secondary's pickup while state machine
+        # claims primary is still alive. Driver bypassed primary's dropoff
+        # without firing it. fire_stacked_swap closes primary, promotes
+        # secondary as the new active offer.
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(
+            offer_id="offer_SECONDARY",   # secondary
+            pudo_type="pickup",           # pickup
+            corrected_lat=29.7000,
+            corrected_lng=-95.4500,
+        )
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is not None
+        assert result.action == "fire_stacked_swap"
+        # The new active offer is the secondary.
+        assert result.offer_id == "offer_SECONDARY"
+        assert result.target_state == "IN_TRIP"
+        assert result.corrected_lat == 29.7000
+        assert result.corrected_lng == -95.4500
+        # Reconciliation payload carries the swap direction and both ids
+        # for EXECUTE's atomic swap.
+        assert result.reconciliation_payload["swap_kind"] == "primary_to_secondary"
+        assert (
+            result.reconciliation_payload["primary_offer_id"] == "offer_PRIMARY"
+        )
+        assert (
+            result.reconciliation_payload["secondary_offer_id"]
+            == "offer_SECONDARY"
+        )
+        # Reason mentions S32 for log-grep forensics.
+        assert "S32" in result.reason
+
+    def test_case_c_primary_pickup_fires_stacked_revert(self):
+        # Case C - S35: WAI matched primary's pickup while state machine
+        # claims secondary is alive. Uber re-awarded primary; driver went
+        # back to primary's pickup. Secondary was never actually awarded
+        # by Uber. fire_stacked_revert closes secondary, restores primary.
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(
+            offer_id="offer_PRIMARY",     # primary
+            pudo_type="pickup",           # pickup (NOT dropoff - that's Case A)
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+        )
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is not None
+        assert result.action == "fire_stacked_revert"
+        # The restored active offer is the primary.
+        assert result.offer_id == "offer_PRIMARY"
+        # Revert state is ENROUTE: driving back to primary's pickup
+        # (which is the live target after the revert).
+        assert result.target_state == "ENROUTE"
+        assert result.corrected_lat == 29.6246
+        assert result.corrected_lng == -95.5102
+        assert (
+            result.reconciliation_payload["swap_kind"] == "secondary_to_primary"
+        )
+        assert (
+            result.reconciliation_payload["primary_offer_id"] == "offer_PRIMARY"
+        )
+        assert (
+            result.reconciliation_payload["secondary_offer_id"]
+            == "offer_SECONDARY"
+        )
+        # Reason mentions S35 for log-grep forensics.
+        assert "S35" in result.reason
+
+    def test_case_d_secondary_dropoff_falls_through(self):
+        # Case D: WAI matched secondary's dropoff. Sequence violation -
+        # secondary's pickup hasn't fired (state would be IN_TRIP, not
+        # STACKED, if it had). Per Gemini R2 fail-closed ruling, return
+        # None silently. Backlog B-14 will add a Sequence Violation
+        # Detector that emits a forensic alert.
+        planner = _planner_for_section_b()
+        snapshot = _stacked_snapshot()
+        wai = _wai(
+            offer_id="offer_SECONDARY",   # secondary
+            pudo_type="dropoff",          # dropoff (the violation)
+        )
+        result = planner._attempt_stacked_disambiguation(
+            wai_result=wai, snapshot=snapshot
+        )
+        assert result is None
