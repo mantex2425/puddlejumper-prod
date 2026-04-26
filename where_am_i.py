@@ -1010,8 +1010,21 @@ class WhereAmI:
         if row is None:
             return None
 
-        # Tuple unpacking per Q1 ruling
-        ghost_id, lat, lng, offer_id_at_time, confidence, detected_at = row
+        # Dict access per production audit (Step 5.7.1): the original Q1
+        # ruling (tuple unpacking) was based on a faulty assumption that
+        # production used default tuple cursors. The Step 5.7 live-PG smoke
+        # audit revealed that EVERY production caller of WAI's dependencies
+        # (pickup_confirm.py, geo.py, etc.) uses psycopg2.extras.RealDictCursor.
+        # detect_cluster already requires this — see cluster_detection.py:154
+        # `row["n"]`. WAI must follow the same convention or it crashes on
+        # the first real ghost match. The original Q1 reasoning (perf via
+        # tuple unpacking) is moot when the cursor type isn't tuple anyway.
+        ghost_id = row["id"]
+        lat = row["lat"]
+        lng = row["lng"]
+        offer_id_at_time = row["offer_id_at_time"]
+        confidence = row["confidence"]
+        detected_at = row["detected_at"]
 
         if log.isEnabledFor(logging.DEBUG):
             log.debug(

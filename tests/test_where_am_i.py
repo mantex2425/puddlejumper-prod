@@ -945,6 +945,11 @@ class _FakeCursor:
     Records the last execute() call and returns a predetermined row from
     fetchone(). Hand-rolled rather than MagicMock-based per Gemini Q1
     ruling — explicit fakes are easier to reason about than mocks.
+
+    Per Step 5.7.1 audit: production cursors use psycopg2.extras.RealDictCursor
+    everywhere (pickup_confirm.py, geo.py, etc.), so fetchone() returns
+    dict-shaped rows, not tuples. Ghost-row fixtures in tests below
+    follow the same dict shape.
     """
     def __init__(self, ghost_row=None):
         self.ghost_row = ghost_row
@@ -1211,13 +1216,14 @@ class TestMatchGhostCache:
 
     def test_active_ghost_returns_at_previous_pudo(self):
         cluster = _cluster()
-        ghost_row = (
-            42,                          # ghost_id
-            29.6246, -95.5102,           # lat, lng
-            "ghost_offer_xyz",           # offer_id_at_time
-            0.65,                        # confidence
-            "2026-04-26 12:00:00+00",    # detected_at
-        )
+        ghost_row = {
+            "id": 42,
+            "lat": 29.6246,
+            "lng": -95.5102,
+            "offer_id_at_time": "ghost_offer_xyz",
+            "confidence": 0.65,
+            "detected_at": "2026-04-26 12:00:00+00",
+        }
         cur = _FakeCursor(ghost_row=ghost_row)
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
@@ -1232,7 +1238,14 @@ class TestMatchGhostCache:
     def test_topology_threaded_into_result(self):
         # Q2 ruling: topology threaded into ghost result for forensic context
         cluster = _cluster()
-        ghost_row = (10, 29.6246, -95.5102, "off1", 0.5, "2026-04-26")
+        ghost_row = {
+            "id": 10,
+            "lat": 29.6246,
+            "lng": -95.5102,
+            "offer_id_at_time": "off1",
+            "confidence": 0.5,
+            "detected_at": "2026-04-26",
+        }
         cur = _FakeCursor(ghost_row=ghost_row)
         wai = WhereAmI(
             cur,
@@ -1308,7 +1321,14 @@ class TestEvaluate:
     def test_off_ride_with_ghost_match(self):
         # No current offer + ghost present -> at_previous_pudo
         cluster = _cluster()
-        ghost_row = (99, 29.6246, -95.5102, "old_offer", 0.55, "2026-04-26")
+        ghost_row = {
+            "id": 99,
+            "lat": 29.6246,
+            "lng": -95.5102,
+            "offer_id_at_time": "old_offer",
+            "confidence": 0.55,
+            "detected_at": "2026-04-26",
+        }
         cur = _FakeCursor(ghost_row=ghost_row)
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
