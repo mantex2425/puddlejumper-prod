@@ -1106,3 +1106,426 @@ class TestSectionBCases:
             wai_result=wai, snapshot=snapshot
         )
         assert result is None
+
+
+# ============================================================================
+# Step 5.6 - Section D consume() dispatch (15 tests)
+# ============================================================================
+#
+# Tests consume() end-to-end. Mirrors the 6-step dispatch in the
+# consume() docstring:
+#   Step 2: at_unknown_pudo short-circuit         -> TestDispatchUnknownPudo
+#   Step 3: STACKED delegation                    -> TestDispatchStackedDelegation
+#   Step 4: long-stop-then-departure              -> TestDispatchLongStop
+#   Step 5: stable match -> fire_pickup/dropoff   -> TestDispatchStableMatch
+#   Step 6: fall-through                          -> TestDispatchFallThrough
+#
+# Plus 3 state-store invariants (TestStateStore):
+#   - persistence across calls
+#   - clearing on long miss
+#   - multi-driver isolation (Gemini Step 5.1 ratification: load-bearing)
+#
+# Multi-heartbeat tests use _FakeClock.advance(5.0) between consume()
+# calls to simulate the production ~5s heartbeat cadence. This makes
+# stable-match tests visibly span 15s of presence (3 hits at 5s apart),
+# matching the N_HEARTBEATS_TO_FIRE = 3 production constant.
+#
+# Step 4 long-stop tests use clock.advance(30.0) to cross the
+# CANDIDATE_STALE_SECONDS = 15 threshold cleanly.
+#
+# This step does NOT cover:
+#   - reconcile_missed_pickup / reconcile_missed_dropoff dispatch -
+#     no dispatch path emits these today (B-12, Phase E Step 6 work)
+#   - cancel_candidate dispatch reachability - B-21 backlog,
+#     Phase E Step 6 investigation
+#   - _decide() directly - the contract Phase F sees is consume(),
+#     so all tests go through it
+
+
+# ============================================================================
+# TestDispatchUnknownPudo - 2 tests (Step 2 short-circuit)
+# ============================================================================
+
+class TestDispatchUnknownPudo:
+    def test_unknown_pudo_with_coords_caches_ghost(self):
+        # Step 2: at_unknown_pudo with corrected coords -> cache_ghost.
+        # The short-circuit means STACKED disambiguation, long-stop, and
+        # stable-match dispatch are all skipped.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        wai = _wai(
+            status="at_unknown_pudo",
+            offer_id=None,
+            pudo_type=None,
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+            confidence=0.55,
+        )
+        decision = planner.consume(
+            "driver_unknown",
+            wai,
+            driver_state_snapshot=_snapshot(state=States.UNCOMMITTED),
+        )
+        assert decision.action == "cache_ghost"
+        assert decision.corrected_lat == 29.6246
+        assert decision.corrected_lng == -95.5102
+        assert decision.ghost_insert_payload is not None
+        assert decision.ghost_insert_payload["confidence"] == 0.55
+
+    def test_unknown_pudo_without_coords_returns_noop(self):
+        # Defensive: at_unknown_pudo with corrected_lat=None is malformed.
+        # Dispatch falls through to noop rather than caching a ghost
+        # at unknown coordinates.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        wai = _wai(
+            status="at_unknown_pudo",
+            offer_id=None,
+            pudo_type=None,
+            corrected_lat=None,
+            corrected_lng=None,
+            cluster=None,
+        )
+        decision = planner.consume(
+            "driver_malformed",
+            wai,
+            driver_state_snapshot=_snapshot(state=States.UNCOMMITTED),
+        )
+        assert decision.action == "noop"
+        assert "malformed" in decision.reason.lower()
+
+
+# ============================================================================
+# TestDispatchStackedDelegation - 1 test (Step 3 smoke)
+# ============================================================================
+
+class TestDispatchStackedDelegation:
+    def test_non_stacked_state_skips_section_b(self):
+        # Smoke: non-STACKED state must not invoke the Section B path.
+        # Full Section B coverage was Step 5.5; this test just confirms
+        # the dispatch ordering - if Section B accidentally ran on
+        # non-STACKED snapshots, it could fire fire_stacked_swap when it
+        # shouldn't. Verified by observing that ENROUTE + at_current_pudo
+        # produces arm_candidate (Step 6 fall-through), not any
+        # fire_stacked_* action.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        decision = planner.consume(
+            "driver_normal",
+            _wai(),
+            driver_state_snapshot=_snapshot(state=States.ENROUTE),
+        )
+        # First hit on a fresh state -> arm_candidate (count=1, not stable yet)
+        assert decision.action == "arm_candidate"
+        # Specifically NOT a STACKED-related action.
+        assert decision.action not in (
+            "fire_stacked_swap", "fire_stacked_revert"
+        )
+
+
+# ============================================================================
+# TestDispatchLongStop - 3 tests (Step 4 retroactive fire)
+# ============================================================================
+
+class TestDispatchLongStop:
+    def test_long_stop_pickup_fires_retroactive(self):
+        # Sequence:
+        #   t=0:   at_current_pudo (pickup) -> arm (count=1)
+        #   t=5:   at_current_pudo          -> arm (count=2)
+        #   t=35:  not_at_pudo (gap=30s)    -> fire_retroactive (pickup -> IN_TRIP)
+        # The 30s gap exceeds CANDIDATE_STALE_SECONDS=15, so the candidate
+        # is "dead" - but Step 4 of the dispatch catches the long-stop
+        # pattern and emits fire_retroactive instead of cancel_candidate.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        # t=0: arm
+        d1 = planner.consume("driver_long", _wai(), driver_state_snapshot=snapshot)
+        assert d1.action == "arm_candidate"
+
+        # t=5: still armed
+        clock.advance(5.0)
+        d2 = planner.consume("driver_long", _wai(), driver_state_snapshot=snapshot)
+        assert d2.action == "arm_candidate"
+
+        # t=35: long gap, driver moved on
+        clock.advance(30.0)
+        wai_gone = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        d3 = planner.consume(
+            "driver_long", wai_gone, driver_state_snapshot=snapshot
+        )
+        assert d3.action == "fire_retroactive"
+        assert d3.offer_id == "offer_7623"
+        assert d3.target_state == "IN_TRIP"
+        assert "retroactive pickup" in d3.reason
+
+    def test_long_stop_dropoff_fires_retroactive_to_uncommitted(self):
+        # Symmetric to pickup but for dropoff: target_state must be
+        # UNCOMMITTED, not IN_TRIP. This is the only thing that
+        # differentiates pickup-retro from dropoff-retro at the
+        # PlannerDecision level.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.IN_TRIP)
+        wai_at_dropoff = _wai(pudo_type="dropoff")
+
+        d1 = planner.consume("driver_drop", wai_at_dropoff, driver_state_snapshot=snapshot)
+        assert d1.action == "arm_candidate"
+
+        clock.advance(30.0)
+        wai_gone = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        d2 = planner.consume("driver_drop", wai_gone, driver_state_snapshot=snapshot)
+        assert d2.action == "fire_retroactive"
+        assert d2.target_state == "UNCOMMITTED"
+        assert "retroactive dropoff" in d2.reason
+
+    def test_long_stop_uses_last_observation_coords(self):
+        # Houston Drift sentinel: retroactive fire uses coords from the
+        # LAST VALID HIT, not from the departure WAI (which has its own
+        # coords or None). Production matters: a driver pulling away from
+        # the pickup at 35mph could be 50m+ from the actual stop point
+        # by the time WAI drops; recording that as the pickup location
+        # would skew analytics and audit trails.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        # Hit at the actual stop location.
+        wai_stopped = _wai(
+            corrected_lat=29.6246,
+            corrected_lng=-95.5102,
+        )
+        planner.consume("driver_drift", wai_stopped, driver_state_snapshot=snapshot)
+
+        # Long gap; driver has moved.
+        clock.advance(30.0)
+        wai_gone = _wai(
+            status="not_at_pudo",
+            offer_id=None,
+            pudo_type=None,
+            corrected_lat=29.6300,    # different - this is where they ARE now
+            corrected_lng=-95.5050,   # not where the pickup happened
+        )
+        decision = planner.consume(
+            "driver_drift", wai_gone, driver_state_snapshot=snapshot
+        )
+        assert decision.action == "fire_retroactive"
+        # Coords come from the last observation (stop), not from wai_gone.
+        assert decision.corrected_lat == 29.6246
+        assert decision.corrected_lng == -95.5102
+
+
+# ============================================================================
+# TestDispatchStableMatch - 3 tests (Step 5 fire_pickup / fire_dropoff)
+# ============================================================================
+
+class TestDispatchStableMatch:
+    def test_three_stable_hits_pickup_fires(self):
+        # The canonical happy path. 3 hits at 5s spacing = 15s presence,
+        # exactly N_HEARTBEATS_TO_FIRE=3. The third call returns
+        # fire_pickup. If N_HEARTBEATS_TO_FIRE ever changes, this test
+        # fails first - which is correct, the constant is part of the
+        # contract Phase F integrates against.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        d1 = planner.consume("driver_fire", _wai(), driver_state_snapshot=snapshot)
+        assert d1.action == "arm_candidate"
+
+        clock.advance(5.0)
+        d2 = planner.consume("driver_fire", _wai(), driver_state_snapshot=snapshot)
+        assert d2.action == "arm_candidate"
+
+        clock.advance(5.0)
+        d3 = planner.consume("driver_fire", _wai(), driver_state_snapshot=snapshot)
+        assert d3.action == "fire_pickup"
+        assert d3.offer_id == "offer_7623"
+        assert d3.target_state == "IN_TRIP"
+        assert d3.corrected_lat == 29.6246
+        assert d3.corrected_lng == -95.5102
+
+    def test_three_stable_hits_dropoff_fires(self):
+        # Symmetric: dropoff target_state is UNCOMMITTED, not IN_TRIP.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.IN_TRIP)
+        wai = _wai(pudo_type="dropoff")
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_dropoff"
+        assert d3.target_state == "UNCOMMITTED"
+
+    def test_two_hits_below_threshold_arms_only(self):
+        # 2 hits = count=2 < N_HEARTBEATS_TO_FIRE=3. Must arm_candidate,
+        # NOT fire. Boundary test - ensures we don't fire one heartbeat
+        # too early.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        planner.consume("d", _wai(), driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d2 = planner.consume("d", _wai(), driver_state_snapshot=snapshot)
+        assert d2.action == "arm_candidate"
+        # Specifically NOT a fire action.
+        assert d2.action not in ("fire_pickup", "fire_dropoff")
+
+
+# ============================================================================
+# TestDispatchFallThrough - 3 tests (Step 6)
+# ============================================================================
+
+class TestDispatchFallThrough:
+    def test_cold_start_not_at_pudo_returns_noop(self):
+        # Cold start (no temporal state) + WAI reports nothing -> noop.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        wai = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        decision = planner.consume(
+            "driver_idle",
+            wai,
+            driver_state_snapshot=_snapshot(state=States.UNCOMMITTED),
+        )
+        assert decision.action == "noop"
+
+    def test_cold_start_at_current_pudo_arms_fresh(self):
+        # Cold start + first at_current_pudo hit -> arm_candidate (count=1).
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        decision = planner.consume(
+            "driver_arming",
+            _wai(),
+            driver_state_snapshot=_snapshot(state=States.ENROUTE),
+        )
+        assert decision.action == "arm_candidate"
+        # heartbeat 1 is the first count value.
+        assert "heartbeat 1" in decision.reason
+        assert "type=pickup" in decision.reason
+
+    def test_armed_not_yet_stable_continues_arming(self):
+        # Armed at count=2, third call still hitting -> arm_candidate
+        # at count=3 NOT YET fire (the stable-match check happens AFTER
+        # arm_candidate emission in the source order; this test pins the
+        # behavior). Wait - actually count=3 IS stable. Re-reading the
+        # source: _is_stable_match returns True when count >= N_required.
+        # So at count=3, the dispatch fires. Below count=3 (count=1, 2),
+        # we get arm_candidate.
+        #
+        # This test exercises the count=2 case explicitly: armed but
+        # not yet stable. Mirrors test_two_hits_below_threshold_arms_only
+        # but emphasizes the "ramp" - the temporal counter is doing
+        # its job between heartbeats.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        d1 = planner.consume("d", _wai(), driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d2 = planner.consume("d", _wai(), driver_state_snapshot=snapshot)
+        # Both intermediate steps return arm_candidate (count=1, count=2).
+        assert d1.action == "arm_candidate"
+        assert d2.action == "arm_candidate"
+        # The reason should reflect the increasing heartbeat count.
+        assert "heartbeat 1" in d1.reason
+        assert "heartbeat 2" in d2.reason
+
+
+# ============================================================================
+# TestStateStore - 3 tests (persistence, clear, multi-driver isolation)
+# ============================================================================
+
+class TestStateStore:
+    def test_state_persists_across_calls(self):
+        # The injected state_store dict must accumulate state across
+        # consume() calls for the same driver. After 2 hits, the store
+        # has an entry for that driver with heartbeat_count=2.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.ENROUTE)
+
+        planner.consume("driver_persist", _wai(), driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("driver_persist", _wai(), driver_state_snapshot=snapshot)
+
+        assert "driver_persist" in store
+        assert store["driver_persist"].heartbeat_count == 2
+        assert store["driver_persist"].armed_offer_id == "offer_7623"
+
+    def test_state_store_cleared_on_long_miss(self):
+        # When _advance_armed_state returns None (long-miss death),
+        # consume() must call _clear_temporal_state to remove the entry
+        # from the store. Without this, stale armed state would persist
+        # across rides indefinitely.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.UNCOMMITTED)
+
+        # Arm.
+        planner.consume("driver_clear", _wai(), driver_state_snapshot=snapshot)
+        assert "driver_clear" in store
+
+        # Long miss with no fire-retroactive (count=1 < threshold for
+        # long-stop signal? Actually _is_long_stop_then_departure requires
+        # heartbeat_count >= 1, which is true. So the long-miss WILL
+        # fire retroactive. To test pure clearing, use UNCOMMITTED snapshot
+        # and a non-arming sequence: arm once, then a long gap with WAI
+        # producing no offer match, AND the state's pudo_type leads to
+        # fire_retroactive. The store should still be cleared post-fire.
+        clock.advance(30.0)
+        wai_gone = _wai(status="not_at_pudo", offer_id=None, pudo_type=None)
+        decision = planner.consume(
+            "driver_clear", wai_gone, driver_state_snapshot=snapshot
+        )
+        # Long-stop path emits fire_retroactive; either way the store
+        # entry must be gone.
+        assert decision.action in ("fire_retroactive", "cancel_candidate")
+        assert "driver_clear" not in store
+
+    def test_state_store_drivers_isolated(self):
+        # Multi-tenant safety: two drivers arming simultaneously must NOT
+        # bleed state. Driver A's count must not affect driver B's count.
+        # If anyone refactors _state_store to non-keyed storage (or to a
+        # shared global), this test fails first.
+        clock = _FakeClock()
+        store = {}
+        planner = PudoPlanner(_now_fn=clock, _state_store=store)
+        snapshot = _snapshot(state=States.ENROUTE)
+        wai = _wai()
+
+        # Driver A: 3 hits -> fires
+        planner.consume("driver_A", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("driver_A", wai, driver_state_snapshot=snapshot)
+        # Driver B arms once at the same wall-clock instant.
+        d_b1 = planner.consume("driver_B", wai, driver_state_snapshot=snapshot)
+        assert d_b1.action == "arm_candidate"
+        assert "heartbeat 1" in d_b1.reason  # B is at count=1
+
+        clock.advance(5.0)
+        d_a3 = planner.consume("driver_A", wai, driver_state_snapshot=snapshot)
+        # Driver A fires (count reached 3), but Driver B's state is untouched.
+        assert d_a3.action == "fire_pickup"
+
+        # Driver B's state remains in store with count=1.
+        assert "driver_B" in store
+        assert store["driver_B"].heartbeat_count == 1
+        # Both drivers' states are present and independent. consume()
+        # does NOT clear temporal state on a fire decision - the
+        # subsequent heartbeat is what determines the next state. So
+        # Driver A's state survives at count=3, Driver B's at count=1.
+        # The isolation invariant: each is keyed by driver_id, neither
+        # entry was overwritten or merged.
+        assert set(store.keys()) == {"driver_A", "driver_B"}
+        assert store["driver_A"].heartbeat_count == 3
+        assert store["driver_B"].heartbeat_count == 1
