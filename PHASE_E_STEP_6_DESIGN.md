@@ -5,6 +5,48 @@
 **Date:** 2026-04-26.
 **Status:** Design draft. Implementation begins after Gemini ratification.
 
+**Amended:** 2026-04-27 — see "AMENDMENT 1 (2026-04-27) — Offer-Anchor
+Lookback (full spec)" at end of document. Original design ratified
+2026-04-26 remains in effect except as superseded by the amendment.
+
+---
+
+## AMENDMENT 1 (2026-04-27) — Offer-Anchor Lookback (notice)
+
+Gemini ratified an offer-anchor refinement to sub-step 1a's lookback
+window during the sub-step 0.3 closeout session (post-commit `7863b11`).
+The fixed `CLUSTER_HISTORY_LOOKBACK_SEC = 1800` constant proposed in the
+sub-step 1a design brief is replaced by an event-relative window pinned
+to `offer_history.accepted_at` with a 60-second pre-roll buffer. This
+eliminates the "is N minutes the right number?" question entirely and
+removes Python/Postgres clock-drift risk from the lookback boundary.
+
+**Sections of this document superseded by Amendment 1:**
+- Sub-step 1a's `lookback_sec` parameter (replaced by `accepted_at_anchor`
+  + `preroll_sec`)
+- Q3 lookback-window ratification (A3 fixed-window → event-anchored)
+- Sub-step 1a "in `where_am_i.py`" location reference (now
+  `cluster_detection.py`, per sub-step 0.3 finding + sub-step 1a design)
+- "CONDITIONAL on 0.3" framing for sub-step 1a (resolved to firm by
+  sub-step 0.3 finding, commit `7863b11`)
+- Architectural ruling R5 (refined to R5 (rev) — see Amendment 1 full spec)
+
+**Sections NOT changed by Amendment 1:**
+- `CLUSTER_REVISIT_MIN_GAP_M = 200` (value unchanged; provenance
+  comment refined per Gemini's "Structural Noise Floor" framing)
+- All sub-step ordering (1a → 1b → 2 → 3 → 4 → 5 → 6a → 6b → 7 → 8)
+- Q5 Null Island fixture convention for T75-T79
+- T70-T74 Five Pillars block specs
+- T75-T79 round-trip test gate logic (the 3-cluster topology is
+  unchanged; only the window source for cluster history changed)
+- Legacy triage rubric (PRESERVE/PRESERVE-ASSERTION/REPLACE/RETIRE/CASCADE)
+
+**New backlog item:** B-26 — same-address PLAN-side latch (see Amendment 1
+full spec). Sub-step assignment: between 1b and 2 (likely 1c or folded
+into early sub-step 2).
+
+Read the full Amendment 1 spec at end of document before authoring 1a.
+
 ---
 
 ## Why this document exists
@@ -651,3 +693,185 @@ review pass that has worked through 18 Phase E commits.
 > Per L-11 session-open: doc-currency check on PHASE_E_PROGRESS.md
 > against HEAD before any work. Proceed to UTC patch only after
 > doc-currency confirmed clean.
+
+---
+
+## AMENDMENT 1 (2026-04-27) — Offer-Anchor Lookback (full spec)
+
+**Status:** Ratified by Gemini 2026-04-27 during the sub-step 0.3
+closeout session. Implementation lands in sub-step 1a.
+
+**Origin:** During the sub-step 1a design ratification round following
+the sub-step 0.3 WAI source-read finding (commit `7863b11`), Claude
+proposed `CLUSTER_HISTORY_LOOKBACK_SEC = 1800` (30 min) as the default
+lookback for `get_recent_clusters()`. Gemini's verdict refined the
+design: a fixed lookback is paranoia-class per L-10 (no production data
+grounds the 30-minute number), and it introduces a Python/Postgres
+clock-drift risk on the lookback boundary. The offer-anchor refinement
+eliminates both concerns by pinning the window to a database-recorded
+event timestamp.
+
+### What changed
+
+**Lookback window source.** Was: fixed `CLUSTER_HISTORY_LOOKBACK_SEC = 1800`
+constant in `cluster_detection.py`. Now: event-relative window
+`[offer_history.accepted_at - preroll_sec, NOW()]` with `preroll_sec`
+defaulting to 60. The window is computed at WAI evaluation time from
+the database-recorded acceptance event.
+
+**Constant supersession.** `CLUSTER_HISTORY_LOOKBACK_SEC` is removed
+from the spec entirely. Replaced by `CLUSTER_HISTORY_PREROLL_SEC = 60`
+with L-10 provenance:
+
+```python
+# Provenance per L-10: theoretical-with-shadow-mode-instrumentation.
+# Sized to comfortably exceed typical offer-card-to-acceptance latency
+# (no published metric; reasoning from product behavior — driver views
+# the offer card, the cluster they're parked in begins forming during
+# review, then accepted_at is recorded). Phase F shadow-mode telemetry
+# (B-24) measures whether 60s is correct against real offer-acceptance
+# latency distributions; if too tight (cluster-being-formed missed) or
+# too loose (prior unrelated cluster pulled in), the constant moves
+# before Phase G ships.
+CLUSTER_HISTORY_PREROLL_SEC = 60
+```
+
+**Timestamp sourcing.** `accepted_at` MUST be sourced from
+`app_private.offer_history` (database-side), never from a Python
+`datetime.now()` or system-clock-derived value. Eliminates clock-drift
+mismatches between application and database. Phase F integration must
+ensure the `Offer` dataclass carries `accepted_at` end-to-end, or that
+WAI's `evaluate()` path accepts it as an argument; resolution deferred
+to 1b authoring per L-6 source-read at that time (B-15 already covers
+the Phase F adjacency for `target_address`; analogous extension for
+`accepted_at`).
+
+### Updated sub-step 1a signature
+
+```python
+def get_recent_clusters(
+    driver_id: str,
+    cur,
+    accepted_at_anchor: datetime,
+    preroll_sec: int = 60,
+    min_samples: int = 3,
+    max_speed_mph: float = 10.0,
+    max_spread_m: float = 25.0,
+) -> list[Cluster]:
+    """Find all stopped clusters in the window
+    [accepted_at_anchor - preroll_sec, NOW()].
+
+    Window is offer-relative — search starts before the driver accepted
+    the offer (capturing the pickup-cluster-being-formed during the
+    offer-card review window) and runs through the present moment.
+    Returns clusters ordered oldest-first.
+
+    Empty list means no qualifying clusters in the window.
+    """
+```
+
+The `lookback_sec` parameter from the original ratified spec is
+removed. SQL approach (gaps-and-islands) is unchanged; only the window
+expression in the `recent` CTE differs.
+
+### NEW: Same-address PLAN-side latch (R5 corollary)
+
+`pudo_planner.py` adds a defensive latch independent of WAI confidence.
+The latch lifts T79's test-time assertion to a runtime gate:
+
+```
+IF pickup_address == dropoff_address (or coords within 30m geocoder noise)
+   AND cluster_revisit IS NOT True:
+       REFUSE to emit fire_dropoff
+       Hold state, await structural confirmation
+```
+
+Without this latch, a same-address ride could fire dropoff at the
+pickup cluster on the very first heartbeat post-pickup-fire — the
+exact BMOAR Path B failure class this rewrite retires. With the latch,
+`fire_dropoff` is structurally gated until `cluster_revisit` genuinely
+confirms the round trip via the 3-cluster topology.
+
+**Backlog item B-26 (NEW):** Implement same-address latch in
+`pudo_planner.py`. Sub-step assignment: between 1b and 2. Likely a
+dedicated sub-step 1c or folded into early sub-step 2. Runtime
+behavior must be in place before T75-T79 integration tests in sub-step
+3 (T79 tests this latch end-to-end).
+
+### R5 (rev) — Structural revisit, offer-anchored
+
+R5 from the original document (line of the "Architectural ruling locked
+at Step 6 design" section) is amended:
+
+> **R5 (rev):** Round-trip detection uses topological evidence (PUDO
+> cluster → ≥200m intermediate cluster → PUDO cluster) within a window
+> pinned to the current offer's database-recorded `accepted_at`
+> timestamp + 60s pre-roll buffer. No fixed time lookback. No odometer
+> dependency. The intermediate cluster IS the proof, anchored by the
+> database-recorded offer-acceptance event.
+>
+> The `CLUSTER_REVISIT_MIN_GAP_M = 200` constant is unchanged in value;
+> per Gemini's framing, it is a **Structural Noise Floor** (Houston GPS
+> multipath wobble), not a policy threshold. Adjusting it would require
+> a physics-of-the-environment justification, not a behavioral
+> preference.
+
+Refined provenance comment for `CLUSTER_REVISIT_MIN_GAP_M`:
+
+```python
+# Provenance per L-10: production-data-grounded structural noise floor.
+# Houston GPS multipath wobble in urban canyons can hit 100-150m
+# (Forum Park 7623 case + operational observation 2026-04-26). 200m
+# ensures "Elsewhere" means the car physically left the block, not GPS
+# jitter. This is a noise floor, not a policy — adjusting it requires
+# a physics-of-the-environment change, not a behavioral preference.
+CLUSTER_REVISIT_MIN_GAP_M = 200
+```
+
+### Implementation sequence (sub-step ordering preserved)
+
+1. **Sub-step 1a:** `get_recent_clusters()` per amended signature above.
+   Lives in `cluster_detection.py` (per sub-step 0.3 design ratification —
+   not `where_am_i.py` as the original document said). `Cluster`
+   dataclass extension: add `latest: datetime`.
+2. **Sub-step 1b:** `WhereAmIResult.cluster_revisit: bool` field, the
+   200m constant with refined provenance, v2.6 RFC amendment to
+   `WHERE_AM_I_PROPOSAL_v2.md`. Resolves Phase F `accepted_at`
+   plumbing question per L-6 source-read at authoring time.
+3. **Sub-step 1c (NEW) or merged into early sub-step 2:** Same-address
+   latch per B-26.
+4. **Sub-step 2 onward:** Unchanged. T70-T74 Five Pillars, T75-T79
+   Round-trip with offer-anchor window, T80-T89 STACKED, T90-T99
+   reservation, sub-steps 6a/6b legacy triage, sub-step 7 safety, 8
+   closeout.
+
+### What Amendment 1 does NOT change
+
+- Sub-step ordering (1 → 8)
+- The 200m gate value
+- Q5 Null Island synthetic-fixture convention
+- T70-T89 test specs (gate logic same; only window source for cluster
+  history changed)
+- Legacy triage rubric and pre-classifications
+- The two-cluster topology of `cluster_revisit` (PUDO → intermediate
+  → PUDO)
+- Phase F backlog items B-15, B-16, B-17 scope (B-15 grows slightly
+  to also carry `accepted_at` if not already in `Offer` — verified at
+  sub-step 1b authoring per L-6)
+- Phase G BMOAR deprecation gating
+
+### Ratification log
+
+Gemini, 2026-04-27, sub-step 0.3 closeout session:
+
+> "We are moving away from the 30-minute lookback. We will instead
+> anchor the cluster history search to the database-side `accepted_at`
+> timestamp with a 60-second pre-roll. Use the 200m spatial gap as the
+> structural gate for Cluster 2. This removes all arbitrary
+> time/distance policies and replaces them with a ride-relative
+> structural latch."
+
+Q1-Q5 from the original sub-step 1a design brief are subsumed by this
+ratification. Q6 (forensic round-trip case for L-9 fixture provenance)
+remains open and is gated by a re-verification query at sub-step 1a
+authoring time per L-6 corollary.
