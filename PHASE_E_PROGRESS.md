@@ -1,10 +1,10 @@
 # Phase E Progress Brief
 
-**For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1b.3.
+**For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1c.
 **Author:** Phase E Step 5 closing session (commit 49ea6c8).
 **Date authored:** 2026-04-26.
-**Updated:** 2026-04-27 — sub-step 1b.2 closeout (commit 6522ba5).
-**Replaces:** prior version at commit 6fe454a (post sub-step 1a, pre 1b).
+**Updated:** 2026-04-27 — sub-step 1b.3 closeout (commit a68447b).
+**Replaces:** prior version at commit 6522ba5 (post sub-step 1b, pre 1c).
 
 ---
 
@@ -21,8 +21,8 @@
    lessons L-9, L-10, L-11 + L-6 corollary are recorded in this document.
 
 3. **`WHERE_AM_I_PROPOSAL_v2.md`** at the repo root — design RFC. v2.5
-   amendment header explains the Phase D shipped state. Sub-step 1b ships
-   the v2.6 amendment for `cluster_revisit`.
+   amendment header explains the Phase D shipped state. v2.6 amendment
+   for `cluster_revisit` is live (commit `aa8e667`).
 
 4. **`PHASE_E_STEP_6_DESIGN.md`** at the repo root — Step 6 design proposal,
    originally ratified by Gemini 2026-04-26, **amended 2026-04-27 with
@@ -30,30 +30,32 @@
    notice first, then the body, then the full Amendment 1 spec at the end.
 
 5. **This file (`PHASE_E_PROGRESS.md`)** — captures Phase E's current
-   state at end of sub-step 0.3 + Amendment 1. Use this as the entry point
-   for sub-step 1a authoring.
+   state at end of sub-step 1b. Use this as the entry point for
+   sub-step 1c authoring.
 
 6. **The commits since 49ea6c8** — `git log --oneline 49ea6c8..HEAD`
-   covers Step 5 closeout + Step 6 design + Step 6 sub-step 0 + Amendment 1.
+   covers Step 5 closeout + Step 6 design + Step 6 sub-step 0 +
+   Amendment 1 + sub-step 1a + sub-step 1b (1b.1 + 1b.2 + 1b.3).
 
 7. **`pudo_planner.py`** (1041 lines) and **`tests/test_pudo_planner.py`**
    (1650 lines) — the Phase E artifacts.
 
-8. **`cluster_detection.py`** (200 lines) and **`tests/test_cluster_detection.py`**
-   — the home for sub-step 1a's `get_recent_clusters()` primitive per
+8. **`cluster_detection.py`** (316 lines) and **`tests/test_cluster_detection.py`**
+   — houses sub-step 1a's `get_recent_clusters()` primitive per
    Amendment 1.
 
-9. **`where_am_i.py`** (1154 lines) and **`tests/test_where_am_i.py`** —
-   the WAI consumer that sub-step 1b wires `cluster_revisit` into.
+9. **`where_am_i.py`** (1275 lines) and **`tests/test_where_am_i.py`** —
+   the WAI consumer; sub-step 1b houses `cluster_revisit` topology
+   (Step 3.5 in `evaluate()`) plus the verification suite.
 
 ---
 
 ## Current state of the world
 
 ```
-HEAD:                 6522ba5 (Phase E Step 6 sub-step 1b.2 — cluster_revisit topology wired into evaluate())
-Branch:               patch-00566a-unified-refinement (in lockstep with origin; untracked: apply_substep_1b2_test_fix.py, apply_v26_amendment.py)
-Tests pytest:         258/258 passing (floor preserved through 1b.1 contract change + 1b.2 wiring)
+HEAD:                 a68447b (Phase E Step 6 sub-step 1b.3 — cluster_revisit verification gap closed)
+Branch:               patch-00566a-unified-refinement (in lockstep with origin; untracked: apply_substep_1b2_test_fix.py, apply_substep_1b3.py, apply_substep_1b3_fix.py, apply_v26_amendment.py, refresh_progress_1b2.py)
+Tests pytest:         277/277 passing (floor preserved through 1b.1 contract migration + 1b.2 WAI wiring + 1b.3 verification gap closed)
 Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC (NOT re-run; no DB-coupled changes since)
 Live-PG smoke:        4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
 pudo_planner.py:      1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
@@ -61,28 +63,31 @@ test_pudo_planner.py: 1650 lines (1b.1 added cluster_revisit=False to 1 WhereAmI
 cluster_detection.py: 316 lines (sub-step 1a SHIPPED — get_recent_clusters() + Cluster.latest)
 test_cluster_detection.py: 471 lines (8 new T1-T8 tests appended in sub-step 1a)
 where_am_i.py:        1275 lines (1b.2 SHIPPED — +117 lines: CLUSTER_REVISIT_MIN_GAP_M=200, _compute_cluster_revisit() helper, _recent_clusters_fn injection, evaluate() Step 3.5, 3 builder signatures expanded)
-test_where_am_i.py:   line count unchanged (only 3 _match_ghost_cache call sites updated for new signature)
+test_where_am_i.py:   1b.3 SHIPPED — +420 lines: TestComputeClusterRevisit (12 unit tests, Block A) + TestEvaluateClusterRevisit (7 integration tests, Block B) + _FakeCursor.fetchall() fix (false-negative path closure) + cluster_revisit=False assertion added to existing standard-case test
 pudo_types.py:        Offer + accepted_at:datetime, WhereAmIResult + cluster_revisit:bool (1b.1 SHIPPED)
 ```
 
-**Sub-step 1b.3 is the next concrete work** — unit tests for `_compute_cluster_revisit()`
-in isolation (boundary cases, single-cluster history, valid-pair detection) plus WAI
-integration tests via the existing factory pattern with injected `_recent_clusters_fn`.
-Floor target: 258 → ~270-280.
+**Sub-step 1c is the next concrete work** — same-address PLAN-side latch
+(B-26) in `pudo_planner.py`. Refuses `fire_dropoff` if
+`pickup_address == dropoff_address` (or coords ≤ 30m geocoder noise threshold)
+AND `cluster_revisit IS NOT True`. Lifts T79's test-time assertion to a runtime
+gate independent of WAI confidence. Must ship before T75-T79 integration tests
+in sub-step 3 (T79 tests this latch end-to-end).
 
 Phase E Steps 1-5 shipped. Step 6 sub-step 0 shipped (0.1 baseline, 0.2 Group E
 inventory closure, 0.3 WAI source-read finding). Step 6 design ratified, then
 amended 2026-04-27 with Amendment 1 (Offer-Anchor Lookback) — the fixed
 30-minute lookback for `get_recent_clusters()` was rejected as paranoia-class
 per L-10 and replaced with an event-relative window pinned to
-`offer_history.accepted_at` + 60s pre-roll. **Sub-step 1a SHIPPED at commit 6fe454a** —
-`get_recent_clusters()` authored per Amendment 1's offer-anchor signature
-with gaps-and-islands SQL extending detect_cluster()'s `breaks_before` pattern;
-`Cluster.latest` field added (data already in SQL via `MAX(logged_at)`, just
-exposed). 8 new T1-T8 unit tests; 5 consumer call sites updated for the
-required `latest=` kwarg. **Sub-step 1b is the next concrete work** — wiring
-`get_recent_clusters()` into WAI's `cluster_revisit` topology check per the
-v2.6 amendment to WHERE_AM_I_PROPOSAL_v2.md.
+`offer_history.accepted_at` + 60s pre-roll. **Sub-step 1a SHIPPED at commit 6fe454a**
+(`get_recent_clusters()` + `Cluster.latest`, 250 → 258 floor). **Sub-step 1b
+SHIPPED across three commits** — `6e1d60f` (1b.1 contract migration:
+`Offer.accepted_at` + `WhereAmIResult.cluster_revisit`, 9 sites / 6 files,
+258 floor preserved), `6522ba5` (1b.2 WAI wiring: `_compute_cluster_revisit()`
+helper + Step 3.5 in `evaluate()`, +117 lines in `where_am_i.py`, 258 floor
+preserved), `a68447b` (1b.3 verification: 19 new tests + adjunct `_FakeCursor`
+fix, 258 → 277 floor). The Memory–Signal–Latch trilogy of Sub-step 1 is
+two-thirds complete; **1c (B-26 latch) closes it.**
 
 ---
 
@@ -121,6 +126,7 @@ v2.6 amendment to WHERE_AM_I_PROPOSAL_v2.md.
 | aa8e667 | 6 amend   | WHERE_AM_I_PROPOSAL_v2.md v2.6 amendment (cluster_revisit topology) |
 | 6e1d60f | 6.1b.1    | Contract migration: Offer.accepted_at + WhereAmIResult.cluster_revisit (9 sites, 6 files, 258 floor) |
 | 6522ba5 | 6.1b.2    | WAI wiring: cluster_revisit topology live in evaluate() (11 patches, 1 file, 258 floor) |
+| a68447b | 6.1b.3    | Verification gap closed: TestComputeClusterRevisit (12) + TestEvaluateClusterRevisit (7) + _FakeCursor.fetchall fix (258 → 277 floor) |
 | 86ea117   | 6.0.1     | Integration baseline 22/61; "47 IDs"→61 correction; L-6 corollary |
 | 5a86f2e   | 6.0.2     | Group E inventory closure (39/39 categorized)          |
 | 7863b11   | 6.0.3     | WAI cluster-history source-read finding (stateless)    |
@@ -437,58 +443,51 @@ gets live data), L-10 (default kwargs locked as single source of truth
 across `detect_cluster()` and `get_recent_clusters()` via T8), L-11
 (this entry).
 
-### Sub-step 1 — Contract amendments (NEXT SESSION's work)
+### Sub-step 1b — cluster_revisit topology: the "Signal" of the Memory–Signal–Latch trilogy — CLOSED 2026-04-27
 
-Per Gemini Q2 ratification + sub-step 0.3 finding (2026-04-27) +
-Amendment 1 (2026-04-27), sub-step 1 splits firm into 1a + 1b. WAI
-confirmed stateless against cluster history; cluster-history primitive
-lives in `cluster_detection.py` (Option A from sub-step 1a design
-brief, Gemini-ratified). Sub-step 1c (NEW per Amendment 1) ships the
-same-address PLAN-side latch.
+Three-commit ship across `6e1d60f` → `6522ba5` → `a68447b`. Together with sub-step 1a (Memory) and sub-step 1c (Latch, NEXT), constitutes the contract-amendments family of Step 6 sub-step 1.
 
-- **1a (firm):** WAI cluster-history primitive `get_recent_clusters()` in
-  `cluster_detection.py`. Per Amendment 1 signature:
+**1b.1 — Contract migration (`6e1d60f`).** `Offer.accepted_at: datetime` and `WhereAmIResult.cluster_revisit: bool` fields added to `pudo_types.py`. Nine call sites across six files updated for the new required fields. 258 floor preserved (placeholder `cluster_revisit=False` at all WAI return paths).
 
-  ```python
-  def get_recent_clusters(
-      driver_id: str,
-      cur,
-      accepted_at_anchor: datetime,
-      preroll_sec: int = 60,
-      min_samples: int = 3,
-      max_speed_mph: float = 10.0,
-      max_spread_m: float = 25.0,
-  ) -> list[Cluster]:
-  ```
+**1b.2 — WAI wiring (`6522ba5`).** `+117 lines` in `where_am_i.py`. The "Signal" of the Houston Loop is now live in code:
+- Import: `+ get_recent_clusters from cluster_detection`.
+- Constant: `CLUSTER_REVISIT_MIN_GAP_M = 200.0` with L-10 cat-1 provenance comment (production-data-grounded structural noise floor; Houston GPS multipath wobble; not a policy threshold).
+- New pure helper: `_compute_cluster_revisit(active_cluster, recent_clusters)`. O(n²) nested-loop topology check using `_haversine_meters` for distance. Returns True iff a non-active cluster within `MIN_GAP_M` of the active centroid AND ≥1 intermediate cluster ≥ `MIN_GAP_M` from BOTH (the active cluster AND the prior PUDO). The "from both" framing protects against GPS multipath shuffling at one address being mistaken for a true round-trip.
+- `WhereAmI.__init__`: `+ _recent_clusters_fn=get_recent_clusters` as a third keyword-only injected callable, mirroring `_cluster_fn` / `_pivot_fn`.
+- `evaluate()` body: new Step 3.5 (cluster history topology) between Step 3 (stop_context) and Step 4 (current-ride PUDO matching). Computes `cluster_revisit` only when `current_offer is not None` (Q2 ratification — ride-scoped, not driver-scoped).
+- 3 builder signatures expanded with `cluster_revisit: bool`: `_match_ghost_cache`, `_at_unknown_pudo`, `_build_current_result`. Three placeholder `cluster_revisit=False` values inside builder bodies replaced with `cluster_revisit=cluster_revisit`. `_not_at_pudo`'s placeholder stays `False` permanently per Q1 (no active cluster → revisit physically impossible).
+- 258 floor preserved.
 
-  Window: `[accepted_at_anchor - preroll_sec, NOW()]`. SQL approach:
-  gaps-and-islands extension of `detect_cluster()`'s `breaks_before = 0`
-  pattern. `Cluster` dataclass extension: add `latest: datetime` field
-  (data already computed in SQL as `MAX(logged_at)`; just needs to be
-  exposed). Single commit. Test floor projected 250 → 254-258.
+**Design ratifications captured (Gemini 2026-04-27):**
+- **Q1** — `_not_at_pudo` (no active cluster): `cluster_revisit=False` permanently. No call to `get_recent_clusters()` in this case (performance + logic).
+- **Q2** — `current_offer is None`: `cluster_revisit=False` permanently. No fallback time anchor; the signal is ride-scoped not driver-scoped.
+- **Q3** — Ghost-cache hit with no offer = False per Q2. The "we've seen this stop before" signal is `status='at_previous_pudo'` (existing); `cluster_revisit` is reserved for same-ride round-trip. Phase F telemetry (B-24) joint-distributes (cluster_revisit, status, current_offer presence, ghost_id presence) for forensic disambiguation.
 
-  **Q6 carries forward to 1a authoring** — re-verify against current
-  data whether a clean production round-trip exists (yesterday's 14-day
-  scan returned zero; two days of additional driving since). Per L-6
-  corollary, the call is data-driven not memory-driven. Re-verification
-  query is in SUBSTEP_1A_DESIGN_BRIEF (chat archive only) and reads
-  `app_private.offer_history` joined with `app_private.decision_log`
-  filtering for same-address-or-≤30m candidates with both `pickup_fired`
-  and `dropoff_fired = true`. If zero, T75-T79 ships synthetic per L-9
-  Null Island convention; if non-zero, evaluate per L-9 fixture
-  provenance discipline.
+**1b.3 — Verification (`a68447b`).** Closes the verification gap on the topology check shipped at 1b.2. Single-file edit on `tests/test_where_am_i.py` (+420 lines). Test-only commit; no production code touches.
 
-- **1b (firm):** `WhereAmIResult.cluster_revisit: bool` field,
-  `CLUSTER_REVISIT_MIN_GAP_M = 200` constant with refined L-10
-  provenance (production-data-grounded structural noise floor),
-  `CLUSTER_HISTORY_PREROLL_SEC = 60` constant in `cluster_detection.py`,
-  v2.6 amendment to `WHERE_AM_I_PROPOSAL_v2.md`. Resolves Phase F
-  `accepted_at` plumbing question per L-6 source-read at authoring time
-  (does the `Offer` dataclass already carry `accepted_at`, or does
-  Phase F need to add it like B-15 added `target_address`?). Single
-  commit.
+- **Block A — `TestComputeClusterRevisit` (12 pure-function unit tests):** Empty / single history (no-pair short-circuit); no prior_pudo within MIN_GAP (prior gate exclusion); near-both intermediate (Q3 GPS-multipath guard); Houston Loop classic (canonical positive case); both boundary cases probed independently (prior at exactly 200m → excluded via `>=` continue gate at line 827; intermediate at exactly 200m from both → included via `>=` inclusion gate at lines 840-841); chronological ordering (intermediate must be after prior); multiple-prior fan-out (first valid pair wins); tuple-key filter for active cluster (equality-by-content, not by `is`); A12: same coords, different `latest` → NOT filtered (Q4 ratification).
 
-- **1c (NEW per Amendment 1):** Same-address PLAN-side latch in
+- **Block B — `TestEvaluateClusterRevisit` (7 integration tests via injected fakes):** No offer → `cluster_revisit` unconditionally False (Q2 ride-scoped); no cluster → `not_at_pudo` path → False; offer + degenerate history → False; offer + Houston Loop → True (full wiring confirmation); `accepted_at` forwarded as anchor (call-site capture); `at_unknown_pudo` path carries `cluster_revisit` (Step 6); `at_previous_pudo` path carries `cluster_revisit` (Step 5, ghost match).
+
+- **Adjunct fix — `_FakeCursor.fetchall() → []`.** Direct REPL probe confirmed pre-1b.3 silent test pollution: existing `TestEvaluate` tests with non-None offer raised `AttributeError` inside `get_recent_clusters`, swallowed by its bare `except Exception`, returning `[]` → `cluster_revisit` defaulted to False → tests passed for the wrong reason. The fixture extension removes the false-negative path. Q1 ratified.
+
+- **Existing test tightened (Q2 ratification):** `test_cluster_at_target_returns_at_current_pudo` now asserts `cluster_revisit is False` on the standard "first arrival" case, proving the wiring doesn't accidentally fire on default `_FakeCursor` inputs.
+
+- **Boundary precision lesson surfaced (now L-9 corollary in lessons-learned section):** First implementation used 0.001797 deg lng for the 200m boundary based on a 111,320 m/deg desk approximation. Live `_haversine_meters()` (R=6371000) gives 199.82m for that offset, failing both A7 and A8 in opposite directions. Recalibrated to 0.001800 deg → 200.15m via REPL probe; both gates clear.
+
+- **B7 setup correction:** ENROUTE state caused a false-positive `at_current_pudo` because `_target`'s default `named_roads` + `_fake_pivot`'s default `current_road` produced `breadcrumb_match` and `on_target_road` signals against `far_pickup`, firing the intersection matcher before Step 5 could run. Switched to UNCOMMITTED so `_match_current_pudo` returns None (no targets for UNCOMMITTED state), letting the ghost path fire.
+
+- **Floor counts:** pytest 258 → 277 (+19 new tests; 18 added to count, 1 modified). Integration unchanged at 22/61 (test-only commit, no DB-coupled changes).
+
+**Architectural rulings exercised across 1b:** L-2 (predict-then-verify on every gate), L-3 (anchor-based patch script — `apply_substep_1b2.py` 572 lines in-tree), L-5 (trailing-newline guard), L-6 (read production artifacts before authoring), L-6 corollary extended to method-invocation sites (1b.2 lesson, now in lessons-learned section), L-7 (cross-check architectural rulings), L-9 (fixture provenance declared), L-9 corollary added (live-haversine vs desk approximation, 1b.3 lesson, now in lessons-learned section), L-10 (CLUSTER_REVISIT_MIN_GAP_M cat-1 provenance), L-11 (this entry).
+
+### Sub-step 1c — Same-address PLAN-side latch (B-26) — NEXT
+
+Sub-step 1a SHIPPED at `6fe454a` (Memory: `get_recent_clusters()` + `Cluster.latest`; see SHIPPED section above). Sub-step 1b SHIPPED across `6e1d60f` / `6522ba5` / `a68447b` (Signal: contract migration + WAI wiring + verification; see SHIPPED section above). Sub-step 1c is the remaining contract amendment — the runtime safety latch (Latch) that completes the Memory–Signal–Latch trilogy.
+
+**Sub-step assignment ratified Option A (2026-04-27 paired-programming consensus).** 1c stays as its own sub-step rather than folding into early sub-step 2. Rationale: atomicity (B-26 lands as an isolated, revertible commit), engineering symmetry (the trilogy closes cleanly), and risk isolation (if B-26 reveals state-machine edge cases, isolation makes triage cleaner than entanglement with sub-step 2's scope).
+
+- **1c (per Amendment 1):** Same-address PLAN-side latch in
   `pudo_planner.py` per B-26. Lifts T79's test-time assertion to a
   runtime gate independent of WAI confidence:
 
@@ -499,9 +498,18 @@ same-address PLAN-side latch.
          Hold state, await structural confirmation
   ```
 
-  Sub-step assignment alternative: fold into early sub-step 2 if commit
-  shape merits. Must ship before T75-T79 integration tests in sub-step
-  3 (T79 tests this latch end-to-end).
+  Must ship before T75-T79 integration tests in sub-step 3 (T79 tests
+  this latch end-to-end).
+
+  **Open design questions for 1c session-open:**
+  1. Geocoder noise threshold (30m default per Amendment 1) — ratify as
+     module-level constant in `pudo_planner.py` alongside the latch logic
+     so it's as tunable as the 200m topology gap (Gemini suggestion,
+     2026-04-27). Provenance category per L-10 to be locked at session-open.
+  2. Latch action emission — `noop` vs new forensic variant
+     `noop_same_address_no_revisit` for shadow-mode telemetry (B-24
+     implication). Affects PlannerDecision.action `Literal[...]`
+     contract; 12 values vs 11.
 
 `DriverStateSnapshot` does NOT change. B-20 closed.
 
@@ -747,6 +755,14 @@ No "borrowed" coordinates from prior test runs without declared
 provenance. The provenance check is a verification gate at sub-step
 authoring time.
 
+### L-9 corollary — Live haversine vs desk approximation (NEW, Phase E Step 6 sub-step 1b.3)
+
+**Observation:** Sub-step 1b.3's first test fixture used 0.001797 deg lng for the 200m boundary case, derived from a 111,320 m/deg desk approximation (1/111320 ≈ 0.000008983 per meter; 200 × that ≈ 0.0017966). But `_haversine_meters()` in `where_am_i.py` uses R=6371000m and gives 199.82m for that offset — failing A7 (boundary excluded by `>=` continue gate) and A8 (boundary included by `>=` inclusion gate) in opposite directions. Recalibrated to 0.001800 deg → 200.15m via live REPL probe of `_haversine_meters`; both gates clear.
+
+**Protocol change:** Fixture provenance comments (per L-9) must declare distances computed from the actual production helper, not from desk approximations. When a fixture targets a precise boundary value of a gate constant, the fixture math must invoke the same distance function the production code uses, captured via REPL probe and recorded in the fixture docstring.
+
+**Generalization:** Any test fixture that probes a numerical boundary in production code must use the exact same numerical method (function, constants, precision) as the code under test. Approximations introduce false negatives and false positives that no amount of unit-test mock-cursor scaffolding can catch.
+
 ### L-6 corollary — Forensic count provenance (NEW, Phase E Step 6 sub-step 0.1)
 
 **Parent lesson:** L-6 (Inspect production artifacts before authoring assertions) lives in PHASE_D_RETRO.md. This corollary extends L-6 to cover forensic counts asserted in design documents.
@@ -754,6 +770,16 @@ authoring time.
 **Observation:** Step 4-era forensic read of `tests/test_integration.sh` undercounted live test IDs at 47. The 47 figure was asserted in PHASE_E_PROGRESS.md and PHASE_E_STEP_6_DESIGN.md, both ratified by Gemini 2026-04-26. Sub-step 0.1's live baseline run revealed the true count is 61 (matching the long-standing 22/61 figure that had been catalogued as "stale" in the design but was actually canonical). The design documents asserted the wrong count for ~12 hours.
 
 **Protocol change:** Forensic counts asserted in design documents must be sourced from a live run or a binary-locked tool, not from a pattern-grepped read of source text. Pattern-grepping a 850-line shell script for ID strings produced a 23% undercount; the live run produced the truth in 57 seconds. For any count claim in a ratified design document: run the canonical script that produces the count, paste the output verbatim, cite the run timestamp.
+
+### L-6 corollary extension — Method-invocation site inventory (NEW, Phase E Step 6 sub-step 1b.2)
+
+**Promoted from memory entry #15 and the `6522ba5` commit body.**
+
+**Observation:** Sub-step 1b.2 inventoried construction sites for the modified dataclasses (`Offer`, `WhereAmIResult`) but did NOT inventory invocation sites for the methods whose signatures were extended (`_match_ghost_cache`, `_at_unknown_pudo`, `_build_current_result`). Three `TestMatchGhostCache` tests then failed at apply-time with `TypeError` on the missing `cluster_revisit` positional argument. Live diagnosis was clean (no rollback required) but the gap should have been caught before the apply.
+
+**Protocol change:** Any patch that adds a required parameter to a method signature must inventory ALL direct invocation sites of that method, not just the constructor sites of the types it produces or consumes. Extends the L-6 "read external `Cluster()` call sites before patching" rule from sub-step 1a to method-invocation sites.
+
+**Verification gate (now part of L-3 anchor-script authoring):** Before applying any patch that modifies a method signature, grep the test suite for all direct invocation sites of that method name, list them in the patch script's docstring, and explicitly note whether each site is updated by the patch or already compatible.
 
 ### L-10 — Gate threshold provenance traceability (NEW, Phase E Step 6 design)
 
@@ -862,82 +888,104 @@ alternative.
 
 ## Concrete first-message-of-new-chat starter
 
-> I'm resuming Phase E at Step 6 sub-step 1b.3. Sub-step 1b.2 closed at
-> commit 6522ba5 (WAI wiring: `cluster_revisit` topology live in
-> `evaluate()`; 11 patches; +117 lines in where_am_i.py; 258/258 floor).
-> HEAD is 6522ba5.
-> Floor: pytest 258/258, integration 22/61.
+> I'm resuming Phase E at Step 6 sub-step 1c. Sub-step 1b.3 closed at
+> commit `a68447b` (verification gap closed; TestComputeClusterRevisit
+> 12 unit tests + TestEvaluateClusterRevisit 7 integration tests +
+> _FakeCursor.fetchall() fix + cluster_revisit=False assertion in
+> standard-case test; 277/277 floor; integration unchanged at 22/61).
+> HEAD is `a68447b`. Sub-step 1b SHIPPED in full — the Memory–Signal
+> dyad of the trilogy is complete; 1c is the Latch.
 >
-> Sub-step 1b.3 ships unit tests for `_compute_cluster_revisit()` in
-> isolation plus WAI integration tests via the existing factory pattern
-> with injected `_recent_clusters_fn`. The wiring is live (1b.2) but
-> currently unverified by tests. 1b.3 closes the verification gap.
+> Floor: pytest 277/277, integration 22/61.
 >
-> **Sub-step 1b.3 test plan (Gemini-ratifiable; design lives in 1b.2's
-> closing commit body and PHASE_E_PROGRESS.md):**
+> Sub-step 1c ships the same-address PLAN-side latch (B-26) in
+> `pudo_planner.py`. Lifts T79's test-time assertion to a runtime gate
+> independent of WAI confidence:
 >
-> Block A — TestComputeClusterRevisit (~10-15 unit tests):
->   - Empty / single-element history → False
->   - No prior PUDO within MIN_GAP_M → False
->   - Prior PUDO present, no qualifying intermediate → False
->   - Houston Loop classic (prior, intermediate, active) → True
->   - Boundary at exactly CLUSTER_REVISIT_MIN_GAP_M (>= semantics)
->   - Chronological ordering enforcement
->   - Multiple prior candidates with one valid pair → True
+>   IF pickup_address == dropoff_address (or coords ≤ 30m geocoder
+>   noise threshold) AND cluster_revisit IS NOT True:
+>       REFUSE to emit fire_dropoff
+>       Hold state, await structural confirmation
 >
-> Block B — TestEvaluateClusterRevisit (~5-8 integration tests):
->   - current_offer=None → cluster_revisit=False (Q2)
->   - cluster=None → cluster_revisit=False (Q1, _not_at_pudo path)
->   - Offer present, empty history → False
->   - Offer present, Houston Loop fixture → True
->   - Mock asserts _recent_clusters_fn called with offer.accepted_at
+> Single commit ship. Must land before T75-T79 integration tests in
+> sub-step 3.
 >
-> Floor target: 258 → ~270-280. Single commit ship.
+> **Sub-step 1c work outline (Gemini-ratifiable; design lives in
+> PHASE_E_PROGRESS.md sub-step 1c section + Amendment 1 spec at end of
+> PHASE_E_STEP_6_DESIGN.md):**
+>
+> Block A — Implementation in `pudo_planner.py`:
+>   - Module-level constant: `SAME_ADDRESS_GEOCODER_NOISE_M = 30.0`
+>     with L-10 provenance comment (category to be ratified at
+>     session-open).
+>   - Latch helper inside Section D dispatch: refuses fire_dropoff when
+>     conditions match.
+>   - Existing fire_dropoff dispatch points in `consume()` updated to
+>     consult the latch.
+>
+> Block B — Tests in `tests/test_pudo_planner.py`:
+>   - Same-address + cluster_revisit=False → refused (latch fires).
+>   - Same-address + cluster_revisit=True → permitted (Houston Loop).
+>   - Different-address (>30m) → permitted regardless of cluster_revisit.
+>   - Boundary cases at 30m geocoder noise threshold (per L-9 corollary,
+>     fixture math must use the actual production distance helper —
+>     no desk approximations).
+>   - State preservation when latch fires (no spurious side effects).
+>
+> Floor target: 277 → ~290-295. Single commit ship.
+>
+> **Open design questions for session-open (resolve before authoring):**
+>
+> 1. **Geocoder noise threshold value/category.** 30m default per
+>    Amendment 1. Ratify as module-level constant in `pudo_planner.py`
+>    alongside the latch logic so it's as tunable as the 200m topology
+>    gap (Gemini suggestion, 2026-04-27). L-10 provenance category to
+>    lock: production-data-grounded, theoretical-with-shadow-mode, or
+>    re-derive.
+>
+> 2. **Latch action emission.** `noop` vs new forensic variant
+>    `noop_same_address_no_revisit` for shadow-mode telemetry (B-24
+>    implication). Affects PlannerDecision.action `Literal[...]`
+>    contract; 12 values vs 11. If new variant: 1c also touches
+>    `pudo_types.py` and the contract introspection tests in
+>    `TestContractIntrospection` (test_action_literal_has_eleven_values
+>    becomes _twelve_values).
 >
 > Please read in order:
->   1. PHASE_E_PROGRESS.md (this file — sub-step 1b.2 closeout has the
->      live wiring summary; topology helper spec is in the 6522ba5 commit body)
+>   1. PHASE_E_PROGRESS.md (this file — sub-step 1c section + 1b SHIPPED
+>      section for trilogy context)
 >   2. PHASE_E_KICKOFF.md (architectural ground truth)
->   3. PHASE_E_STEP_6_DESIGN.md — Amendment 1 spec at end
->   4. WHERE_AM_I_PROPOSAL_v2.md — v2.6 amendment at top (commit aa8e667)
->   5. where_am_i.py — _compute_cluster_revisit() definition (~line 760
->      in current 1275-line file); CLUSTER_REVISIT_MIN_GAP_M = 200.0;
->      Step 3.5 insertion in evaluate()
->   6. tests/test_where_am_i.py — _FakeCursor and factory patterns;
->      existing TestEvaluate class shows the integration-test idiom
->   7. cluster_detection.py — get_recent_clusters() signature for fake
->      construction (returns list[Cluster] oldest-first, with active as
->      last element)
+>   3. PHASE_E_STEP_6_DESIGN.md — Amendment 1 spec at end (B-26 latch
+>      conceptual frame)
+>   4. `pudo_planner.py` — current Section D dispatch logic; locate all
+>      fire_dropoff emission sites
+>   5. `tests/test_pudo_planner.py` — existing fixture conventions for
+>      the latch tests
+>   6. `pudo_types.py` — Offer.accepted_at + WhereAmIResult.cluster_revisit
+>      contracts (1b.1 SHIPPED)
 >
-> **Gates before authoring 1b.3:**
->   - L-11 doc-currency check: HEAD must be 6522ba5, pytest 258,
->     working tree clean except untracked patch scripts
->   - L-6: read where_am_i.py _compute_cluster_revisit() body verbatim
->     before authoring tests; mental model must match the actual algorithm
->     (key-tuple identity filter; oldest-first ordering; "from both"
->     framing on intermediate distance)
->   - L-9: any forensic-replay test fixture must declare provenance;
->     synthetic Cluster fixtures use Null-Island-or-similar coordinates
->     with declared math (e.g., "active at (0,0); prior at (0, 0.0001)
->     ~11m offset; intermediate at (0.005, 0.005) ~785m offset")
->   - L-10: any new gate threshold added in tests must declare provenance
->     (probably none needed; tests reuse CLUSTER_REVISIT_MIN_GAP_M as
->     production constant under test)
+> **Gates before authoring 1c:**
+>   - L-11 doc-currency check: HEAD must be `a68447b` (or the doc-refresh
+>     commit on top of it), pytest 277, integration 22/61, working tree
+>     clean except untracked patch scripts
+>   - L-6: read `pudo_planner.py` Section D dispatch verbatim before
+>     authoring; identify all current fire_dropoff emission sites
+>   - L-6 corollary extension (1b.2 lesson): if the latch helper has a
+>     signature that callers must adopt, inventory ALL direct invocation
+>     sites in tests/ before applying the patch
+>   - L-9: same-address fixtures must declare provenance; coordinates
+>     within 30m must invoke the actual distance helper
+>   - L-9 corollary (1b.3 lesson): boundary fixtures at exactly the 30m
+>     gate constant must use REPL-probed values from the production
+>     distance function, not desk approximations
+>   - L-10: SAME_ADDRESS_GEOCODER_NOISE_M = 30.0 declares its provenance
+>     in code comment (category 1, 2, or removed — paranoia not allowed)
 >
-> **Carry-over from 1b.2 closeout (deferred to this session):**
->   - PHASE_E_PROGRESS.md "Sub-step 1 — Contract amendments" section
->     was not refreshed at 1b.2 closeout (the 1a/1b/1c framing is stale
->     but the design spec inside is still accurate; refresh whenever
->     it's natural in the 1b.3 doc work).
->   - L-6 corollary section extension (method-invocation-sites lesson
->     from 1b.2) is preserved in the 6522ba5 commit body but not yet
->     promoted into the lessons-learned section. Promote at 1b.3
->     closeout if convenient.
->
-> Same paired-programming protocol that worked through 30 Phase E
+> Same paired-programming protocol that worked through 32 Phase E
 > commits applies. Active verification gates: L-2 / L-3 / L-5 / L-6 /
-> L-6 corollary / L-7 / L-9 / L-10 / L-11. L-8 reactivates at Step 7.
+> L-6 corollary / L-6 corollary extension / L-7 / L-9 / L-9 corollary /
+> L-10 / L-11. L-8 reactivates at Step 7.
 >
-> Constraints unchanged: Reconcile dispatch (B-12) is Step 7. Same-
-> address PLAN-side latch (B-26) is sub-step 1c (or folded into early
-> sub-step 2). Phase F observability (B-23, B-24, B-25) deferred.
+> Constraints unchanged: Reconcile dispatch (B-12) is Step 7. 1c stays
+> as its own sub-step (Option A; 2026-04-27 paired-programming
+> consensus). Phase F observability (B-23, B-24, B-25) deferred.
