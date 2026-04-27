@@ -1224,7 +1224,7 @@ class TestMatchGhostCache:
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
         topo = wai._compute_road_topology("driver1")
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result is None
         # SQL was issued
         assert "suspected_pudos" in cur.last_query
@@ -1247,7 +1247,7 @@ class TestMatchGhostCache:
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
         topo = wai._compute_road_topology("driver1")
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result is not None
         assert result.status == "at_previous_pudo"
         assert result.ghost_id == 42
@@ -1272,7 +1272,7 @@ class TestMatchGhostCache:
             _pivot_fn=_fake_pivot(on_wire=True, current_road="Settemont Road"),
         )
         topo = wai._compute_road_topology("driver1")
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop")
+        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result.on_wire is True
         assert result.current_road == "Settemont Road"
 

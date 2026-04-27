@@ -49,6 +49,15 @@ APARTMENT_RADIUS_M = 300.0
 # Ghost-cache match radius (Step 1 Q8)
 GHOST_MATCH_RADIUS_M = 50.0
 
+# Cluster history topology — Houston Loop revisit gate (v2.6 amendment, sub-step 1b.2)
+# L-10 category 1 provenance: production-data-grounded structural noise floor.
+# Houston GPS multipath wobble in the rideshare heartbeat stream produces
+# centroid drift at a single address; 200m forces evidence of a genuinely
+# different spatial context (driver actually departed and returned) before
+# the round-trip latch (B-26) can fire. Not a policy threshold — adjusting
+# requires physics-of-the-environment justification, not behavioral preference.
+CLUSTER_REVISIT_MIN_GAP_M = 200.0
+
 # Cluster tightness thresholds (Step 3 section A.3)
 # - <= 15m spread:  tight stop, parked at curb
 # - >= 50m spread:  loose, GPS noise or maneuvering
@@ -717,7 +726,7 @@ _CLASS_DISPATCH = {
 
 from datetime import datetime, timezone
 
-from cluster_detection import detect_cluster
+from cluster_detection import detect_cluster, get_recent_clusters
 from pivot_context import get_pivot_context
 from pudo_types import WhereAmIResult, States
 
@@ -753,6 +762,88 @@ LIMIT 1;
 """
 
 
+def _compute_cluster_revisit(
+    active_cluster: "Cluster",
+    recent_clusters: list,
+) -> bool:
+    """Houston Loop topology check (v2.6 amendment, sub-step 1b.2).
+
+    Returns True iff `recent_clusters` contains topological evidence that
+    the driver has departed and returned to the active cluster's location
+    within the offer-anchored lookback window. The signal is structural,
+    not temporal — the intermediate cluster's existence IS the proof of
+    departure-and-return.
+
+    Args:
+      active_cluster: the cluster currently under evaluation. Always the
+        last element of recent_clusters when called from evaluate(), but
+        passed separately for clarity and to keep this helper testable
+        without ordering assumptions on recent_clusters.
+      recent_clusters: oldest-first list of all clusters in the offer-
+        anchored lookback window, as returned by get_recent_clusters().
+
+    Algorithm:
+      1. History = recent_clusters minus active_cluster (matched by identity
+         on (median_lat, median_lng, latest) — the natural unique key).
+      2. If |history| < 2: return False (no room for prior_pudo + intermediate).
+      3. For each candidate prior_pudo in history (chronological order):
+         If prior_pudo within MIN_GAP_M of active centroid:
+           For each later cluster mid in history (after prior_pudo):
+             If mid >= MIN_GAP_M from BOTH active AND prior_pudo:
+               Return True.
+      4. Return False.
+
+    The "from both" framing (Gemini Q3 ratification) protects against GPS
+    multipath drift at a single address being mistaken for a true revisit:
+    if the driver simply shuffled around the pickup, the intermediate would
+    be near the prior_pudo (and thus also near active, since prior_pudo is
+    near active). Requiring distance from both proves a genuinely different
+    spatial context.
+
+    Performance: O(n^2) in cluster count. n is bounded by the offer-
+    anchored window (typically <30 clusters even for long fares); the
+    nested loop terminates on first valid pair, so worst case is rare.
+    """
+    # Identify the active cluster within recent_clusters by its tuple key.
+    # Equality-by-content is safer than `is` since callers may construct
+    # the active_cluster freshly.
+    active_key = (active_cluster.median_lat, active_cluster.median_lng,
+                  active_cluster.latest)
+    history = [
+        c for c in recent_clusters
+        if (c.median_lat, c.median_lng, c.latest) != active_key
+    ]
+
+    if len(history) < 2:
+        return False
+
+    # history is oldest-first (per get_recent_clusters' ORDER BY latest ASC).
+    # Iterate prior_pudo candidates in chronological order.
+    for i, prior_pudo in enumerate(history):
+        d_prior_to_active = _haversine_meters(
+            prior_pudo.median_lat, prior_pudo.median_lng,
+            active_cluster.median_lat, active_cluster.median_lng,
+        )
+        if d_prior_to_active >= CLUSTER_REVISIT_MIN_GAP_M:
+            continue  # not a prior_pudo candidate
+
+        # Look for an intermediate AFTER prior_pudo (chronologically).
+        for mid in history[i + 1:]:
+            d_mid_to_active = _haversine_meters(
+                mid.median_lat, mid.median_lng,
+                active_cluster.median_lat, active_cluster.median_lng,
+            )
+            d_mid_to_prior = _haversine_meters(
+                mid.median_lat, mid.median_lng,
+                prior_pudo.median_lat, prior_pudo.median_lng,
+            )
+            if (d_mid_to_active >= CLUSTER_REVISIT_MIN_GAP_M and
+                    d_mid_to_prior >= CLUSTER_REVISIT_MIN_GAP_M):
+                return True
+
+    return False
+
+
 class WhereAmI:
     """Continuous location awareness primitive.
 
@@ -773,6 +864,7 @@ class WhereAmI:
         *,
         _cluster_fn=detect_cluster,
         _pivot_fn=get_pivot_context,
+        _recent_clusters_fn=get_recent_clusters,
     ):
         """
         cur: psycopg cursor for ghost-cache SELECT.
@@ -780,6 +872,10 @@ class WhereAmI:
             Default: cluster_detection.detect_cluster. Tests inject fakes.
         _pivot_fn: callable(driver_id, cur, anchor_time=None) -> dict.
             Default: pivot_context.get_pivot_context. Tests inject fakes.
+        _recent_clusters_fn: callable(driver_id, cur, accepted_at_anchor, ...)
+            -> list[Cluster]. Default: cluster_detection.get_recent_clusters.
+            Used by evaluate()'s cluster_revisit topology check (v2.6
+            amendment, sub-step 1b.2). Tests inject fakes.
 
         Keyword-only args via `*` so production callers never accidentally
         pass test doubles positionally.
@@ -787,6 +883,7 @@ class WhereAmI:
         self.cur = cur
         self._cluster_fn = _cluster_fn
         self._pivot_fn = _pivot_fn
+        self._recent_clusters_fn = _recent_clusters_fn
 
     # =========================================================================
     # Public entry point
@@ -818,6 +915,20 @@ class WhereAmI:
         # --- Step 3: Stop context — STUB for v1.0 (Stop Atlas v1.1) -------
         stop_context = "unknown_stop"
 
+        # --- Step 3.5: Cluster history topology (v2.6 amendment) ----------
+        # Compute cluster_revisit only when an active offer anchors the
+        # lookback window (Q2 ratification). Without an offer there's no
+        # "current ride" for round-trip semantics; cluster_revisit is
+        # ride-scoped, not driver-scoped.
+        if current_offer is not None:
+            recent_clusters = self._recent_clusters_fn(
+                driver_id, self.cur,
+                accepted_at_anchor=current_offer.accepted_at,
+            )
+            cluster_revisit = _compute_cluster_revisit(cluster, recent_clusters)
+        else:
+            cluster_revisit = False
+
         # --- Step 4: Current-ride PUDO matching ---------------------------
         if current_offer is not None:
             current_outcome = self._match_current_pudo(
@@ -831,17 +942,20 @@ class WhereAmI:
                     cluster=cluster,
                     offer=current_offer,
                     state=state,
+                    cluster_revisit=cluster_revisit,
                 )
 
         # --- Step 5: Ghost cache READ (Q12 lock: read-only) ---------------
-        ghost_result = self._match_ghost_cache(driver_id, cluster, topo, stop_context)
+        ghost_result = self._match_ghost_cache(
+            driver_id, cluster, topo, stop_context, cluster_revisit,
+        )
         if ghost_result is not None:
             return ghost_result
 
         # --- Step 6: Cluster exists, no offer or ghost explains it --------
         # Per Q12: WAI does NOT INSERT here. PLAN consumer (Phase E)
         # decides whether to persist a suspect into suspected_pudos.
-        return self._at_unknown_pudo(cluster, topo, stop_context)
+        return self._at_unknown_pudo(cluster, topo, stop_context, cluster_revisit)
 
     # =========================================================================
     # Topology adapter
@@ -991,6 +1105,7 @@ class WhereAmI:
         cluster: Cluster,
         topo: _RoadTopology,
         stop_context: str,
+        cluster_revisit: bool,
     ) -> Optional[WhereAmIResult]:
         """READ-ONLY ghost-cache lookup (Q12).
 
@@ -1050,7 +1165,7 @@ class WhereAmI:
             target_address=None,
             ghost_id=int(ghost_id),
             cluster=cluster,
-            cluster_revisit=False,
+            cluster_revisit=cluster_revisit,
         )
 
     # =========================================================================
@@ -1083,6 +1198,7 @@ class WhereAmI:
         cluster: Cluster,
         topo: _RoadTopology,
         stop_context: str,
+        cluster_revisit: bool,
     ) -> WhereAmIResult:
         """Cluster exists, no offer matches, no ghost matches."""
         return WhereAmIResult(
@@ -1101,7 +1217,7 @@ class WhereAmI:
             target_address=None,
             ghost_id=None,
             cluster=cluster,
-            cluster_revisit=False,
+            cluster_revisit=cluster_revisit,
         )
 
     def _build_current_result(
@@ -1112,6 +1228,7 @@ class WhereAmI:
         cluster: Cluster,
         offer,
         state: str,
+        cluster_revisit: bool,
     ) -> WhereAmIResult:
         """Assemble at_current_pudo result from a winning matcher outcome.
 
@@ -1154,5 +1271,5 @@ class WhereAmI:
             target_address=outcome.target_address,
             ghost_id=None,
             cluster=cluster,
-            cluster_revisit=False,
+            cluster_revisit=cluster_revisit,
         )
