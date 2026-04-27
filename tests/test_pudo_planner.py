@@ -143,6 +143,7 @@ def _wai(
         target_address=target_address,
         ghost_id=ghost_id,
         cluster=cluster,
+        cluster_revisit=False,
     )
 
 

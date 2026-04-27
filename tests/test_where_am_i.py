@@ -40,6 +40,22 @@ from where_am_i import (
 
 
 # =============================================================================
+# DUMMY_ACCEPTED_AT — synthetic anchor for Offer construction (v2.6 amendment)
+# =============================================================================
+
+DUMMY_ACCEPTED_AT = _dt(2026, 4, 27, 8, 0, tzinfo=_tz.utc)
+"""
+Synthetic anchor for tests that require an Offer construction but do not
+depend on temporal lookback logic. L-9 fixture provenance: declared,
+not borrowed.
+
+WARNING: This is a placeholder of record. Tests exercising temporal logic
+(e.g., Houston Loop topology, T75-T79) must use locally-coherent timestamps
+relative to their heartbeat data, not this constant.
+"""
+
+
+# =============================================================================
 # Test fixture factory (Gemini Q1 ruling: factory over boilerplate)
 # =============================================================================
 
@@ -1013,6 +1029,7 @@ def _offer(
         )
     return Offer(
         offer_id=offer_id,
+        accepted_at=DUMMY_ACCEPTED_AT,
         pickup=pickup,
         dropoff=dropoff,
         secondary_dropoff=secondary_dropoff,

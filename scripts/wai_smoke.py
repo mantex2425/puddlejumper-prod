@@ -48,6 +48,13 @@ from cluster_detection import Cluster
 from datetime import datetime, timezone
 
 
+# Synthetic anchor for Offer construction (v2.6 amendment, sub-step 1b.1).
+# wai_smoke is a smoke script, not a temporal-logic test; this dummy value
+# satisfies Offer's now-required accepted_at field without affecting the
+# script's read-only diagnostic intent.
+DUMMY_ACCEPTED_AT = datetime(2026, 4, 27, 8, 0, tzinfo=timezone.utc)
+
+
 # Defaults pulled from canonical context (memories + S31 fixture).
 DEFAULT_DRIVER = "UjT1hE9eBXh2q95aSZYOkzDJ8lo1"
 DEFAULT_PICKUP_LAT = 29.6246      # Forum Park intersection
@@ -93,6 +100,7 @@ def _build_default_offer(args) -> Offer:
     )
     return Offer(
         offer_id="smoke_test_offer",
+        accepted_at=DUMMY_ACCEPTED_AT,
         pickup=pickup,
         dropoff=dropoff,
     )
@@ -158,6 +166,7 @@ def _smoke_3_null_coords(wai, args) -> bool:
     )
     bad_offer = Offer(
         offer_id="smoke_test_null",
+        accepted_at=DUMMY_ACCEPTED_AT,
         pickup=bad_pickup,
         dropoff=dropoff,
     )

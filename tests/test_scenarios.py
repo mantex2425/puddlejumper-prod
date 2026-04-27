@@ -202,8 +202,14 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
         address_class="number_on_street",
         named_roads=("Anywhere St",),
     )
+    # accepted_at: forensic anchor for 7623_heartbeats fixture (v2.6 amendment).
+    # The earliest fixture heartbeat is at 2026-04-23T20:51:59.735Z; this
+    # value is 7 minutes prior — a realistic Houston ENROUTE leg duration
+    # that comfortably exceeds get_recent_clusters()'s 60-second preroll
+    # buffer. See tests/fixtures/7623_heartbeats.json for the full record.
     offer = Offer(
         offer_id=metadata["current_offer_id_text"],
+        accepted_at=datetime(2026, 4, 23, 20, 45, 0, tzinfo=timezone.utc),
         pickup=pickup,
         dropoff=dropoff,
     )

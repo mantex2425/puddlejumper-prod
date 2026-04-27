@@ -22,6 +22,7 @@ Phase D scope (2026-04):
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Optional
 
 from cluster_detection import Cluster
@@ -106,8 +107,14 @@ class Offer:
     Caller (driver_heartbeat.py / decisions.router) is responsible for
     assembling this struct correctly per state — WAI does not query
     offer_history.
+
+    accepted_at (v2.6 amendment, sub-step 1b.1): the offer-acceptance
+    timestamp from app_private.offer_history.accepted_at. Anchors the
+    cluster-history lookback window in WAI's cluster_revisit topology
+    check per Step 6 Amendment 1. UTC, timezone-aware.
     """
     offer_id: str
+    accepted_at: datetime
     pickup: TargetSpec
     dropoff: TargetSpec
     secondary_dropoff: Optional[TargetSpec] = None
@@ -193,6 +200,15 @@ class WhereAmIResult:
     # the architectural reason Phase C extracted detect_cluster() into a
     # shared primitive in the first place.
     cluster: Optional[Cluster]
+
+    # --- Cluster history topology (v2.6 amendment, sub-step 1b) -------------
+    # True when WAI detects topological evidence of a round-trip (the
+    # "Houston Loop"): a non-current cluster within CLUSTER_REVISIT_MIN_GAP_M
+    # of the active cluster's centroid AND >=1 intermediate cluster
+    # >= MIN_GAP_M from both. Sub-step 1b.1 ships the field as always-False
+    # (placeholder); sub-step 1b.2 wires the real computation in evaluate();
+    # sub-step 1c (B-26) is the same-address PLAN-side latch consumer.
+    cluster_revisit: bool
 
 
 # ============================================================================

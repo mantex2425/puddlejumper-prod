@@ -1050,6 +1050,7 @@ class WhereAmI:
             target_address=None,
             ghost_id=int(ghost_id),
             cluster=cluster,
+            cluster_revisit=False,
         )
 
     # =========================================================================
@@ -1074,6 +1075,7 @@ class WhereAmI:
             target_address=None,
             ghost_id=None,
             cluster=None,
+            cluster_revisit=False,
         )
 
     def _at_unknown_pudo(
@@ -1099,6 +1101,7 @@ class WhereAmI:
             target_address=None,
             ghost_id=None,
             cluster=cluster,
+            cluster_revisit=False,
         )
 
     def _build_current_result(
@@ -1151,4 +1154,5 @@ class WhereAmI:
             target_address=outcome.target_address,
             ghost_id=None,
             cluster=cluster,
+            cluster_revisit=False,
         )
