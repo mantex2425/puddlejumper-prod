@@ -1,10 +1,10 @@
 # Phase E Progress Brief
 
-**For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1a.
+**For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1b.3.
 **Author:** Phase E Step 5 closing session (commit 49ea6c8).
 **Date authored:** 2026-04-26.
-**Updated:** 2026-04-27 — sub-step 1a closeout (commit 6fe454a).
-**Replaces:** prior version at commit 89367ff (post-Amendment 1, pre sub-step 1a).
+**Updated:** 2026-04-27 — sub-step 1b.2 closeout (commit 6522ba5).
+**Replaces:** prior version at commit 6fe454a (post sub-step 1a, pre 1b).
 
 ---
 
@@ -51,17 +51,24 @@
 ## Current state of the world
 
 ```
-HEAD:                 6fe454a (Phase E Step 6 sub-step 1a — get_recent_clusters() + Cluster.latest)
-Branch:               patch-00566a-unified-refinement (clean working tree, in lockstep with origin)
-Tests pytest:         258/258 passing (250 floor + 8 new T1-T8 for get_recent_clusters)
-Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC
+HEAD:                 6522ba5 (Phase E Step 6 sub-step 1b.2 — cluster_revisit topology wired into evaluate())
+Branch:               patch-00566a-unified-refinement (in lockstep with origin; untracked: apply_substep_1b2_test_fix.py, apply_v26_amendment.py)
+Tests pytest:         258/258 passing (floor preserved through 1b.1 contract change + 1b.2 wiring)
+Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC (NOT re-run; no DB-coupled changes since)
 Live-PG smoke:        4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
 pudo_planner.py:      1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
-test_pudo_planner.py: 1650 lines, 68 tests across 6 sub-step blocks
+test_pudo_planner.py: 1650 lines (1b.1 added cluster_revisit=False to 1 WhereAmIResult site)
 cluster_detection.py: 316 lines (sub-step 1a SHIPPED — get_recent_clusters() + Cluster.latest)
 test_cluster_detection.py: 471 lines (8 new T1-T8 tests appended in sub-step 1a)
-where_am_i.py:        1154 lines (sub-step 1b target — cluster_revisit field)
+where_am_i.py:        1275 lines (1b.2 SHIPPED — +117 lines: CLUSTER_REVISIT_MIN_GAP_M=200, _compute_cluster_revisit() helper, _recent_clusters_fn injection, evaluate() Step 3.5, 3 builder signatures expanded)
+test_where_am_i.py:   line count unchanged (only 3 _match_ghost_cache call sites updated for new signature)
+pudo_types.py:        Offer + accepted_at:datetime, WhereAmIResult + cluster_revisit:bool (1b.1 SHIPPED)
 ```
+
+**Sub-step 1b.3 is the next concrete work** — unit tests for `_compute_cluster_revisit()`
+in isolation (boundary cases, single-cluster history, valid-pair detection) plus WAI
+integration tests via the existing factory pattern with injected `_recent_clusters_fn`.
+Floor target: 258 → ~270-280.
 
 Phase E Steps 1-5 shipped. Step 6 sub-step 0 shipped (0.1 baseline, 0.2 Group E
 inventory closure, 0.3 WAI source-read finding). Step 6 design ratified, then
@@ -110,6 +117,10 @@ v2.6 amendment to WHERE_AM_I_PROPOSAL_v2.md.
 | 7a8616a   | 6 amend   | Step 6 Amendment 1 (Offer-Anchor Lookback) ratified |
 | 89367ff   | 6 doc     | PHASE_E_PROGRESS.md refresh per L-11 (post-Amendment 1) |
 | 6fe454a | 6.1a      | Sub-step 1a — get_recent_clusters() + Cluster.latest (258 floor) |
+| 78f1b5e | 6.1a doc  | PHASE_E_PROGRESS.md SHA placeholder substitution (bookkeeping) |
+| aa8e667 | 6 amend   | WHERE_AM_I_PROPOSAL_v2.md v2.6 amendment (cluster_revisit topology) |
+| 6e1d60f | 6.1b.1    | Contract migration: Offer.accepted_at + WhereAmIResult.cluster_revisit (9 sites, 6 files, 258 floor) |
+| 6522ba5 | 6.1b.2    | WAI wiring: cluster_revisit topology live in evaluate() (11 patches, 1 file, 258 floor) |
 | 86ea117   | 6.0.1     | Integration baseline 22/61; "47 IDs"→61 correction; L-6 corollary |
 | 5a86f2e   | 6.0.2     | Group E inventory closure (39/39 categorized)          |
 | 7863b11   | 6.0.3     | WAI cluster-history source-read finding (stateless)    |
@@ -851,45 +862,82 @@ alternative.
 
 ## Concrete first-message-of-new-chat starter
 
-> I'm resuming Phase E at Step 6 sub-step 1b. Sub-step 1a closed at
-> commit 6fe454a (`get_recent_clusters()` + `Cluster.latest`
-> shipped, 8 new tests, 258/258 floor). HEAD is 6fe454a.
+> I'm resuming Phase E at Step 6 sub-step 1b.3. Sub-step 1b.2 closed at
+> commit 6522ba5 (WAI wiring: `cluster_revisit` topology live in
+> `evaluate()`; 11 patches; +117 lines in where_am_i.py; 258/258 floor).
+> HEAD is 6522ba5.
 > Floor: pytest 258/258, integration 22/61.
 >
-> Sub-step 1b wires `get_recent_clusters()` into `where_am_i.py` as the
-> `cluster_revisit` topology signal per the v2.6 amendment to
-> `WHERE_AM_I_PROPOSAL_v2.md`. WAI is stateless against cluster history
-> (sub-step 0.3 finding) so the wiring is purely a new injected callable
-> alongside `_cluster_fn` and `_pivot_fn`, plus a new `_recent_clusters_fn`
-> attribute on `WhereAmI`, plus the topology-check logic in `evaluate()`.
-> The contract: detect "I've stopped here before in this offer" by finding
-> a non-current-window cluster within 25m of the active cluster's centroid.
+> Sub-step 1b.3 ships unit tests for `_compute_cluster_revisit()` in
+> isolation plus WAI integration tests via the existing factory pattern
+> with injected `_recent_clusters_fn`. The wiring is live (1b.2) but
+> currently unverified by tests. 1b.3 closes the verification gap.
+>
+> **Sub-step 1b.3 test plan (Gemini-ratifiable; design lives in 1b.2's
+> closing commit body and PHASE_E_PROGRESS.md):**
+>
+> Block A — TestComputeClusterRevisit (~10-15 unit tests):
+>   - Empty / single-element history → False
+>   - No prior PUDO within MIN_GAP_M → False
+>   - Prior PUDO present, no qualifying intermediate → False
+>   - Houston Loop classic (prior, intermediate, active) → True
+>   - Boundary at exactly CLUSTER_REVISIT_MIN_GAP_M (>= semantics)
+>   - Chronological ordering enforcement
+>   - Multiple prior candidates with one valid pair → True
+>
+> Block B — TestEvaluateClusterRevisit (~5-8 integration tests):
+>   - current_offer=None → cluster_revisit=False (Q2)
+>   - cluster=None → cluster_revisit=False (Q1, _not_at_pudo path)
+>   - Offer present, empty history → False
+>   - Offer present, Houston Loop fixture → True
+>   - Mock asserts _recent_clusters_fn called with offer.accepted_at
+>
+> Floor target: 258 → ~270-280. Single commit ship.
 >
 > Please read in order:
->   1. PHASE_E_PROGRESS.md (this file — sub-step 1a entry has the full
->      get_recent_clusters() spec)
+>   1. PHASE_E_PROGRESS.md (this file — sub-step 1b.2 closeout has the
+>      live wiring summary; topology helper spec is in the 6522ba5 commit body)
 >   2. PHASE_E_KICKOFF.md (architectural ground truth)
 >   3. PHASE_E_STEP_6_DESIGN.md — Amendment 1 spec at end
->   4. WHERE_AM_I_PROPOSAL_v2.md — read the planned v2.6 amendment for
->      `cluster_revisit` (authored in sub-step 1b)
->   5. where_am_i.py — full file (1154 lines), the sub-step 1b target
->   6. tests/test_where_am_i.py — sub-step 1b test home
->   7. cluster_detection.py — `get_recent_clusters()` is at the bottom;
->      review its signature before consuming it
+>   4. WHERE_AM_I_PROPOSAL_v2.md — v2.6 amendment at top (commit aa8e667)
+>   5. where_am_i.py — _compute_cluster_revisit() definition (~line 760
+>      in current 1275-line file); CLUSTER_REVISIT_MIN_GAP_M = 200.0;
+>      Step 3.5 insertion in evaluate()
+>   6. tests/test_where_am_i.py — _FakeCursor and factory patterns;
+>      existing TestEvaluate class shows the integration-test idiom
+>   7. cluster_detection.py — get_recent_clusters() signature for fake
+>      construction (returns list[Cluster] oldest-first, with active as
+>      last element)
 >
-> **Gates before authoring 1b:**
->   - L-11 doc-currency check: HEAD must be 6fe454a, pytest 258,
->     working tree clean
->   - L-6 corollary: read `where_am_i.py` `WhereAmI.__init__` (lines
->     770-794) and `evaluate()` (lines 795-844) verbatim before authoring
->     the topology-check insertion point
->   - WHERE_AM_I_PROPOSAL_v2.md v2.6 amendment must be authored and
->     ratified by Gemini before WAI integration begins
+> **Gates before authoring 1b.3:**
+>   - L-11 doc-currency check: HEAD must be 6522ba5, pytest 258,
+>     working tree clean except untracked patch scripts
+>   - L-6: read where_am_i.py _compute_cluster_revisit() body verbatim
+>     before authoring tests; mental model must match the actual algorithm
+>     (key-tuple identity filter; oldest-first ordering; "from both"
+>     framing on intermediate distance)
+>   - L-9: any forensic-replay test fixture must declare provenance;
+>     synthetic Cluster fixtures use Null-Island-or-similar coordinates
+>     with declared math (e.g., "active at (0,0); prior at (0, 0.0001)
+>     ~11m offset; intermediate at (0.005, 0.005) ~785m offset")
+>   - L-10: any new gate threshold added in tests must declare provenance
+>     (probably none needed; tests reuse CLUSTER_REVISIT_MIN_GAP_M as
+>     production constant under test)
 >
-> Same paired-programming protocol that worked through 27 Phase E
+> **Carry-over from 1b.2 closeout (deferred to this session):**
+>   - PHASE_E_PROGRESS.md "Sub-step 1 — Contract amendments" section
+>     was not refreshed at 1b.2 closeout (the 1a/1b/1c framing is stale
+>     but the design spec inside is still accurate; refresh whenever
+>     it's natural in the 1b.3 doc work).
+>   - L-6 corollary section extension (method-invocation-sites lesson
+>     from 1b.2) is preserved in the 6522ba5 commit body but not yet
+>     promoted into the lessons-learned section. Promote at 1b.3
+>     closeout if convenient.
+>
+> Same paired-programming protocol that worked through 30 Phase E
 > commits applies. Active verification gates: L-2 / L-3 / L-5 / L-6 /
 > L-6 corollary / L-7 / L-9 / L-10 / L-11. L-8 reactivates at Step 7.
 >
-> Constraints: Reconcile dispatch (B-12) is Step 7. Same-address PLAN-
-> side latch (B-26) is sub-step 1c (or folded into early sub-step 2).
-> Phase F observability (B-23, B-24, B-25) deferred.
+> Constraints unchanged: Reconcile dispatch (B-12) is Step 7. Same-
+> address PLAN-side latch (B-26) is sub-step 1c (or folded into early
+> sub-step 2). Phase F observability (B-23, B-24, B-25) deferred.
