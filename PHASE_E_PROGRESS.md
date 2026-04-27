@@ -297,15 +297,34 @@ Three deliverables in one session:
    meaningful (build cluster history primitive). Documents finding in
    sub-step 0 commit body.
 
+**Sub-step 0.3 finding (2026-04-27).** WAI is **stateless against
+cluster history.** `WhereAmI.__init__` (where_am_i.py:770–794) stores
+only `self.cur`, `self._cluster_fn`, and `self._pivot_fn` — no
+cluster-history attribute. `WhereAmI.evaluate()` (where_am_i.py:795–844)
+calls `self._cluster_fn(driver_id, self.cur)` once per invocation at
+line 811, binds the cluster to a local variable, and discards it on
+return. The class docstring at line 757 ("Pure DIAGNOSE per the 4-Box
+Controller. Reads only. evaluate() is safe to call on every heartbeat
+without side effects.") and the Q12 comment at line 842 ("WAI does NOT
+INSERT here. PLAN consumer (Phase E) decides whether to persist") make
+statelessness an architectural lock, not an oversight. Sub-step 1 is
+therefore firm 1a + 1b (see below).
+
 ### Sub-step 1 — Contract amendments
 
-Per Gemini Q2 ratification, sub-step 1 is **conditionally split** on
-sub-step 0.3's WAI source-read finding:
+Per Gemini Q2 ratification + sub-step 0.3 finding (2026-04-27),
+sub-step 1 splits firm into 1a + 1b. WAI confirmed stateless against
+cluster history; 1a is therefore triggered (no longer conditional):
 
-- **1a (conditional):** WAI cluster-history primitive, only if 0.3
-  reveals WAI is stateless against cluster history. Single commit if
-  triggered.
-- **1b (unconditional):** `WhereAmIResult.cluster_revisit: bool` field,
+- **1a (firm):** WAI cluster-history primitive. Storage location TBD —
+  the design ratification round between sub-step 0.3 and 1a authoring
+  weighs Option A (consolidate in `cluster_detection.py`, exposing a
+  `get_recent_clusters` companion to `detect_cluster`) vs Option C
+  (Postgres-side query against heartbeat data). Option B (state on
+  `WhereAmI` instance) rejected: violates the "Pure DIAGNOSE / no side
+  effects" architectural lock at where_am_i.py:757. Gemini's preview
+  (sub-step 0.3 ratification round) leans Option A. Single commit.
+- **1b (firm):** `WhereAmIResult.cluster_revisit: bool` field,
   `CLUSTER_REVISIT_MIN_GAP_M = 200` constant with L-10 provenance, v2.6
   amendment to WHERE_AM_I_PROPOSAL_v2.md. Single commit.
 
