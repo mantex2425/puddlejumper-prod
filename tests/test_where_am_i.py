@@ -24,8 +24,9 @@ import math
 import pytest
 
 from cluster_detection import Cluster
-from datetime import datetime as _dt, timezone as _tz
+from datetime import datetime as _dt, timezone as _tz, timedelta
 from where_am_i import (
+    _compute_cluster_revisit,
     _haversine_meters,
     _signal_proximity,
     _signal_breadcrumb_match,
@@ -79,6 +80,53 @@ def _cluster(
         spread_m=spread_m,
         duration_s=duration_s,
         latest=_dt(2026, 4, 23, 20, 52, 16, tzinfo=_tz.utc),
+    )
+
+
+# =============================================================================
+# _cluster_at - null-island-relative cluster factory for cluster_revisit tests
+# =============================================================================
+# L-9 provenance for null-island coordinate scheme:
+#   Origin (0.0, 0.0) - null island.
+#   1 deg latitude  ~= 111,320 m near equator.
+#   1 deg longitude ~= 111,320 m at equator.
+#   Within a few-hundred-meter neighborhood the haversine distance is well-
+#   approximated by Euclidean * 111,320 m/deg.
+#
+# Reference offsets used in TestComputeClusterRevisit:
+#   (0,        0)         - anchor "active" position
+#   (0,        0.001)     ~ 111 m  - "near" (under 200m gate)
+#   (0,        0.001800)  ~ 200.15 m  - just past gate (intermediate-side)
+#   (0.005,    0.005)     ~ 786 m  - "far" (over 200m gate)
+#   (0,        0.005)     ~ 556 m  - "far" along single axis
+
+_BASE_LATEST = _dt(2026, 4, 27, 8, 0, tzinfo=_tz.utc)
+
+
+def _cluster_at(
+    lat: float,
+    lng: float,
+    latest_offset_s: int = 0,
+    n: int = 8,
+    spread_m: float = 15.0,
+    duration_s: float = 30.0,
+) -> Cluster:
+    """Construct a synthetic Cluster for cluster_revisit topology tests.
+
+    L-9 provenance: callers declare null-island-relative coords and the
+    haversine distance to other clusters in the test docstring.
+
+    latest_offset_s: integer seconds offset from _BASE_LATEST. Lets tests
+    declare chronological ordering without absolute timestamps. oldest-first
+    iteration in get_recent_clusters: smaller offsets appear earlier.
+    """
+    return Cluster(
+        n=n,
+        median_lat=lat,
+        median_lng=lng,
+        spread_m=spread_m,
+        duration_s=duration_s,
+        latest=_BASE_LATEST + timedelta(seconds=latest_offset_s),
     )
 
 
@@ -981,6 +1029,14 @@ class _FakeCursor:
     def fetchone(self):
         return self.ghost_row
 
+    def fetchall(self):
+        """Default empty list. get_recent_clusters() consumes via fetchall;
+        without this, the bare except in cluster_detection would swallow an
+        AttributeError silently. Tests that need specific recent_clusters
+        results inject _recent_clusters_fn directly rather than mock SQL.
+        """
+        return []
+
 
 # Test fixture builders for evaluate() inputs
 
@@ -1010,6 +1066,22 @@ def _fake_cluster_fn(cluster_to_return):
     def _cluster_fn(driver_id, cur):
         return cluster_to_return
     return _cluster_fn
+
+
+def _fake_recent_clusters_fn(clusters_to_return):
+    """Build a fake recent_clusters_fn that returns the given list verbatim.
+
+    Mirrors get_recent_clusters' real signature: (driver_id, cur,
+    accepted_at_anchor=None, **kwargs). The kwargs catch-all lets tests
+    pass through without caring about defaulted args (preroll_sec etc).
+
+    For Block B tests that need to assert on the call args (e.g. that
+    accepted_at_anchor was forwarded from offer.accepted_at), use a
+    closure that captures into a list rather than this factory.
+    """
+    def _rc_fn(driver_id, cur, accepted_at_anchor=None, **kwargs):
+        return clusters_to_return
+    return _rc_fn
 
 
 def _offer(
@@ -1315,6 +1387,10 @@ class TestEvaluate:
         assert result.pudo_type == "pickup"
         assert result.confidence > STRONG_MATCH_CONFIDENCE
         assert result.on_target_road is True
+        # Default _FakeCursor.fetchall() returns [] -> no recent_clusters ->
+        # cluster_revisit must be False on the standard "first arrival" case.
+        # (sub-step 1b.3 Q2: tighten standard case to assert full state.)
+        assert result.cluster_revisit is False
 
     def test_cluster_no_offer_returns_at_unknown_pudo(self):
         # cluster + UNCOMMITTED + no ghost -> at_unknown_pudo
@@ -1383,3 +1459,346 @@ class TestWhereAmIInjection:
         wai = WhereAmI(_FakeCursor(), _pivot_fn=sentinel_pivot)
         result = wai._pivot_fn("driver1", None)
         assert result["current_road"] == "Sentinel Road"
+
+
+# =============================================================================
+# TestComputeClusterRevisit - Block A (12 pure-function unit tests)
+# =============================================================================
+
+class TestComputeClusterRevisit:
+    """Direct unit tests for _compute_cluster_revisit() helper.
+
+    Coordinate scheme (L-9 provenance, see _cluster_at module docstring):
+      active   at (0, 0)
+      near     at (0, 0.001)        ~ 111 m  (under 200m gate)
+      gate     at (0, 0.001797)     ~ 200 m  (exactly at gate)
+      far      at (0.005, 0.005)    ~ 786 m  (over 200m gate)
+      far_axis at (0, 0.005)        ~ 556 m  (over 200m gate, single axis)
+    """
+
+    def test_empty_history_returns_false(self):
+        """recent=[active] only -> history len 0 -> False."""
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        assert _compute_cluster_revisit(active, [active]) is False
+
+    def test_single_history_cluster_returns_false(self):
+        """recent=[A_near, active] -> history len 1 -> False."""
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        a = _cluster_at(0.0, 0.001, latest_offset_s=10)  # 111m away
+        assert _compute_cluster_revisit(active, [a, active]) is False
+
+    def test_no_prior_pudo_within_gap_returns_false(self):
+        """All history clusters >200m from active -> no candidate prior_pudo -> False."""
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        far_1 = _cluster_at(0.005, 0.005, latest_offset_s=10)  # 786m
+        far_2 = _cluster_at(0.0, 0.005, latest_offset_s=20)    # 556m
+        assert _compute_cluster_revisit(active, [far_1, far_2, active]) is False
+
+    def test_prior_near_no_intermediate_far_from_both(self):
+        """prior near active, intermediate also near both -> False (Q3 from-both guard)."""
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        prior = _cluster_at(0.0, 0.001, latest_offset_s=10)    # 111m from active
+        # Intermediate at (0, 0.0005) - 56m from active, ~56m from prior.
+        # Near both -> fails the from-both gate.
+        mid = _cluster_at(0.0, 0.0005, latest_offset_s=20)
+        assert _compute_cluster_revisit(active, [prior, mid, active]) is False
+
+    def test_houston_loop_classic_returns_true(self):
+        """[near, far, active] chronologically -> True (canonical case)."""
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        near = _cluster_at(0.0, 0.001, latest_offset_s=10)     # 111m from active
+        far = _cluster_at(0.005, 0.005, latest_offset_s=20)    # 786m from active and near
+        assert _compute_cluster_revisit(active, [near, far, active]) is True
+
+    def test_intermediate_close_to_prior_only(self):
+        """mid near prior fails the active-gate (from-both guard, geometric edge).
+
+        GPS-multipath protection: when prior is parked ~11m from active, any
+        intermediate within 200m of prior is also within ~211m of active.
+        Picking mid at (0, 0.0011) ~ 122m from active produces:
+          d_mid_to_active = 122m  (FAILS active gate, < 200m)
+          d_mid_to_prior  = 111m  (would also fail prior gate)
+        Either failure mode triggers the from-both guard. Helper returns False.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        prior = _cluster_at(0.0, 0.0001, latest_offset_s=10)   # 11m from active
+        mid = _cluster_at(0.0, 0.0011, latest_offset_s=20)     # 122m from active
+        assert _compute_cluster_revisit(active, [prior, mid, active]) is False
+
+    def test_boundary_prior_at_exactly_min_gap(self):
+        """prior at exactly 200m -> continue (>= excludes), no candidate, False.
+
+        Tests asymmetric semantics on line 827 of where_am_i.py:
+          if d_prior_to_active >= CLUSTER_REVISIT_MIN_GAP_M: continue
+        At d ~= 200.04m, 'continue' fires -> prior is NOT a candidate.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        # 0.001800 deg lng ~= 200.15m. Just past gate -> excluded as prior_pudo.
+        prior_at_gate = _cluster_at(0.0, 0.001800, latest_offset_s=10)
+        far = _cluster_at(0.005, 0.005, latest_offset_s=20)
+        # No other near cluster -> no Houston Loop possible -> False.
+        assert _compute_cluster_revisit(
+            active, [prior_at_gate, far, active]
+        ) is False
+
+    def test_boundary_intermediate_at_exactly_min_gap(self):
+        """intermediate at exactly 200m from both -> True (>= includes).
+
+        Tests asymmetric semantics on lines 840-841 of where_am_i.py:
+          if d_mid_to_active >= 200 AND d_mid_to_prior >= 200: return True
+        At d ~= 200m, both conditions fire -> True.
+
+        Setup:
+          active = (0, 0)
+          prior  = (0.0001, 0)        ~ 11m from active (passes prior gate)
+          mid    = (0, 0.001800)      ~ 200.15m from active, ~200.46m from prior
+        Both intermediate-gate conditions satisfied -> True.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        prior = _cluster_at(0.0001, 0.0, latest_offset_s=10)    # ~11m from active
+        mid_at_gate = _cluster_at(0.0, 0.001800, latest_offset_s=20)
+        assert _compute_cluster_revisit(
+            active, [prior, mid_at_gate, active]
+        ) is True
+
+    def test_chronological_ordering_intermediate_before_prior(self):
+        """history [mid_far, prior_near, active] -> mid is BEFORE prior -> False.
+
+        The algorithm only looks for intermediates AFTER prior_pudo via
+        history[i+1:]. If the only "far" cluster appears before the only
+        "near" cluster chronologically, no valid pair exists.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        mid_far = _cluster_at(0.005, 0.005, latest_offset_s=10)    # earlier
+        prior_near = _cluster_at(0.0, 0.001, latest_offset_s=20)   # later
+        # mid_far at i=0: >200m from active, fails prior gate (continue).
+        # prior_near at i=1: passes prior gate, but history[2:] is empty
+        # (active filtered by tuple key) -> no intermediate -> False.
+        assert _compute_cluster_revisit(
+            active, [mid_far, prior_near, active]
+        ) is False
+
+    def test_multiple_priors_one_valid_pair(self):
+        """[A_near, B_near, C_far, active] -> A finds C as intermediate -> True.
+
+        Tests algorithm finds first valid pair across multiple priors.
+        Iteration order: A first, examines history[1:] = [B, C].
+        B near both -> fails. C far from both -> True.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        a_near = _cluster_at(0.0, 0.001, latest_offset_s=10)      # 111m
+        b_near = _cluster_at(0.0001, 0.001, latest_offset_s=20)   # ~112m
+        c_far = _cluster_at(0.005, 0.005, latest_offset_s=30)     # 786m
+        assert _compute_cluster_revisit(
+            active, [a_near, b_near, c_far, active]
+        ) is True
+
+    def test_active_filtered_by_tuple_key(self):
+        """Freshly-constructed Cluster with same key as recent's active -> filtered.
+
+        Verifies equality-by-content filter on lines 810-815 of where_am_i.py:
+          active_key = (median_lat, median_lng, latest)
+          history = [c for c in recent_clusters if (...) != active_key]
+
+        Critical when callers construct active_cluster fresh and pass alongside
+        a recent_clusters list containing a "duplicate" - the duplicate must
+        be removed so it doesn't accidentally serve as a prior_pudo candidate.
+        """
+        active_orig = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        active_dup = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        assert active_orig is not active_dup  # sanity: different objects
+        prior = _cluster_at(0.0, 0.001, latest_offset_s=10)       # 111m
+        far = _cluster_at(0.005, 0.005, latest_offset_s=20)       # 786m
+        # active_dup filtered by tuple-key equality -> history = [prior, far]
+        # -> Houston Loop -> True.
+        assert _compute_cluster_revisit(
+            active_orig, [prior, far, active_dup]
+        ) is True
+
+    def test_same_coords_different_time_not_filtered(self):
+        """Same (lat, lng), different latest -> NOT filtered (A12, Q4 ratification).
+
+        Inverse of test_active_filtered_by_tuple_key: a previous visit to
+        the SAME location as active should remain in history if its `latest`
+        differs. The tuple-key filter uses (lat, lng, latest), so distinct
+        timestamps preserve the previous visit.
+
+        Setup: active and prior_visit at identical coords (0,0). But:
+          - active.latest = base + 100s (the current cluster)
+          - prior_visit.latest = base + 10s (an earlier visit, same spot)
+        prior_visit must NOT be filtered. With a far intermediate between,
+        this constitutes a true return-to-same-spot Houston Loop -> True.
+        """
+        active = _cluster_at(0.0, 0.0, latest_offset_s=100)
+        prior_visit = _cluster_at(0.0, 0.0, latest_offset_s=10)   # same coords, earlier
+        far = _cluster_at(0.005, 0.005, latest_offset_s=20)       # 786m from active
+        # prior_visit has 0m distance to active (same coords) -> passes prior gate.
+        # far is >200m from both -> passes intermediate gate.
+        # Order: prior_visit (10s) -> far (20s) -> active (100s). Valid.
+        assert _compute_cluster_revisit(
+            active, [prior_visit, far, active]
+        ) is True
+
+
+# =============================================================================
+# TestEvaluateClusterRevisit - Block B (7 integration tests via injected fakes)
+# =============================================================================
+
+class TestEvaluateClusterRevisit:
+    """Verify cluster_revisit is correctly threaded from helper through evaluate()
+    into all three result-building paths (at_current_pudo, at_unknown_pudo,
+    at_previous_pudo) and correctly suppressed when no offer/cluster anchors it.
+    """
+
+    def test_evaluate_no_offer_cluster_revisit_false(self):
+        """current_offer=None -> cluster_revisit=False unconditionally (Q2 ride-scoped)."""
+        cluster = _cluster()
+        cur = _FakeCursor(ghost_row=None)
+        # Even injecting a Houston Loop list, no offer means Step 3.5 doesn't fire.
+        houston_loop = [
+            _cluster_at(0.0, 0.001, latest_offset_s=10),
+            _cluster_at(0.005, 0.005, latest_offset_s=20),
+            cluster,
+        ]
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(cluster),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_fake_recent_clusters_fn(houston_loop),
+        )
+        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
+        assert result.cluster_revisit is False
+
+    def test_evaluate_no_cluster_cluster_revisit_false(self):
+        """_cluster_fn returns None -> not_at_pudo path -> cluster_revisit=False."""
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(None),
+            _pivot_fn=_fake_pivot(),
+        )
+        result = wai.evaluate("driver1", _offer(), States.ENROUTE)
+        assert result.status == "not_at_pudo"
+        assert result.cluster_revisit is False
+
+    def test_evaluate_with_offer_no_history_revisit_false(self):
+        """offer + cluster + history=[active] only -> revisit False (history len 0)."""
+        cluster = _cluster()
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(cluster),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_fake_recent_clusters_fn([cluster]),
+        )
+        # Offer has targets far from cluster -> no current PUDO match ->
+        # falls through to at_unknown_pudo where cluster_revisit observable.
+        far_pickup = _target(lat=30.0, lng=-96.0)
+        offer = _offer(pickup=far_pickup, dropoff=far_pickup)
+        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
+        assert result.cluster_revisit is False
+
+    def test_evaluate_with_offer_houston_loop_revisit_true(self):
+        """offer + cluster + Houston Loop history -> revisit True."""
+        # active matches the default _cluster() at canonical Forum Park coords.
+        active = _cluster()
+        # Build Houston Loop relative to active's actual coords:
+        # _cluster() default: median_lat=29.6246, median_lng=-95.5102.
+        # near: shift lng by 0.001 -> ~97m
+        # far:  shift both by 0.005 -> ~786m
+        near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
+        far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
+        history = [near, far, active]
+
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(active),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_fake_recent_clusters_fn(history),
+        )
+        # Pickup far away -> no match -> at_unknown_pudo where revisit visible.
+        far_pickup = _target(lat=30.0, lng=-96.0)
+        offer = _offer(pickup=far_pickup, dropoff=far_pickup)
+        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
+        assert result.cluster_revisit is True
+
+    def test_evaluate_recent_clusters_fn_called_with_offer_accepted_at(self):
+        """Verify Step 3.5 forwards offer.accepted_at as accepted_at_anchor."""
+        cluster = _cluster()
+        captured = []
+
+        def _capturing_rc_fn(driver_id, cur, accepted_at_anchor=None, **kwargs):
+            captured.append({
+                "driver_id": driver_id,
+                "accepted_at_anchor": accepted_at_anchor,
+            })
+            return [cluster]  # no Houston Loop, just observable call
+
+        cur = _FakeCursor()
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(cluster),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_capturing_rc_fn,
+        )
+        offer = _offer()
+        wai.evaluate("driver1", offer, States.ENROUTE)
+        assert len(captured) == 1
+        assert captured[0]["driver_id"] == "driver1"
+        assert captured[0]["accepted_at_anchor"] == offer.accepted_at
+
+    def test_evaluate_at_unknown_pudo_carries_cluster_revisit(self):
+        """Step 6 path (at_unknown_pudo): cluster_revisit reflects helper output."""
+        active = _cluster()
+        near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
+        far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
+        history = [near, far, active]
+
+        cur = _FakeCursor(ghost_row=None)  # no ghost match
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(active),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_fake_recent_clusters_fn(history),
+        )
+        far_pickup = _target(lat=30.0, lng=-96.0)
+        offer = _offer(pickup=far_pickup, dropoff=far_pickup)
+        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
+        assert result.status == "at_unknown_pudo"
+        assert result.cluster_revisit is True
+
+    def test_evaluate_ghost_match_carries_cluster_revisit(self):
+        """Step 5 path (at_previous_pudo): cluster_revisit reflects helper output."""
+        active = _cluster()
+        near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
+        far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
+        history = [near, far, active]
+
+        ghost_row = {
+            "id": 42,
+            "lat": 29.6246,
+            "lng": -95.5102,
+            "offer_id_at_time": "old_offer_xyz",
+            "confidence": 0.65,
+            "detected_at": "2026-04-26",
+        }
+        cur = _FakeCursor(ghost_row=ghost_row)
+        wai = WhereAmI(
+            cur,
+            _cluster_fn=_fake_cluster_fn(active),
+            _pivot_fn=_fake_pivot(),
+            _recent_clusters_fn=_fake_recent_clusters_fn(history),
+        )
+        far_pickup = _target(lat=30.0, lng=-96.0)
+        offer = _offer(pickup=far_pickup, dropoff=far_pickup)
+        # UNCOMMITTED -> _match_current_pudo returns None (no targets), falls
+        # through to Step 5 where ghost fires. ENROUTE would attempt intersection
+        # match against far_pickup whose default named_roads ("Settemont Rd",
+        # "Joan St") still match _fake_pivot's default current_road/breadcrumb,
+        # producing a false-positive at_current_pudo before Step 5 can run.
+        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
+        assert result.status == "at_previous_pudo"
+        assert result.ghost_id == 42
+        assert result.cluster_revisit is True
+
