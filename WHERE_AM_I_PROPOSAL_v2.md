@@ -1,5 +1,133 @@
 <!--
 ================================================================================
+v2.6 AMENDMENT — Phase E sub-step 1b authoring (cluster_revisit topology)
+Date: 2026-04-27
+Branch: patch-00566a-unified-refinement
+Most recent shipped commit: 78f1b5e (sub-step 1a SHA substitution; code-equivalent: 6fe454a)
+
+Phase E sub-step 1b adds the `cluster_revisit` topology signal to WAI per
+PHASE_E_STEP_6_DESIGN.md Amendment 1 (Offer-Anchor Lookback). This amendment
+records the contract changes the v2.4 RFC body and v2.5 amendment do not
+cover. The v2.4 body and the v2.5 amendment remain accurate as historical
+context; do not re-litigate them here.
+
+Three contract changes shipped in sub-step 1b:
+
+  1. `Offer` (pudo_types.py) gains a required `accepted_at: datetime` field.
+     The field carries the offer-acceptance timestamp from
+     `app_private.offer_history.accepted_at`, used as the anchor for
+     `get_recent_clusters()`'s lookback window per Step 6 Amendment 1.
+
+     Rationale: WAI must compute the cluster-history lookback window
+     `[accepted_at - preroll_sec, NOW()]` per Amendment 1's offer-anchored
+     contract. WAI is a pure DIAGNOSE primitive (Q12 lock); it does not
+     query offer_history for fields the caller already has. The offer
+     bundle handed to WAI must therefore carry `accepted_at`.
+
+     Architectural framing (Gemini ratification 2026-04-27): pudo_types.py
+     contains domain objects, not Phase F objects. Phase F is the courier
+     that constructs `Offer` from offer_history rows; Phase E owns the
+     contract because Phase E ships WAI which consumes it.
+
+     The TargetSpec `address` field that v2.5's correction #2 flagged as
+     a Phase F TODO remains a Phase F TODO (B-15). v2.6 does not bundle
+     `address` with `accepted_at`; the two ship independently per the
+     pacing of their respective consumers (B-15 lands when Phase F's
+     heartbeat-loop integration ships; `accepted_at` lands now because
+     sub-step 1b consumes it now).
+
+  2. `WhereAmIResult` (pudo_types.py) gains a `cluster_revisit: bool` field.
+     True when WAI's evaluate() detects topological evidence of a round-trip
+     (the "Houston Loop") within the offer-anchored lookback window.
+     Specifically: there exists a non-current cluster in
+     `get_recent_clusters()` output whose centroid is within
+     `CLUSTER_REVISIT_MIN_GAP_M` of the active cluster's centroid, AND
+     at least one intermediate cluster between them sits >=
+     `CLUSTER_REVISIT_MIN_GAP_M` away from both.
+
+     The signal is structural, not temporal. The intermediate cluster IS
+     the proof of departure-and-return; no minimum duration floor on the
+     intermediate is enforced (per L-10: paranoia thresholds do not ship).
+
+     PLAN consumes this signal in two places per Amendment 1:
+       - Sub-step 1c (B-26): same-address PLAN-side latch refuses
+         `fire_dropoff` when `pickup_address == dropoff_address` AND
+         `cluster_revisit IS NOT True`.
+       - Sub-step 3 integration tests (T75-T79) exercise the round-trip
+         detection end-to-end against synthetic and (where available)
+         forensic heartbeat sequences.
+
+  3. `WhereAmI.__init__` (where_am_i.py) gains a third injected callable:
+     `_recent_clusters_fn=get_recent_clusters`. Mirrors the existing
+     `_cluster_fn` and `_pivot_fn` injection pattern. Production callers
+     get the default; tests inject fakes. Keyword-only via the existing
+     `*` separator.
+
+     `WhereAmI.evaluate()` calls `_recent_clusters_fn(driver_id, self.cur,
+     accepted_at_anchor=current_offer.accepted_at)` after the existing
+     cluster check (Step 1) and before topology computation (Step 2). The
+     returned list is consumed by a new `_compute_cluster_revisit()`
+     helper that produces the `cluster_revisit: bool` verdict for the
+     final WhereAmIResult.
+
+     Stateless against cluster history (sub-step 0.3 finding,
+     where_am_i.py:770-844 source-read 2026-04-27): no per-driver
+     cluster cache lives on `WhereAmI`. Each `evaluate()` call invokes
+     `_recent_clusters_fn` fresh and discards the result on return.
+
+Test fixture strategy (Gemini ratification 2026-04-27, hybrid):
+
+  - Synthetic unit tests (test_pudo_planner.py x 68 tests, test_where_am_i.py
+    factory): single shared module-level constant
+    `DUMMY_ACCEPTED_AT = datetime(2026, 4, 27, 8, 0, tzinfo=timezone.utc)`.
+    Tests don't depend on its value; the constant exists so every `Offer`
+    construction has a declared `accepted_at` per L-9 fixture provenance.
+    The constant's docstring records this contract.
+
+  - Temporal-logic tests (sub-step 1b tests of cluster_revisit, sub-step 3
+    T75-T79 integration tests): `accepted_at` must be internally consistent
+    with synthetic heartbeat timestamps in the same test. The cluster-revisit
+    gate fires on the relationship between `accepted_at` and the heartbeat
+    times; incoherence between them invalidates the test.
+
+  - Forensic replay tests (T70 7623 fixture and any future production-replay
+    tests): use the real `accepted_at` from the source `offer_history` row.
+    L-9 in its purest form -- fixture provenance traceable to a real drive.
+    Dummy values here would corrupt the forensic record.
+
+Gate constants introduced or refined in sub-step 1b:
+
+  CLUSTER_REVISIT_MIN_GAP_M = 200
+    Provenance: L-10 category 1 (production-data-grounded structural noise
+    floor). Houston GPS multipath wobble in the rideshare heartbeat stream;
+    not a policy threshold. Adjusting requires physics-of-the-environment
+    justification, not behavioral preference. (Same constant referenced in
+    Step 6 Amendment 1.)
+
+  CLUSTER_HISTORY_PREROLL_SEC = 60
+    Lives in cluster_detection.py (sub-step 1a default kwarg). Provenance:
+    L-10 category 2 (theoretical with shadow-mode instrumentation). Phase F
+    backlog B-24 validates this against real offer-acceptance latency
+    distributions before Phase G promotion.
+
+Backlog touchpoints:
+
+  - B-15 (Phase F: TargetSpec.address) -- unchanged. v2.6 does not address it.
+  - B-22 (sub-step 1a get_recent_clusters) -- CLOSED at commit 6fe454a.
+  - B-26 (sub-step 1c same-address PLAN-side latch) -- depends on this
+    amendment shipping; references `cluster_revisit` as the required
+    structural confirmation signal.
+
+For the implementation record of sub-step 1b -- what shipped, the
+verification trail, and lessons learned -- see PHASE_E_PROGRESS.md.
+For the original Amendment 1 design that motivated this work, see
+PHASE_E_STEP_6_DESIGN.md (Amendment 1 block at end of doc).
+================================================================================
+-->
+
+
+<!--
+================================================================================
 v2.5 AMENDMENT — Phase D shipped
 Date: 2026-04-26
 Branch: patch-00566a-unified-refinement
