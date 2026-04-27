@@ -1,9 +1,10 @@
 # Phase E Progress Brief
 
-**For:** A fresh Claude conversation resuming Phase E at Step 6.
+**For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1a.
 **Author:** Phase E Step 5 closing session (commit 49ea6c8).
 **Date authored:** 2026-04-26.
-**Replaces:** prior version at commit 10eb654 (post Step 4, now stale).
+**Updated:** 2026-04-27 — sub-step 0.3 + Amendment 1 closeout (commit 7a8616a).
+**Replaces:** prior version at commit 7863b11 (post sub-step 0.3, pre-Amendment 1).
 
 ---
 
@@ -17,39 +18,58 @@
    Lessons L-2, L-3, L-5, L-6, L-7, L-8 are protocol guardrails Phase E
    continues to follow. L-4 (State-Machine Side-Effect Guard) is restored in
    the institutional registry per Step 5 closeout consensus. New Phase E
-   lessons L-9, L-10, L-11 are recorded in this document.
+   lessons L-9, L-10, L-11 + L-6 corollary are recorded in this document.
 
 3. **`WHERE_AM_I_PROPOSAL_v2.md`** at the repo root — design RFC. v2.5
-   amendment header explains the Phase D shipped state. Step 6 design
-   includes a planned v2.6 amendment for `cluster_revisit` (see below).
+   amendment header explains the Phase D shipped state. Sub-step 1b ships
+   the v2.6 amendment for `cluster_revisit`.
 
-4. **This file (`PHASE_E_PROGRESS.md`)** — captures Phase E's current
-   state at end of Step 5. Use this as the entry point for Step 6
-   planning.
+4. **`PHASE_E_STEP_6_DESIGN.md`** at the repo root — Step 6 design proposal,
+   originally ratified by Gemini 2026-04-26, **amended 2026-04-27 with
+   Amendment 1 (Offer-Anchor Lookback)**. Read the top-of-doc Amendment 1
+   notice first, then the body, then the full Amendment 1 spec at the end.
 
-5. **The last 7 commits** — `git log --oneline 10eb654^..HEAD` — Phase E
-   Step 5's complete arc (skeleton + 5 sections + introspection close).
+5. **This file (`PHASE_E_PROGRESS.md`)** — captures Phase E's current
+   state at end of sub-step 0.3 + Amendment 1. Use this as the entry point
+   for sub-step 1a authoring.
 
-6. **`pudo_planner.py`** (1041 lines) and **`tests/test_pudo_planner.py`**
-   (1650 lines) — the two artifacts Step 6 integration tests against.
+6. **The commits since 49ea6c8** — `git log --oneline 49ea6c8..HEAD`
+   covers Step 5 closeout + Step 6 design + Step 6 sub-step 0 + Amendment 1.
+
+7. **`pudo_planner.py`** (1041 lines) and **`tests/test_pudo_planner.py`**
+   (1650 lines) — the Phase E artifacts.
+
+8. **`cluster_detection.py`** (200 lines) and **`tests/test_cluster_detection.py`**
+   — the home for sub-step 1a's `get_recent_clusters()` primitive per
+   Amendment 1.
+
+9. **`where_am_i.py`** (1154 lines) and **`tests/test_where_am_i.py`** —
+   the WAI consumer that sub-step 1b wires `cluster_revisit` into.
 
 ---
 
 ## Current state of the world
 
 ```
-HEAD:                49ea6c8 (Phase E Step 5.7 — Contract introspection. Step 5 closes.)
-Branch:              patch-00566a-unified-refinement (clean working tree, in lockstep with origin)
-Tests pytest:        250/250 passing
-Tests integration:   22/61 passing (39 failing) per sub-step 0.1 baseline run 2026-04-26
-Live-PG smoke:       4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
-pudo_planner.py:     1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
+HEAD:                 7a8616a (Phase E Step 6 — Amendment 1 (Offer-Anchor Lookback) ratified)
+Branch:               patch-00566a-unified-refinement (clean working tree, in lockstep with origin)
+Tests pytest:         250/250 passing
+Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC
+Live-PG smoke:        4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
+pudo_planner.py:      1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
 test_pudo_planner.py: 1650 lines, 68 tests across 6 sub-step blocks
+cluster_detection.py: 200 lines (sub-step 1a target — get_recent_clusters() + Cluster.latest field)
+where_am_i.py:        1154 lines (sub-step 1b target — cluster_revisit field)
 ```
 
-Phase E Steps 1-5 are all shipped. **Step 6 (integration bridge) is the next
-concrete work.** Step 6 spans 2-3 sessions and is the largest remaining
-Phase E step.
+Phase E Steps 1-5 shipped. Step 6 sub-step 0 shipped (0.1 baseline, 0.2 Group E
+inventory closure, 0.3 WAI source-read finding). Step 6 design ratified, then
+amended 2026-04-27 with Amendment 1 (Offer-Anchor Lookback) — the fixed
+30-minute lookback for `get_recent_clusters()` was rejected as paranoia-class
+per L-10 and replaced with an event-relative window pinned to
+`offer_history.accepted_at` + 60s pre-roll. **Sub-step 1a is the next
+concrete work** — authoring `get_recent_clusters()` per the offer-anchor
+signature.
 
 ---
 
@@ -75,6 +95,13 @@ Phase E step.
 | e2e8165   | 5.5       | Section B — STACKED disambiguation (8 tests, R3-rev)   |
 | 186f8c5   | 5.6       | Section D — consume() dispatch (15 tests)              |
 | 49ea6c8   | 5.7       | Contract introspection (3 tests). Step 5 closes.       |
+| bcd3b8a   | 5 close   | PHASE_E_PROGRESS.md refresh (Step 5 closeout per L-11) |
+| 46dea00   | 6 design  | PHASE_E_STEP_6_DESIGN.md authored (Gemini ratified)    |
+| 1f04d23   | Pre-6     | UTC anchor patch on tests/test_integration.sh (T16/T30/T38) |
+| 86ea117   | 6.0.1     | Integration baseline 22/61; "47 IDs"→61 correction; L-6 corollary |
+| 5a86f2e   | 6.0.2     | Group E inventory closure (39/39 categorized)          |
+| 7863b11   | 6.0.3     | WAI cluster-history source-read finding (stateless)    |
+| 7a8616a   | 6.A1      | Step 6 Amendment 1 — Offer-Anchor Lookback (Gemini ratified) |
 
 **Note on Step 5.1:** No commit exists for Step 5.1. The sub-step was the
 test-suite design ratification round (Claude proposes → Gemini reviews →
@@ -90,6 +117,18 @@ multiple sessions. Both gaps were caught at session-12 handoff and
 retrofitted. The protocol caught the gap; L-11 (below) commits to running
 the doc-currency gate at session-open AND session-close every session, so
 the gap surfaces earlier.
+
+**Note on Amendment 1 (7a8616a, 2026-04-27):** Step 6 design was originally
+ratified 2026-04-26 with `CLUSTER_HISTORY_LOOKBACK_SEC = 1800` (30 min) as
+the cluster-history lookback default. During the sub-step 1a design
+ratification round (post-7863b11), Gemini identified the fixed window as
+paranoia-class per L-10 and clock-drift-risky on the lookback boundary.
+The refined design uses an event-relative window pinned to
+`offer_history.accepted_at` + 60s pre-roll, sourced from the database
+(never Python clock). Amendment 1 also introduces a same-address PLAN-side
+latch (B-26) lifting T79's test-time assertion to a runtime gate. Original
+ratified design is preserved verbatim in PHASE_E_STEP_6_DESIGN.md;
+Amendment 1 is appended at end of that doc with a top-of-doc notice.
 
 ---
 
@@ -252,81 +291,135 @@ implementation.
 to Python lowercase actions. Established at S33 ratification. Example:
 `RECONCILE_MISSED_PICKUP` <-> `reconcile_missed_pickup`.
 
-**R5 (NEW, Step 6 design): Structural revisit over odometer delta.**
+**R5 (rev, 2026-04-27 Amendment 1): Structural revisit, offer-anchored.**
 Round-trip detection (pickup address == dropoff address, driver returns
 to PUDO after intermediate destination) uses topological evidence
-(PUDO cluster → ≥200m intermediate cluster → PUDO cluster) rather than
-odometer delta or duration thresholds. Empirically grounded — the
-intermediate cluster IS the proof the round-trip happened, regardless
-of intermediate-stop duration or distance. See Step 6 design below for
-the gate spec.
+(PUDO cluster → ≥200m intermediate cluster → PUDO cluster) within a
+window pinned to the current offer's database-recorded `accepted_at`
+timestamp + 60s pre-roll buffer. No fixed time lookback. No odometer
+dependency. The intermediate cluster IS the proof, anchored by the
+database-recorded offer-acceptance event. See PHASE_E_STEP_6_DESIGN.md
+Amendment 1 for full spec — `get_recent_clusters()` signature, the new
+`CLUSTER_HISTORY_PREROLL_SEC = 60` constant (L-10 category 2:
+theoretical-with-shadow-mode-instrumentation), and the R5-corollary
+same-address PLAN-side latch in `pudo_planner.py` (B-26).
+
+The `CLUSTER_REVISIT_MIN_GAP_M = 200` value is unchanged across the
+amendment. Per Gemini's framing it is a **Structural Noise Floor**
+(Houston GPS multipath wobble), not a policy threshold — adjusting it
+requires a physics-of-the-environment justification, not a behavioral
+preference.
 
 ---
 
-## Phase E Step 6 — Integration Bridge (design ratified, implementation pending)
+## Phase E Step 6 — Integration Bridge (sub-step 0 closed, sub-step 1a next)
 
-Step 6 is the largest remaining Phase E step. Spans 2-3 sessions.
-Implementation begins next session.
+Step 6 spans 2-3 sessions. Sub-step 0 closed 2026-04-27 (commit `7863b11`).
+Step 6 Amendment 1 ratified 2026-04-27 (commit `7a8616a`). Sub-step 1a
+authoring opens next session.
 
-### Pre-Step-6 micro-commit: UTC anchor patch
+### Pre-Step-6 micro-commit: UTC anchor patch — SHIPPED at `1f04d23`
 
-`tests/test_integration.sh` has three legacy `AT TIME ZONE 'America/Chicago'`
-violations in T16, T30, T38 (test-only state backdating SQL). These
-predate the rev `00491-mbd` UTC migration. Fix as a single anchor-patch
-commit before Step 6 sub-step 0 takes the integration baseline. Reasoning
-recorded by Gemini in Step 6 design ratification: "go with the micro-step
-anchor patch... if a timing-related bug pops up in Step 6, you know it's
-logic-driven, not timezone-drift driven."
+`tests/test_integration.sh` had three legacy `AT TIME ZONE 'America/Chicago'`
+violations in T16, T30, T38 (test-only state backdating SQL). Predated the
+rev `00491-mbd` UTC migration. Fixed via single anchor-patch commit before
+sub-step 0.1 baseline run. Reasoning recorded by Gemini in Step 6 design
+ratification: "go with the micro-step anchor patch... if a timing-related
+bug pops up in Step 6, you know it's logic-driven, not timezone-drift
+driven."
 
-### Sub-step 0 — Baseline + inventory + WAI source-read
+### Sub-step 0 — Baseline + inventory + WAI source-read — CLOSED 2026-04-27
 
-Three deliverables in one session:
+Three deliverables shipped across three commits:
 
-1. **Baseline run.** `bash tests/test_integration.sh 2>&1 | tee
-   /tmp/integration_baseline.txt`. Count `❌ FAIL` and `✅ PASS` lines.
-   Record actual live count. The 22/61 figure is canonical; my Step 4 forensic read of the
-   source file undercounted IDs at 47. Sub-step 0.1 baseline run
-   2026-04-26 verified the live count is 22 passing / 39 failing
-   / 61 total.
-2. **Group E inventory.** Close the long-standing TODO in
-   `tests/TEST_SUITE_STATUS.md` by categorizing all T01-T42 failures
-   into Groups A-D (or new groups as needed).
-3. **`where_am_i.py` cluster-history read.** Determine whether WAI today
-   tracks per-driver cluster history. This decides whether sub-step 1's
-   `cluster_revisit` amendment is small (extend existing tracking) or
-   meaningful (build cluster history primitive). Documents finding in
-   sub-step 0 commit body.
+1. **Sub-step 0.1 (`86ea117`).** Live integration baseline run:
+   `bash tests/test_integration.sh` returned 22 passing / 39 failing /
+   61 total. Confirmed the long-standing 22/61 figure is canonical;
+   the Step-4-era forensic read undercounting at 47 was retired. L-6
+   corollary committed (forensic counts must be sourced from live
+   runs, not pattern-grepped reads).
 
-**Sub-step 0.3 finding (2026-04-27).** WAI is **stateless against
-cluster history.** `WhereAmI.__init__` (where_am_i.py:770–794) stores
-only `self.cur`, `self._cluster_fn`, and `self._pivot_fn` — no
-cluster-history attribute. `WhereAmI.evaluate()` (where_am_i.py:795–844)
-calls `self._cluster_fn(driver_id, self.cur)` once per invocation at
-line 811, binds the cluster to a local variable, and discards it on
-return. The class docstring at line 757 ("Pure DIAGNOSE per the 4-Box
-Controller. Reads only. evaluate() is safe to call on every heartbeat
-without side effects.") and the Q12 comment at line 842 ("WAI does NOT
-INSERT here. PLAN consumer (Phase E) decides whether to persist") make
-statelessness an architectural lock, not an oversight. Sub-step 1 is
-therefore firm 1a + 1b (see below).
+2. **Sub-step 0.2 (`5a86f2e`).** Group E inventory closure. All 39 failing
+   tests categorized into Groups A/B/C/D + new Group F (setup-cascade
+   from Group A). Distribution: A=13, B=8, C=3, D=11, F=4. The long-
+   standing TODO in `tests/TEST_SUITE_STATUS.md` is closed.
 
-### Sub-step 1 — Contract amendments
+3. **Sub-step 0.3 (`7863b11`).** WAI cluster-history source-read finding:
+   **WAI is stateless against cluster history.** `WhereAmI.__init__`
+   (where_am_i.py:770–794) stores only `self.cur`, `self._cluster_fn`,
+   `self._pivot_fn` — no cluster-history attribute. `WhereAmI.evaluate()`
+   (where_am_i.py:795–844) calls `self._cluster_fn(driver_id, self.cur)`
+   once per invocation at line 811, binds the cluster to a local
+   variable, discards on return. Class docstring at line 757 ("Pure
+   DIAGNOSE per the 4-Box Controller. Reads only.") and Q12 comment at
+   line 842 make statelessness an architectural lock. Sub-step 1
+   therefore splits firm into 1a + 1b (no longer conditional).
 
-Per Gemini Q2 ratification + sub-step 0.3 finding (2026-04-27),
-sub-step 1 splits firm into 1a + 1b. WAI confirmed stateless against
-cluster history; 1a is therefore triggered (no longer conditional):
+### Sub-step 1 — Contract amendments (NEXT SESSION's work)
 
-- **1a (firm):** WAI cluster-history primitive. Storage location TBD —
-  the design ratification round between sub-step 0.3 and 1a authoring
-  weighs Option A (consolidate in `cluster_detection.py`, exposing a
-  `get_recent_clusters` companion to `detect_cluster`) vs Option C
-  (Postgres-side query against heartbeat data). Option B (state on
-  `WhereAmI` instance) rejected: violates the "Pure DIAGNOSE / no side
-  effects" architectural lock at where_am_i.py:757. Gemini's preview
-  (sub-step 0.3 ratification round) leans Option A. Single commit.
+Per Gemini Q2 ratification + sub-step 0.3 finding (2026-04-27) +
+Amendment 1 (2026-04-27), sub-step 1 splits firm into 1a + 1b. WAI
+confirmed stateless against cluster history; cluster-history primitive
+lives in `cluster_detection.py` (Option A from sub-step 1a design
+brief, Gemini-ratified). Sub-step 1c (NEW per Amendment 1) ships the
+same-address PLAN-side latch.
+
+- **1a (firm):** WAI cluster-history primitive `get_recent_clusters()` in
+  `cluster_detection.py`. Per Amendment 1 signature:
+
+  ```python
+  def get_recent_clusters(
+      driver_id: str,
+      cur,
+      accepted_at_anchor: datetime,
+      preroll_sec: int = 60,
+      min_samples: int = 3,
+      max_speed_mph: float = 10.0,
+      max_spread_m: float = 25.0,
+  ) -> list[Cluster]:
+  ```
+
+  Window: `[accepted_at_anchor - preroll_sec, NOW()]`. SQL approach:
+  gaps-and-islands extension of `detect_cluster()`'s `breaks_before = 0`
+  pattern. `Cluster` dataclass extension: add `latest: datetime` field
+  (data already computed in SQL as `MAX(logged_at)`; just needs to be
+  exposed). Single commit. Test floor projected 250 → 254-258.
+
+  **Q6 carries forward to 1a authoring** — re-verify against current
+  data whether a clean production round-trip exists (yesterday's 14-day
+  scan returned zero; two days of additional driving since). Per L-6
+  corollary, the call is data-driven not memory-driven. Re-verification
+  query is in SUBSTEP_1A_DESIGN_BRIEF (chat archive only) and reads
+  `app_private.offer_history` joined with `app_private.decision_log`
+  filtering for same-address-or-≤30m candidates with both `pickup_fired`
+  and `dropoff_fired = true`. If zero, T75-T79 ships synthetic per L-9
+  Null Island convention; if non-zero, evaluate per L-9 fixture
+  provenance discipline.
+
 - **1b (firm):** `WhereAmIResult.cluster_revisit: bool` field,
-  `CLUSTER_REVISIT_MIN_GAP_M = 200` constant with L-10 provenance, v2.6
-  amendment to WHERE_AM_I_PROPOSAL_v2.md. Single commit.
+  `CLUSTER_REVISIT_MIN_GAP_M = 200` constant with refined L-10
+  provenance (production-data-grounded structural noise floor),
+  `CLUSTER_HISTORY_PREROLL_SEC = 60` constant in `cluster_detection.py`,
+  v2.6 amendment to `WHERE_AM_I_PROPOSAL_v2.md`. Resolves Phase F
+  `accepted_at` plumbing question per L-6 source-read at authoring time
+  (does the `Offer` dataclass already carry `accepted_at`, or does
+  Phase F need to add it like B-15 added `target_address`?). Single
+  commit.
+
+- **1c (NEW per Amendment 1):** Same-address PLAN-side latch in
+  `pudo_planner.py` per B-26. Lifts T79's test-time assertion to a
+  runtime gate independent of WAI confidence:
+
+  ```
+  IF pickup_address == dropoff_address (or coords <= 30m geocoder noise)
+     AND cluster_revisit IS NOT True:
+         REFUSE to emit fire_dropoff
+         Hold state, await structural confirmation
+  ```
+
+  Sub-step assignment alternative: fold into early sub-step 2 if commit
+  shape merits. Must ship before T75-T79 integration tests in sub-step
+  3 (T79 tests this latch end-to-end).
 
 `DriverStateSnapshot` does NOT change. B-20 closed.
 
@@ -351,14 +444,15 @@ per L-9.
 
 ### Sub-step 3 — Round-trip block (T75-T79) — the "Houston Loop"
 
-Five integration tests covering the round-trip dropoff class. The gate:
+Five integration tests covering the round-trip dropoff class. The gate
+(per R5 (rev) + Amendment 1):
 
 ```
-PUDO cluster (cluster 1)
+PUDO cluster (cluster 1, formed within accepted_at - 60s window)
   → ≥200m intermediate cluster (cluster 2)
   → PUDO cluster (cluster 3)
   ⟹ WAI returns cluster_revisit=True
-  ⟹ Planner fires fire_dropoff
+  ⟹ Planner fires fire_dropoff (gated by 1c same-address latch)
 ```
 
 | Test | Asserts                                                                |
@@ -373,12 +467,15 @@ PUDO cluster (cluster 1)
 fails, the system fires `fire_dropoff` at the pickup before the driver
 has actually left, writing a corrupt audit row that says a trip
 completed when no trip was driven. This is the production failure mode
-the legacy BMOAR Path B detector exhibits on same-address rides.
+the legacy BMOAR Path B detector exhibits on same-address rides. The 1c
+runtime latch defends against this independently of WAI confidence.
 
 All T75-T79 fixtures are authored from first principles per L-9. Legacy
 Scenario 14-15 coordinates (`29.5068, -95.41` / `29.5984, -95.62`) are
 NOT inherited — they were artifacts of the state-machine poisoning bug
-this rewrite retires.
+this rewrite retires. Q5 Null Island convention (cluster 1/3 at
+`(0.0001, 0.0001)`, cluster 2 at `(0.005, 0.005)` ~600m offset)
+applies unless Q6 re-verification surfaces a clean forensic candidate.
 
 ### Sub-step 4 — STACKED-via-WAI block (T80-T89)
 
@@ -481,14 +578,18 @@ Office only. Tests for the dispatch path land in T90-T99.
 Heartbeat-loop integration. Modifies `driver_heartbeat.py` (production-
 critical). Adds `address` field to `TargetSpec` so
 `WhereAmIResult.target_address` populates. Adds `secondary_pickup` to
-`Offer` dataclass. Builds shadow-mode logging surface. Wires
+`Offer` dataclass. Per Amendment 1, also adds `accepted_at` end-to-end
+plumbing if `Offer` doesn't already carry it (verified at sub-step 1b
+authoring per L-6). Builds shadow-mode logging surface. Wires
 `WAI_PLANNER_ENABLED_DRIVERS` flag. **Audits atomic-swap snapshot
 assembly** (the "wrong pickup" failure class flagged at Step 2.5;
 the contract for that audit is now firm because Section B's identity-
 based detection only works if Phase F builds the snapshot correctly).
 
 Phase F is also where shadow-mode telemetry for `cluster_revisit`
-gates the round-trip detection in production data (B-24).
+gates the round-trip detection in production data (B-24), and
+validates `CLUSTER_HISTORY_PREROLL_SEC = 60` against real
+offer-acceptance latency distributions.
 
 ---
 
@@ -509,19 +610,29 @@ production data exists.
 | B-13 | Hot-swap collapse: Phase F double-tap WAI after fire                 | Phase F |
 | B-14 | Sequence Violation Detector — secondary dropoff in STACKED before    | Phase F |
 |      | secondary pickup; forensic alert (T86 placeholder)                   |        |
-| B-15 | Phase F: add `address` field to TargetSpec; populate target_address  | Phase F |
+| B-15 | Phase F: add `address` field to TargetSpec; populate target_address. | Phase F |
+|      | Per Amendment 1, also verify `accepted_at` is on `Offer`; if not,    |        |
+|      | extend B-15 to plumb it through (resolved at sub-step 1b per L-6)    |        |
 | B-16 | Phase F: add `secondary_pickup` to Offer dataclass                   | Phase F |
 | B-17 | Phase F: audit atomic-swap snapshot assembly                         | Phase F |
 | B-18 | Phase G: T50/T60 legacy WatchdogB tests retire when BMOAR deprecates | Phase G |
 | B-19 | Step 6: triage tests/test_integration.sh per REPLACE/RETIRE/PRESERVE | Step 6 sub-step 6 |
-| B-20 | (closed) cumulative_miles to DriverStateSnapshot                     | CLOSED — replaced by R5 structural revisit gate |
+| B-20 | (closed) cumulative_miles to DriverStateSnapshot                     | CLOSED — replaced by R5 (rev) structural revisit gate |
 | B-21 | (closed) cancel_candidate reachability                               | CLOSED — Dead Letter Office, fire_retroactive does the work |
-| B-22 | WAI per-driver cluster history with 200m spatial filter              | Step 6 sub-step 1 |
+| B-22 | `get_recent_clusters()` in `cluster_detection.py` with offer-anchored | Step 6 sub-step 1a |
+|      | window per Amendment 1 (was: WAI per-driver cluster history with     |        |
+|      | 200m spatial filter; supersedes pre-Amendment-1 framing)             |        |
 | B-23 | Fast-pickup cluster minimum — investigate WAI 15s floor causing      | Phase F observability |
 |      | pickup-nail failures on quick pickups (forensic, not gating)         |        |
-| B-24 | Phase F shadow-mode logging of cluster_revisit_consideration events  | Phase F |
+| B-24 | Phase F shadow-mode logging of cluster_revisit_consideration events; | Phase F |
+|      | also validates `CLUSTER_HISTORY_PREROLL_SEC = 60` against real       |        |
+|      | offer-acceptance latency distributions per Amendment 1               |        |
 | B-25 | Fast-errand floor evaluation — counter to B-24 if production shows   | Phase G |
 |      | legitimate intermediate stops below WAI cluster floor                |        |
+| B-26 | Same-address PLAN-side latch in `pudo_planner.py` (NEW per           | Step 6 sub-step 1c |
+|      | Amendment 1). Refuses fire_dropoff if pickup_address == dropoff_address |     |
+|      | AND cluster_revisit IS NOT True. Lifts T79's test-time assertion to  |        |
+|      | runtime gate. Must ship before T75-T79 integration tests             |        |
 
 ---
 
@@ -529,7 +640,7 @@ production data exists.
 
 L-2, L-3, L-5 (Phase D Steps 1-4) and L-6, L-7, L-8 (Phase D Step 5.6-5.7)
 remain authoritative. L-4 (State-Machine Side-Effect Guard) is restored
-in the institutional registry per Step 5 closeout consensus. The three
+in the institutional registry per Step 5 closeout consensus. The four
 new entries below are Phase E contributions.
 
 ### L-9 — Fixture provenance traceability (NEW, Phase E Step 5/6 transition)
@@ -586,6 +697,16 @@ code comment:
 Paranoia numbers do not ship. They are either promoted to category 1 or
 2 with evidence, or removed.
 
+**L-10 second application (2026-04-27 Amendment 1):** Step 6 sub-step 1a
+design brief proposed `CLUSTER_HISTORY_LOOKBACK_SEC = 1800` (30 min)
+as the cluster-history default lookback. Gemini identified this as
+paranoia-class per L-10 — no production data grounded the 30-minute
+number; it was "feels safe." The fix was structural rather than
+empirical: replace the fixed window with an event-anchored one
+(`offer_history.accepted_at + 60s pre-roll`). The 60s pre-roll itself
+ships as L-10 category 2 (theoretical with Phase F shadow-mode
+telemetry validation per B-24).
+
 ### L-11 — Documentation currency as session-bookend gate (NEW, Phase E Step 5 closeout)
 
 **Observation:** Phase E sessions 11-12 worked through Steps 2-4
@@ -609,7 +730,7 @@ handoff; commits are the audit trail.
 
 ## Protocol — paired-programming, unchanged
 
-The cycle that has worked through 18 Phase E commits:
+The cycle that has worked through 25 Phase E commits:
 
 1. Claude proposes (one step at a time, with design discussion when
    warranted)
@@ -621,18 +742,22 @@ The cycle that has worked through 18 Phase E commits:
 
 **Verification gates per step (Phase E baseline):**
 - pytest count preserved or increased (current floor: **250**)
-- Integration baseline preserved (live count TBD via Step 6 sub-step 0)
+- Integration baseline preserved (current floor: **22/61** per sub-step
+  0.1 baseline 2026-04-26 23:46:19 UTC)
 - Live-PG smoke when DB-coupled (per L-8) — none in Phase E so far;
   reactivates Step 7
 - L-2 paranoia: `git status` before staging, after staging, after commit
 - L-3: anchor-based patch scripts with sha-locked pre-conditions for
-       any file >100 lines
+       any file >100 lines (heredoc regenerate acceptable for log
+       files per Andrew's call at sub-step 0.3 closeout)
 - L-5: trailing-newline guard
 - L-6: read production artifacts before authoring assertions
+- L-6 corollary: forensic counts in design docs sourced from live runs,
+       not pattern-grepped reads
 - L-7: cross-check architectural rulings against production conventions
-- **L-9 (NEW): fixture provenance declared in docstring**
-- **L-10 (NEW): gate threshold provenance declared in code comment**
-- **L-11 (NEW): doc-currency check at session-open AND session-close**
+- L-9: fixture provenance declared in docstring
+- L-10: gate threshold provenance declared in code comment
+- L-11: doc-currency check at session-open AND session-close
 
 **Predict-then-verify pattern.** Each verification gate names an
 expected value before the gate runs. Mismatches between expectation and
@@ -646,38 +771,62 @@ file itself is always clean — verified by SYNTAX OK + head/tail
 boundary check after the prompt returns. Step 6 should consider
 base64-encoded patch script transfers when patch content exceeds
 ~200 lines. Anchor-script transfers (per L-3) are the preferred
-mechanism for surgical edits regardless of size.
+mechanism for surgical edits regardless of size. For full-file
+regenerates of log/progress documents, file-based transfer via
+`/mnt/user-data/outputs` + present_files + scp to VM is the streamlined
+alternative.
 
 ---
 
 ## Concrete first-message-of-new-chat starter
 
-> I'm resuming Phase E at Step 6. Step 5 (test suite for pudo_planner.py)
-> closed at commit 49ea6c8. The 68-test suite for `pudo_planner.py`
-> shipped. Floor 250.
+> I'm resuming Phase E at Step 6 sub-step 1a. Sub-step 0 closed at
+> commit 7863b11 (WAI source-read finding: WAI is stateless against
+> cluster history). Step 6 Amendment 1 (Offer-Anchor Lookback) shipped
+> at commit 7a8616a. HEAD is 7a8616a. Floor: pytest 250/250,
+> integration 22/61.
 >
-> Step 6 is the integration bridge — synthetic-heartbeat tests for the
-> Five Pillars (T70-T74), the Round-trip block (T75-T79), STACKED-via-WAI
-> (T80-T89), and the legacy REPLACE/RETIRE/PRESERVE/CASCADE/
-> PRESERVE-ASSERTION triage of all 61 live IDs in
-> `tests/test_integration.sh`. Step 6 spans 2-3 sessions.
+> Sub-step 1a authors `get_recent_clusters()` in `cluster_detection.py`
+> per Amendment 1's offer-anchored signature:
+>
+>     def get_recent_clusters(
+>         driver_id: str, cur,
+>         accepted_at_anchor: datetime,
+>         preroll_sec: int = 60,
+>         min_samples: int = 3,
+>         max_speed_mph: float = 10.0,
+>         max_spread_m: float = 25.0,
+>     ) -> list[Cluster]
+>
+> Window: [accepted_at_anchor - preroll_sec, NOW()]. SQL approach:
+> gaps-and-islands extension of detect_cluster()'s breaks_before=0
+> pattern. Cluster dataclass extension: add `latest: datetime`. Test
+> floor projected 250 → 254-258. Single commit.
 >
 > Please read in order:
->   1. PHASE_E_PROGRESS.md (this file — captures everything you need)
+>   1. PHASE_E_PROGRESS.md (this file)
 >   2. PHASE_E_KICKOFF.md (architectural ground truth)
->   3. tests/TEST_SUITE_STATUS.md (legacy debt ledger; Group E TODO open)
->   4. pudo_planner.py (1041 lines)
->   5. tests/test_pudo_planner.py (1650 lines, 68 tests)
->   6. WHERE_AM_I_PROPOSAL_v2.md (planned v2.6 amendment for cluster_revisit)
+>   3. PHASE_E_STEP_6_DESIGN.md — read the top-of-doc Amendment 1
+>      notice, then the body, then the full Amendment 1 spec at end
+>   4. cluster_detection.py (200 lines, target file)
+>   5. tests/test_cluster_detection.py
+>   6. WHERE_AM_I_PROPOSAL_v2.md (planned v2.6 amendment ships in 1b)
 >
-> Then propose Step 6 sub-step 0 — the UTC anchor-patch micro-commit
-> followed by the integration-suite baseline + Group E inventory +
-> `where_am_i.py` cluster-history read. The same paired-programming
-> protocol that worked through Step 5 applies. The new lessons L-9
-> (fixture provenance), L-10 (gate threshold provenance), and L-11
-> (doc-currency session-bookend gate) are now active verification
-> gates.
+> **Gates before authoring 1a:**
+>   - L-11 doc-currency check: HEAD must be 7a8616a, pytest 250, working
+>     tree clean
+>   - Q6 re-verification query: run the same-address forensic search
+>     from sub-step 1a design brief against current data. If zero
+>     candidates, T75-T79 ships synthetic per L-9 Null Island
+>     convention. If non-zero, evaluate per L-9 fixture provenance.
+>     Yesterday's 14-day search returned zero clean candidates (Manvel
+>     test reruns, Transco OCR corruption, Cunningham never-engaged) —
+>     two days additional driving since.
 >
-> Constraints: Step 6 is the largest remaining Phase E step. It will
-> likely span 2-3 sessions. Reconcile dispatch (B-12) is Step 7.
-> Backlog items B-22, B-24, B-25 are Phase F observability work.
+> Same paired-programming protocol that worked through 25 Phase E
+> commits applies. Active verification gates: L-2 / L-3 / L-5 / L-6 /
+> L-6 corollary / L-7 / L-9 / L-10 / L-11. L-8 reactivates at Step 7.
+>
+> Constraints: Reconcile dispatch (B-12) is Step 7. Same-address PLAN-
+> side latch (B-26) is sub-step 1c (or folded into early sub-step 2).
+> Phase F observability (B-23, B-24, B-25) deferred.
