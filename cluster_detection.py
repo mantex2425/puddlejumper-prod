@@ -30,6 +30,7 @@ tests in tests/test_cluster_detection.py.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 import logging
 
@@ -56,12 +57,17 @@ class Cluster:
                        long the driver has been stopped overall (because the
                        cluster only counts heartbeats in the most recent
                        uninterrupted low-speed run).
+      latest        -- MAX(logged_at) of the cluster's heartbeats. Exposes
+                       data already aggregated by the SQL. Used by
+                       get_recent_clusters() consumers to sort and to anchor
+                       Amendment 1's cluster_revisit topology check.
     """
     n: int
     median_lat: float
     median_lng: float
     spread_m: float
     duration_s: float
+    latest: datetime
 
 
 # ============================================================================
@@ -195,7 +201,116 @@ def detect_cluster(driver_id: str, cur,
             median_lng=median_lng,
             spread_m=spread_m,
             duration_s=duration_s,
+            latest=row["latest"],
         )
     except Exception as e:
         logging.warning(f"[CLUSTER] detect_cluster failed: {e}")
         return None
+
+# ============================================================================
+# get_recent_clusters -- offer-anchored history primitive
+# ============================================================================
+#
+# Phase E Step 6 Amendment 1 (sub-step 1a, 2026-04-27)
+#
+# Gaps-and-islands extension of detect_cluster()'s breaks_before pattern.
+# Where detect_cluster() returns the most-recent island only (filter
+# breaks_before = 0), this returns ALL qualifying islands in an
+# offer-anchored window, oldest-first, by GROUPing on breaks_before.
+
+def get_recent_clusters(driver_id: str, cur,
+                        accepted_at_anchor: datetime,
+                        preroll_sec: int = 60,
+                        min_samples: int = 3,
+                        max_speed_mph: float = 10.0,
+                        max_spread_m: float = 25.0) -> list:
+    """Find all qualifying stopped clusters in the offer-anchored lookback window.
+
+    Window: [accepted_at_anchor - preroll_sec, NOW()].
+
+    Each cluster is a contiguous low-speed island in heartbeat_log; islands
+    are separated by >= 1 high-speed sample (gaps-and-islands extension of
+    detect_cluster's breaks_before pattern). Returns oldest-first.
+
+    Differences from detect_cluster():
+      - Returns ALL qualifying islands, not just the most recent.
+      - Spread filter drops only the offending island; other islands survive.
+      - Empty list (not None) when no islands qualify.
+
+    Pure DIAGNOSE primitive. No writes, no state mutation.
+
+    Consumers:
+      - where_am_i.WhereAmI() -- Amendment 1 cluster_revisit topology check
+        (sub-step 1b) and B-26 same-address PLAN-side latch (sub-step 1c).
+    """
+    if not driver_id:
+        return []
+
+    try:
+        cur.execute("""
+            WITH window_hb AS (
+                SELECT lat, lng, speed_mph, logged_at
+                FROM app_private.heartbeat_log
+                WHERE driver_id = %s
+                  AND logged_at >= %s - make_interval(secs => %s)
+                  AND logged_at <= NOW()
+                ORDER BY logged_at DESC
+            ),
+            tagged AS (
+                SELECT *,
+                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
+                         OVER (ORDER BY logged_at DESC
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                         AS breaks_before
+                FROM window_hb
+            ),
+            low_speed AS (
+                SELECT lat, lng, logged_at, breaks_before AS island_id
+                FROM tagged
+                WHERE speed_mph < %s
+            ),
+            per_island AS (
+                SELECT island_id,
+                       COUNT(*)::int AS n,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) AS median_lat,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lng) AS median_lng,
+                       MIN(logged_at) AS earliest,
+                       MAX(logged_at) AS latest
+                FROM low_speed
+                GROUP BY island_id
+                HAVING COUNT(*) >= %s
+            ),
+            per_island_spread AS (
+                SELECT pi.island_id, pi.n, pi.median_lat, pi.median_lng,
+                       pi.earliest, pi.latest,
+                       MAX(app_private.distance_miles(ls.lat, ls.lng,
+                                                      pi.median_lat, pi.median_lng) * 1609.34)
+                         AS spread_m
+                FROM per_island pi
+                JOIN low_speed ls ON ls.island_id = pi.island_id
+                GROUP BY pi.island_id, pi.n, pi.median_lat, pi.median_lng,
+                         pi.earliest, pi.latest
+            )
+            SELECT n, median_lat, median_lng, spread_m, earliest, latest
+            FROM per_island_spread
+            WHERE spread_m <= %s
+            ORDER BY latest ASC;
+        """, (driver_id, accepted_at_anchor, preroll_sec,
+              max_speed_mph, max_speed_mph, min_samples, max_spread_m))
+
+        rows = cur.fetchall()
+        clusters = []
+        for row in rows:
+            duration_s = (row["latest"] - row["earliest"]).total_seconds()
+            clusters.append(Cluster(
+                n=int(row["n"]),
+                median_lat=float(row["median_lat"]),
+                median_lng=float(row["median_lng"]),
+                spread_m=float(row["spread_m"]),
+                duration_s=duration_s,
+                latest=row["latest"],
+            ))
+        return clusters
+    except Exception as e:
+        logging.warning(f"[CLUSTER] get_recent_clusters failed: {e}")
+        return []

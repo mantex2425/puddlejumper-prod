@@ -45,6 +45,7 @@ from psycopg2.extras import RealDictCursor
 from where_am_i import WhereAmI
 from pudo_types import Offer, States, TargetSpec
 from cluster_detection import Cluster
+from datetime import datetime, timezone
 
 
 # Defaults pulled from canonical context (memories + S31 fixture).
@@ -209,6 +210,7 @@ def _smoke_4_injected_cluster(args, conn) -> bool:
         median_lng=args.pickup_lng,
         spread_m=15.0,
         duration_s=30.0,
+        latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc),
     )
 
     def fake_cluster_fn(driver_id, cur):

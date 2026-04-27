@@ -24,6 +24,7 @@ import math
 import pytest
 
 from cluster_detection import Cluster
+from datetime import datetime as _dt, timezone as _tz
 from where_am_i import (
     _haversine_meters,
     _signal_proximity,
@@ -61,6 +62,7 @@ def _cluster(
         median_lng=median_lng,
         spread_m=spread_m,
         duration_s=duration_s,
+        latest=_dt(2026, 4, 23, 20, 52, 16, tzinfo=_tz.utc),
     )
 
 

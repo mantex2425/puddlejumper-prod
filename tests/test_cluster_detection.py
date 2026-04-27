@@ -35,7 +35,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cluster_detection import detect_cluster, Cluster, is_stable
+from cluster_detection import detect_cluster, Cluster, is_stable, get_recent_clusters
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -73,18 +73,21 @@ def _make_mock_cursor(query1_result, query2_result=None):
 
 def test_cluster_is_frozen():
     """Cluster must be immutable. Mutating any field must raise."""
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=16.5)
+    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=16.5, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
     with pytest.raises(Exception):  # FrozenInstanceError in 3.11+, AttributeError in older
         c.n = 99
 
 
 def test_cluster_field_count():
-    """Cluster has exactly 5 fields. Adding a field is a contract change that
+    """Cluster has exactly 6 fields. Adding a field is a contract change that
     should be deliberate; if this test fails after a Cluster edit, audit
-    consumers (bead_on_wire, where_am_i) for compatibility."""
+    consumers (bead_on_wire, where_am_i) for compatibility.
+
+    Phase E Step 6 sub-step 1a: added 'latest' field to expose MAX(logged_at)
+    that the SQL was already aggregating, for offer-anchored lookback sorting."""
     import dataclasses
     field_names = {f.name for f in dataclasses.fields(Cluster)}
-    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s"}
+    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s", "latest"}
 
 
 # ============================================================================
@@ -93,17 +96,17 @@ def test_cluster_field_count():
 
 def test_is_stable_at_threshold_is_true():
     """Boundary: duration == threshold should be stable (>= comparison)."""
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=15.0)
+    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=15.0, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
     assert is_stable(c, threshold_s=15.0) is True
 
 
 def test_is_stable_below_threshold_is_false():
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=14.99)
+    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=14.99, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
     assert is_stable(c, threshold_s=15.0) is False
 
 
 def test_is_stable_well_above_threshold():
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=300.0)
+    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=300.0, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
     assert is_stable(c, threshold_s=15.0) is True
 
 
@@ -331,3 +334,138 @@ def test_fixture_metadata_matches_offer_6999():
     assert meta["current_offer_id_text"] == "7623"
     assert meta["driver_id"] == DRIVER_ID
     assert meta["row_count"] == 17
+
+
+# ============================================================================
+# get_recent_clusters -- Phase E Step 6 sub-step 1a (T1-T8)
+# ============================================================================
+
+ANCHOR_TS = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
+
+
+def _make_island_row(n, median_lat, median_lng, spread_m, earliest, latest):
+    """Mock fetchall() row matching get_recent_clusters' SELECT shape."""
+    return {
+        "n": n,
+        "median_lat": median_lat,
+        "median_lng": median_lng,
+        "spread_m": spread_m,
+        "earliest": earliest,
+        "latest": latest,
+    }
+
+
+def _make_recent_clusters_cursor(rows):
+    """Mock cursor whose fetchall() returns the supplied rows."""
+    cur = MagicMock()
+    cur.fetchall.return_value = rows
+    return cur
+
+
+# T1
+def test_get_recent_clusters_empty_driver_id_short_circuits():
+    """Empty driver_id returns [] without touching cursor."""
+    cur = MagicMock()
+    result = get_recent_clusters("", cur, accepted_at_anchor=ANCHOR_TS)
+    assert result == []
+    cur.execute.assert_not_called()
+
+
+# T2
+def test_get_recent_clusters_db_error_returns_empty():
+    """Cursor exception caught, returns [] (consistent with detect_cluster)."""
+    cur = MagicMock()
+    cur.execute.side_effect = RuntimeError("connection lost")
+    result = get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS)
+    assert result == []
+
+
+# T3
+def test_get_recent_clusters_empty_window_returns_empty():
+    """fetchall() returns [] => function returns []."""
+    cur = _make_recent_clusters_cursor([])
+    result = get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS)
+    assert result == []
+
+
+# T4
+def test_get_recent_clusters_single_island_builds_one_cluster():
+    """One row from fetchall() => one Cluster, all fields populated."""
+    earliest = datetime(2026, 4, 23, 20, 51, 59, tzinfo=timezone.utc)
+    latest = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
+    rows = [_make_island_row(4, 29.6245833, -95.5102295, 0.5, earliest, latest)]
+    cur = _make_recent_clusters_cursor(rows)
+    result = get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS)
+    assert len(result) == 1
+    c = result[0]
+    assert isinstance(c, Cluster)
+    assert c.n == 4
+    assert c.median_lat == pytest.approx(29.6245833)
+    assert c.median_lng == pytest.approx(-95.5102295)
+    assert c.spread_m == pytest.approx(0.5)
+    assert c.duration_s == pytest.approx(17.0)
+    assert c.latest == latest
+
+
+# T5
+def test_get_recent_clusters_multiple_islands_preserve_order():
+    """Two rows from fetchall() => two Clusters in input order.
+    SQL ORDER BY latest ASC is producer-side; function must not re-sort."""
+    older_earliest = datetime(2026, 4, 23, 20, 51, 0, tzinfo=timezone.utc)
+    older_latest = datetime(2026, 4, 23, 20, 51, 30, tzinfo=timezone.utc)
+    newer_earliest = datetime(2026, 4, 23, 20, 52, 0, tzinfo=timezone.utc)
+    newer_latest = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
+    rows = [
+        _make_island_row(3, 29.6240, -95.5100, 5.0, older_earliest, older_latest),
+        _make_island_row(4, 29.6245, -95.5102, 1.0, newer_earliest, newer_latest),
+    ]
+    cur = _make_recent_clusters_cursor(rows)
+    result = get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS)
+    assert len(result) == 2
+    assert result[0].latest == older_latest
+    assert result[1].latest == newer_latest
+    assert result[0].latest < result[1].latest
+
+
+# T6
+def test_get_recent_clusters_passes_query_parameters_in_order():
+    """Parameter binding order is contractual (driver_id, anchor, preroll_sec,
+    max_speed_mph x2, min_samples, max_spread_m). Single execute call."""
+    cur = _make_recent_clusters_cursor([])
+    get_recent_clusters(
+        DRIVER_ID, cur,
+        accepted_at_anchor=ANCHOR_TS,
+        preroll_sec=45,
+        min_samples=5,
+        max_speed_mph=8.0,
+        max_spread_m=20.0,
+    )
+    assert cur.execute.call_count == 1
+    args, _ = cur.execute.call_args
+    _sql, params = args
+    assert params == (DRIVER_ID, ANCHOR_TS, 45, 8.0, 8.0, 5, 20.0)
+
+
+# T7
+def test_get_recent_clusters_duration_computed_from_earliest_latest():
+    """duration_s = (latest - earliest).total_seconds() per row."""
+    earliest = datetime(2026, 4, 23, 20, 50, 0, tzinfo=timezone.utc)
+    latest = datetime(2026, 4, 23, 20, 50, 42, tzinfo=timezone.utc)
+    rows = [_make_island_row(5, 29.62, -95.51, 2.0, earliest, latest)]
+    cur = _make_recent_clusters_cursor(rows)
+    result = get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS)
+    assert result[0].duration_s == pytest.approx(42.0)
+
+
+# T8
+def test_get_recent_clusters_default_kwargs_match_detect_cluster():
+    """Default min_samples=3, max_speed_mph=10.0, max_spread_m=25.0 must match
+    detect_cluster() defaults — single source of truth across both primitives."""
+    cur = _make_recent_clusters_cursor([])
+    get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS, preroll_sec=60)
+    args, _ = cur.execute.call_args
+    _sql, params = args
+    assert params[3] == 10.0   # max_speed_mph
+    assert params[4] == 10.0   # max_speed_mph (repeated for two %s slots)
+    assert params[5] == 3      # min_samples
+    assert params[6] == 25.0   # max_spread_m

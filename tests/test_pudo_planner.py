@@ -125,6 +125,7 @@ def _wai(
             median_lng=corrected_lng if corrected_lng is not None else _DEFAULT_LNG,
             spread_m=15.0,
             duration_s=30.0,
+            latest=datetime.datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc),
         )
     return WhereAmIResult(
         status=status,
@@ -760,6 +761,7 @@ class TestBuildCacheGhost:
             median_lng=-95.5102,
             spread_m=18.0,
             duration_s=42.0,
+            latest=datetime.datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc),
         )
         d = _build_cache_ghost(
             cluster_lat=29.6246,

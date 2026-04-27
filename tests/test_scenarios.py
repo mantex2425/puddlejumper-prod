@@ -34,6 +34,7 @@ import pytest
 from where_am_i import WhereAmI, STRONG_MATCH_CONFIDENCE
 from cluster_detection import Cluster
 from pudo_types import States, TargetSpec, Offer
+from datetime import datetime, timezone
 
 
 # Resolve scenarios/ and tests/fixtures/ relative to this file's location.
@@ -178,6 +179,7 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
         median_lng=stop["lng"],
         spread_m=15.0,
         duration_s=float(stop["duration_s"]),
+        latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc),
     )
 
     # --- Construct the Offer with canonical pickup intersection -----------
