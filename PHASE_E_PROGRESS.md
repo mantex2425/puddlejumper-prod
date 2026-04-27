@@ -3,7 +3,7 @@
 **For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1a.
 **Author:** Phase E Step 5 closing session (commit 49ea6c8).
 **Date authored:** 2026-04-26.
-**Updated:** 2026-04-27 — sub-step 1a closeout (commit {SUBSTEP_1A_SHA}).
+**Updated:** 2026-04-27 — sub-step 1a closeout (commit 6fe454a).
 **Replaces:** prior version at commit 89367ff (post-Amendment 1, pre sub-step 1a).
 
 ---
@@ -51,7 +51,7 @@
 ## Current state of the world
 
 ```
-HEAD:                 {SUBSTEP_1A_SHA} (Phase E Step 6 sub-step 1a — get_recent_clusters() + Cluster.latest)
+HEAD:                 6fe454a (Phase E Step 6 sub-step 1a — get_recent_clusters() + Cluster.latest)
 Branch:               patch-00566a-unified-refinement (clean working tree, in lockstep with origin)
 Tests pytest:         258/258 passing (250 floor + 8 new T1-T8 for get_recent_clusters)
 Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC
@@ -68,7 +68,7 @@ inventory closure, 0.3 WAI source-read finding). Step 6 design ratified, then
 amended 2026-04-27 with Amendment 1 (Offer-Anchor Lookback) — the fixed
 30-minute lookback for `get_recent_clusters()` was rejected as paranoia-class
 per L-10 and replaced with an event-relative window pinned to
-`offer_history.accepted_at` + 60s pre-roll. **Sub-step 1a SHIPPED at commit {SUBSTEP_1A_SHA}** —
+`offer_history.accepted_at` + 60s pre-roll. **Sub-step 1a SHIPPED at commit 6fe454a** —
 `get_recent_clusters()` authored per Amendment 1's offer-anchor signature
 with gaps-and-islands SQL extending detect_cluster()'s `breaks_before` pattern;
 `Cluster.latest` field added (data already in SQL via `MAX(logged_at)`, just
@@ -109,7 +109,7 @@ v2.6 amendment to WHERE_AM_I_PROPOSAL_v2.md.
 | 7863b11   | 6.0.3     | Sub-step 0.3 — WAI source-read: stateless against cluster history |
 | 7a8616a   | 6 amend   | Step 6 Amendment 1 (Offer-Anchor Lookback) ratified |
 | 89367ff   | 6 doc     | PHASE_E_PROGRESS.md refresh per L-11 (post-Amendment 1) |
-| {SUBSTEP_1A_SHA} | 6.1a      | Sub-step 1a — get_recent_clusters() + Cluster.latest (258 floor) |
+| 6fe454a | 6.1a      | Sub-step 1a — get_recent_clusters() + Cluster.latest (258 floor) |
 | 86ea117   | 6.0.1     | Integration baseline 22/61; "47 IDs"→61 correction; L-6 corollary |
 | 5a86f2e   | 6.0.2     | Group E inventory closure (39/39 categorized)          |
 | 7863b11   | 6.0.3     | WAI cluster-history source-read finding (stateless)    |
@@ -369,7 +369,7 @@ Three deliverables shipped across three commits:
 
 ### Sub-step 1a — get_recent_clusters() + Cluster.latest — CLOSED 2026-04-27
 
-Single-commit ship at `{SUBSTEP_1A_SHA}`. Three artifacts:
+Single-commit ship at `6fe454a`. Three artifacts:
 
 1. **`Cluster` dataclass extended** with `latest: datetime` field (sixth field
    appended). The data was already aggregated by detect_cluster()'s SQL via
@@ -852,8 +852,8 @@ alternative.
 ## Concrete first-message-of-new-chat starter
 
 > I'm resuming Phase E at Step 6 sub-step 1b. Sub-step 1a closed at
-> commit {SUBSTEP_1A_SHA} (`get_recent_clusters()` + `Cluster.latest`
-> shipped, 8 new tests, 258/258 floor). HEAD is {SUBSTEP_1A_SHA}.
+> commit 6fe454a (`get_recent_clusters()` + `Cluster.latest`
+> shipped, 8 new tests, 258/258 floor). HEAD is 6fe454a.
 > Floor: pytest 258/258, integration 22/61.
 >
 > Sub-step 1b wires `get_recent_clusters()` into `where_am_i.py` as the
@@ -878,7 +878,7 @@ alternative.
 >      review its signature before consuming it
 >
 > **Gates before authoring 1b:**
->   - L-11 doc-currency check: HEAD must be {SUBSTEP_1A_SHA}, pytest 258,
+>   - L-11 doc-currency check: HEAD must be 6fe454a, pytest 258,
 >     working tree clean
 >   - L-6 corollary: read `where_am_i.py` `WhereAmI.__init__` (lines
 >     770-794) and `evaluate()` (lines 795-844) verbatim before authoring
