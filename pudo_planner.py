@@ -51,6 +51,7 @@ from pudo_types import (
     PlannerDecision,
     WhereAmIResult,
 )
+from where_am_i import haversine_meters
 
 
 # ============================================================================
@@ -66,6 +67,25 @@ N_HEARTBEATS_TO_FIRE: int = 3
 # How long an armed candidate can sit without WAI reaffirming it before
 # PLAN drops it. Heartbeat cadence drift, brief signal loss, etc.
 CANDIDATE_STALE_SECONDS: int = 15
+
+# Same-PUDO colocation threshold for the B-26 PLAN-side latch (sub-step 1c).
+# When the active offer's pickup and dropoff are within this distance of
+# each other AND WAI's cluster_revisit topology check has not confirmed a
+# structural revisit, _decide()'s dropoff branch refuses fire_dropoff and
+# emits noop_same_pudo_no_revisit instead. Lifts T79's test-time assertion
+# to a runtime gate independent of WAI confidence.
+#
+# L-10 category 2: theoretical with shadow-mode instrumentation.
+# The 30m floor is conservative buffer above typical Google Places
+# residential pin precision (≤10-20m) to handle apartment complexes,
+# dense commercial blocks, and suite-level addresses where the geocoder
+# pins to building centroid rather than door. Phase F (B-24) ships
+# shadow-mode telemetry that joint-distributes (latch_fired,
+# cluster_revisit, observed_pickup_dropoff_distance_m) so this value
+# can be empirically validated against round-trip ride data. If the
+# forensic scan moves the number, the constant reclassifies to L-10
+# category 1 with the dataset cited.
+PUDO_COLOCATION_THRESHOLD_M: float = 30.0
 
 # Ghost-match radius. Mirrors WAI's GHOST_MATCH_RADIUS_M (Phase D Q8).
 # When PLAN looks for a previously-cached suspected_pudo near WAI's
@@ -333,6 +353,45 @@ def _advance_armed_state(
     return None
 
 
+def _is_same_pudo_colocation(snapshot: DriverStateSnapshot) -> bool:
+    """Detect whether the active offer's pickup and dropoff are the same point.
+
+    Returns True iff both pickup and dropoff coordinates are populated AND
+    the haversine distance between them is at or below
+    PUDO_COLOCATION_THRESHOLD_M (30m geocoder noise floor).
+
+    Spatial primitive behind sub-step 1c's PLAN-side latch (B-26). When a
+    driver picks up and drops off at effectively the same address (round-
+    trip rides — to-the-airport-and-back, errand pickups, waiter rides),
+    the legacy "fire on arrival at dropoff" pattern produces false
+    positives — the driver hasn't actually left and returned yet. The
+    latch refuses fire_dropoff on these rides until WAI's cluster_revisit
+    topology check confirms a structural revisit.
+
+    Boundary semantics: <= (inclusive). At exactly the threshold distance,
+    the two points are at the geocoder noise floor — treated as same. This
+    is symmetric with the >= used for the cluster_revisit gap separation
+    in WAI's _compute_cluster_revisit (sub-step 1b.2): both gates use
+    inclusive boundaries on the side that means "treated as same."
+
+    Pure function. No DB reads. No side effects. Per R2 (database-blind PLAN).
+    """
+    if (
+        snapshot.pickup_lat is None
+        or snapshot.pickup_lng is None
+        or snapshot.dropoff_lat is None
+        or snapshot.dropoff_lng is None
+    ):
+        return False
+    distance_m = haversine_meters(
+        snapshot.pickup_lat,
+        snapshot.pickup_lng,
+        snapshot.dropoff_lat,
+        snapshot.dropoff_lng,
+    )
+    return distance_m <= PUDO_COLOCATION_THRESHOLD_M
+
+
 # ============================================================================
 # Section C — decision builders (one factory per action)
 # ============================================================================
@@ -353,6 +412,43 @@ def _build_noop(reason: str) -> PlannerDecision:
     return PlannerDecision(
         action="noop",
         offer_id=None,
+        target_state=None,
+        corrected_lat=None,
+        corrected_lng=None,
+        ghost_insert_payload=None,
+        reconciliation_payload=None,
+        reason=reason,
+    )
+
+
+def _build_noop_same_pudo_no_revisit(
+    *,
+    offer_id: str,
+    reason: str,
+) -> PlannerDecision:
+    """B-26 latch held: pickup ≡ dropoff AND no cluster revisit observed.
+
+    The same-PUDO PLAN-side latch fired. The driver appears to be at the
+    dropoff per WAI's confidence model (stable match would otherwise emit
+    fire_dropoff), but the dropoff is at (or within geocoder noise of) the
+    pickup, AND WAI's cluster_revisit topology check has NOT confirmed a
+    structural revisit. Refuse fire_dropoff; hold state for the next
+    heartbeat. When the driver actually leaves and returns, cluster_revisit
+    flips True and the latch releases on a subsequent heartbeat.
+
+    offer_id is required (not Optional) because the latch only fires inside
+    _decide()'s dropoff branch where next_state.armed_offer_id is guaranteed
+    non-None. Carrying offer_id in the noop variant gives Phase F's
+    telemetry (B-24) the correlation key without requiring a separate join.
+
+    Phase F shadow-mode telemetry (B-24) joint-distributes
+    (latch_fired, cluster_revisit, observed_distance_m) for empirical
+    validation of PUDO_COLOCATION_THRESHOLD_M (L-10 cat-2 promoted to cat-1
+    when forensic data confirms the value).
+    """
+    return PlannerDecision(
+        action="noop_same_pudo_no_revisit",
+        offer_id=offer_id,
         target_state=None,
         corrected_lat=None,
         corrected_lng=None,
@@ -891,6 +987,28 @@ class PudoPlanner:
                     reason=reason,
                 )
             else:
+                # Sub-step 1c: PUDO colocation latch (B-26).
+                # When pickup and dropoff are at the same point (within
+                # PUDO_COLOCATION_THRESHOLD_M geocoder noise) AND WAI has
+                # not confirmed a structural revisit (cluster_revisit=False),
+                # the legacy "fire on arrival at dropoff" pattern produces
+                # false positives — the driver hasn't actually left and
+                # returned yet. Refuse fire_dropoff; hold for next heartbeat.
+                # When the driver actually leaves and returns, cluster_revisit
+                # flips True and the latch releases.
+                if (
+                    _is_same_pudo_colocation(snapshot)
+                    and not wai_result.cluster_revisit
+                ):
+                    return _build_noop_same_pudo_no_revisit(
+                        offer_id=next_state.armed_offer_id,
+                        reason=(
+                            f"PUDO colocation detected (pickup-dropoff "
+                            f"distance <= {PUDO_COLOCATION_THRESHOLD_M:.0f}m); "
+                            f"cluster_revisit=False — holding fire_dropoff "
+                            f"pending structural revisit confirmation"
+                        ),
+                    )
                 return _build_fire_dropoff(
                     offer_id=next_state.armed_offer_id,
                     corrected_lat=wai_result.corrected_lat,

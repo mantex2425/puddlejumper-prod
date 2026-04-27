@@ -142,12 +142,23 @@ _CONFIDENCE_WEIGHTS = {
 # without a PostGIS connection.
 
 
-def _haversine_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+def haversine_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Great-circle distance in meters between two lat/lng points.
 
-    Used only inside DIAGNOSE signal scoring. All write-path coordinates
-    and all geometric operations that go to PG continue to use the
-    app_private.* canonical functions.
+    Earth radius constant: R = 6_371_000.0 meters. This value is
+    load-bearing for fixture-math parity (per L-9 corollary, sub-step 1b.3
+    boundary precision lesson). Test fixtures that probe gate-constant
+    boundaries (e.g., 30m colocation threshold, 200m cluster-revisit gap)
+    MUST use this exact function — not desk approximations like
+    "111,320 meters per degree latitude" — to compute boundary coordinates.
+    Use a REPL probe of this helper to derive fixture lat/lng offsets at
+    fixture-authoring time.
+
+    Used by DIAGNOSE signal scoring (where_am_i.py) and PLAN spatial
+    primitives (pudo_planner._is_same_pudo_colocation, sub-step 1c).
+    All write-path coordinates and all geometric operations that go to PG
+    continue to use the app_private.* canonical functions per the
+    canonical coordinate rules.
 
     Returns 0.0 for identical points; the formula handles antipodes
     correctly via atan2 / asin clamping.
@@ -183,7 +194,7 @@ def _signal_proximity(
     if threshold_m <= 0:
         return 0.0
 
-    distance_m = _haversine_meters(
+    distance_m = haversine_meters(
         cluster.median_lat, cluster.median_lng,
         target_lat, target_lng,
     )
@@ -820,7 +831,7 @@ def _compute_cluster_revisit(
     # history is oldest-first (per get_recent_clusters' ORDER BY latest ASC).
     # Iterate prior_pudo candidates in chronological order.
     for i, prior_pudo in enumerate(history):
-        d_prior_to_active = _haversine_meters(
+        d_prior_to_active = haversine_meters(
             prior_pudo.median_lat, prior_pudo.median_lng,
             active_cluster.median_lat, active_cluster.median_lng,
         )
@@ -829,11 +840,11 @@ def _compute_cluster_revisit(
 
         # Look for an intermediate AFTER prior_pudo (chronologically).
         for mid in history[i + 1:]:
-            d_mid_to_active = _haversine_meters(
+            d_mid_to_active = haversine_meters(
                 mid.median_lat, mid.median_lng,
                 active_cluster.median_lat, active_cluster.median_lng,
             )
-            d_mid_to_prior = _haversine_meters(
+            d_mid_to_prior = haversine_meters(
                 mid.median_lat, mid.median_lng,
                 prior_pudo.median_lat, prior_pudo.median_lng,
             )

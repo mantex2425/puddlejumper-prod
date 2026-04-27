@@ -305,6 +305,7 @@ class PlannerDecision:
     """
     action: Literal[
         "noop",
+        "noop_same_pudo_no_revisit",
         "arm_candidate",
         "cancel_candidate",
         "fire_pickup",

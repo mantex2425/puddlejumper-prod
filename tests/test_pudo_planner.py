@@ -104,6 +104,7 @@ def _wai(
     target_address: Optional[str] = None,
     ghost_id: Optional[int] = None,
     cluster: Optional[Cluster] = None,
+    cluster_revisit: bool = False,
 ) -> WhereAmIResult:
     """Build a WhereAmIResult with Forum-Park-7623 success defaults.
 
@@ -143,7 +144,7 @@ def _wai(
         target_address=target_address,
         ghost_id=ghost_id,
         cluster=cluster,
-        cluster_revisit=False,
+        cluster_revisit=cluster_revisit,
     )
 
 
@@ -551,6 +552,7 @@ import dataclasses
 from cluster_detection import Cluster
 from pudo_planner import (
     _build_noop,
+    _build_noop_same_pudo_no_revisit,
     _build_arm_candidate,
     _build_cancel_candidate,
     _build_fire_pickup,
@@ -1552,6 +1554,7 @@ import typing
 # system, the other walks the builders, both must produce this set.
 _EXPECTED_ACTIONS = frozenset({
     "noop",
+    "noop_same_pudo_no_revisit",
     "arm_candidate",
     "cancel_candidate",
     "fire_pickup",
@@ -1566,27 +1569,34 @@ _EXPECTED_ACTIONS = frozenset({
 
 
 class TestContractIntrospection:
-    def test_action_literal_has_eleven_values(self):
+    def test_action_literal_has_twelve_values(self):
         # Walk the type system: the action Literal must contain exactly
-        # the 11 expected strings. typing.get_args extracts the Literal's
+        # the 12 expected strings. typing.get_args extracts the Literal's
         # arguments at runtime.
+        # 12th value (sub-step 1c, 2026-04-27): noop_same_pudo_no_revisit
+        # for the B-26 same-PUDO PLAN-side latch.
         action_field_type = PlannerDecision.__annotations__["action"]
         actual = frozenset(typing.get_args(action_field_type))
         assert actual == _EXPECTED_ACTIONS, (
             f"PlannerDecision.action Literal has {len(actual)} values, "
-            f"expected 11. Diff:\n"
+            f"expected 12. Diff:\n"
             f"  unexpected: {actual - _EXPECTED_ACTIONS}\n"
             f"  missing:    {_EXPECTED_ACTIONS - actual}"
         )
 
-    def test_all_eleven_builders_emit_distinct_action_literal_values(self):
-        # Walk the builders: each of the 11 builders, called with
+    def test_all_twelve_builders_emit_distinct_action_literal_values(self):
+        # Walk the builders: each of the 12 builders, called with
         # minimal-valid arguments, emits an action that's in the Literal.
         # The set of emitted actions must equal the Literal's args -
         # no builder emits something outside the contract, no Literal
         # value is unreachable from a builder.
+        # 12th builder (sub-step 1c, 2026-04-27): _build_noop_same_pudo_no_revisit
+        # for the B-26 same-PUDO PLAN-side latch.
         emitted = {
             _build_noop("sentinel").action,
+            _build_noop_same_pudo_no_revisit(
+                offer_id="o", reason="r",
+            ).action,
             _build_arm_candidate(
                 offer_id="o", pudo_type="pickup",
                 heartbeat_count=1, reason="r",
@@ -1628,7 +1638,7 @@ class TestContractIntrospection:
         }
         # Set of emitted actions must equal the Literal contract.
         assert emitted == _EXPECTED_ACTIONS, (
-            f"Builders emit {len(emitted)} distinct actions, expected 11.\n"
+            f"Builders emit {len(emitted)} distinct actions, expected 12.\n"
             f"  emitted but not in Literal: {emitted - _EXPECTED_ACTIONS}\n"
             f"  in Literal but not emitted: {_EXPECTED_ACTIONS - emitted}"
         )
@@ -1651,3 +1661,232 @@ class TestContractIntrospection:
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             decision.action = "fire_pickup"  # type: ignore
+
+
+# ============================================================================
+# Sub-step 1c — PUDO colocation latch (B-26)
+# ============================================================================
+#
+# Tests the Memory-Signal-Latch trilogy's third stage: the runtime safety
+# latch that refuses fire_dropoff when pickup and dropoff are colocated
+# within geocoder noise AND WAI has not confirmed a structural revisit.
+
+from pudo_planner import (
+    _is_same_pudo_colocation,
+    PUDO_COLOCATION_THRESHOLD_M,
+)
+
+
+class TestIsSamePudoColocation:
+    """Pure-function tests for _is_same_pudo_colocation helper.
+
+    Boundary fixtures use REPL-probed coordinates (per L-9 corollary,
+    sub-step 1b.3 lesson). Distances computed against the production
+    haversine_meters helper (R=6_371_000m at Houston anchor 29.6246, -95.5102).
+    """
+
+    def _snap(self, *, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng):
+        return DriverStateSnapshot(
+            state="ENROUTE",
+            current_offer_id="offer_test",
+            primary_offer_id="offer_test",
+            pickup_lat=pickup_lat,
+            pickup_lng=pickup_lng,
+            dropoff_lat=dropoff_lat,
+            dropoff_lng=dropoff_lng,
+            secondary_pickup_lat=None,
+            secondary_pickup_lng=None,
+            secondary_dropoff_lat=None,
+            secondary_dropoff_lng=None,
+        )
+
+    def test_identical_coords_returns_true(self):
+        # Pickup and dropoff at the exact same point -> 0.0m distance.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=_DEFAULT_LAT, dropoff_lng=_DEFAULT_LNG,
+        )
+        assert _is_same_pudo_colocation(snap) is True
+
+    def test_far_apart_returns_false(self):
+        # ~5km apart in Houston.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=29.6700, dropoff_lng=-95.5102,
+        )
+        assert _is_same_pudo_colocation(snap) is False
+
+    def test_at_threshold_inclusive_returns_true(self):
+        # REPL probe of haversine_meters: dropoff_lat = 29.624869796481775 with
+        # pickup at 29.6246 yields exactly 30.000000m. Per <= semantics
+        # (boundary inclusive), this is "treated as same."
+        # Provenance: REPL probe at sub-step 1c authoring time, 2026-04-27.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=29.624869796481775, dropoff_lng=_DEFAULT_LNG,
+        )
+        assert _is_same_pudo_colocation(snap) is True
+
+    def test_just_below_threshold_returns_true(self):
+        # REPL probe: dropoff_lat = 29.6248652999 yields 29.500000m.
+        # Inside the latch — same PUDO.
+        # Provenance: REPL probe at sub-step 1c authoring time, 2026-04-27.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=29.6248652999, dropoff_lng=_DEFAULT_LNG,
+        )
+        assert _is_same_pudo_colocation(snap) is True
+
+    def test_just_above_threshold_returns_false(self):
+        # REPL probe: dropoff_lat = 29.6248742931 yields 30.500000m.
+        # Outside the latch — sharp cutoff at 30m boundary.
+        # Provenance: REPL probe at sub-step 1c authoring time, 2026-04-27.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=29.6248742931, dropoff_lng=_DEFAULT_LNG,
+        )
+        assert _is_same_pudo_colocation(snap) is False
+
+    def test_pickup_coords_missing_returns_false(self):
+        # When the heartbeat loop hasn't populated pickup coords, refuse to
+        # claim colocation. Defensive behavior — the latch defaults to
+        # PERMITTING fire_dropoff when it can't make a determination.
+        snap = self._snap(
+            pickup_lat=None, pickup_lng=None,
+            dropoff_lat=_DEFAULT_LAT, dropoff_lng=_DEFAULT_LNG,
+        )
+        assert _is_same_pudo_colocation(snap) is False
+
+    def test_dropoff_coords_missing_returns_false(self):
+        # Symmetric to pickup-missing case.
+        snap = self._snap(
+            pickup_lat=_DEFAULT_LAT, pickup_lng=_DEFAULT_LNG,
+            dropoff_lat=None, dropoff_lng=None,
+        )
+        assert _is_same_pudo_colocation(snap) is False
+
+
+class TestSamePudoColocationLatch:
+    """Integration tests for the latch in _decide()'s dropoff branch.
+
+    The latch refuses fire_dropoff iff (a) pickup and dropoff are colocated
+    within PUDO_COLOCATION_THRESHOLD_M AND (b) WAI's cluster_revisit is False.
+    Either condition's negation releases the latch.
+
+    Setup mirrors test_three_stable_hits_dropoff_fires (the direct precedent
+    for fire_dropoff dispatch via 3-heartbeat stable match) with the
+    pickup/dropoff coords colocated and cluster_revisit varied per case.
+    """
+
+    def test_colocated_no_revisit_emits_noop_variant(self):
+        # The load-bearing positive case: pickup ≡ dropoff, no revisit.
+        # Latch fires; fire_dropoff suppressed.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(
+            state=States.IN_TRIP,
+            dropoff_lat=_DEFAULT_LAT,  # colocated with default pickup
+            dropoff_lng=_DEFAULT_LNG,
+        )
+        wai = _wai(pudo_type="dropoff", cluster_revisit=False)
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "noop_same_pudo_no_revisit"
+        assert d3.offer_id == "offer_7623"
+        assert "PUDO colocation detected" in d3.reason
+        assert "cluster_revisit=False" in d3.reason
+
+    def test_colocated_with_revisit_fires_dropoff(self):
+        # Houston Loop confirmed: pickup ≡ dropoff but cluster_revisit=True.
+        # Latch releases; fire_dropoff fires normally.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(
+            state=States.IN_TRIP,
+            dropoff_lat=_DEFAULT_LAT,
+            dropoff_lng=_DEFAULT_LNG,
+        )
+        wai = _wai(pudo_type="dropoff", cluster_revisit=True)
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_dropoff"
+        assert d3.target_state == "UNCOMMITTED"
+
+    def test_far_apart_no_revisit_fires_dropoff(self):
+        # Different pickup/dropoff coords. Latch doesn't apply.
+        # cluster_revisit=False is irrelevant in this case.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.IN_TRIP)  # default ~13km apart
+        wai = _wai(pudo_type="dropoff", cluster_revisit=False)
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_dropoff"
+
+    def test_far_apart_with_revisit_fires_dropoff(self):
+        # Sanity: different coords + cluster_revisit=True both release the latch.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(state=States.IN_TRIP)
+        wai = _wai(pudo_type="dropoff", cluster_revisit=True)
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_dropoff"
+
+    def test_just_above_threshold_fires_dropoff(self):
+        # Sharp-cutoff verification at the integration level: 30.5m
+        # apart (just above threshold) + cluster_revisit=False.
+        # The latch reads the same threshold the helper reads; both
+        # gates release. Provenance: REPL probe at sub-step 1c authoring.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(
+            state=States.IN_TRIP,
+            dropoff_lat=29.6248742931,  # 30.5m above pickup at default
+            dropoff_lng=_DEFAULT_LNG,
+        )
+        wai = _wai(pudo_type="dropoff", cluster_revisit=False)
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_dropoff"
+
+    def test_pickup_branch_unaffected_by_latch(self):
+        # Latch only guards the dropoff branch. Pickups at colocated PUDOs
+        # still fire normally. Critical safety property: the safety net
+        # doesn't turn into a nuisance.
+        clock = _FakeClock()
+        planner = PudoPlanner(_now_fn=clock, _state_store={})
+        snapshot = _snapshot(
+            state=States.ENROUTE,
+            dropoff_lat=_DEFAULT_LAT,  # colocated — would trigger latch on dropoff
+            dropoff_lng=_DEFAULT_LNG,
+        )
+        wai = _wai(pudo_type="pickup", cluster_revisit=False)  # PICKUP, not dropoff
+
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        planner.consume("d", wai, driver_state_snapshot=snapshot)
+        clock.advance(5.0)
+        d3 = planner.consume("d", wai, driver_state_snapshot=snapshot)
+        assert d3.action == "fire_pickup"
+        assert d3.target_state == "IN_TRIP"

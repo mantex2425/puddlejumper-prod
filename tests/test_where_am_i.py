@@ -27,7 +27,7 @@ from cluster_detection import Cluster
 from datetime import datetime as _dt, timezone as _tz, timedelta
 from where_am_i import (
     _compute_cluster_revisit,
-    _haversine_meters,
+    haversine_meters,
     _signal_proximity,
     _signal_breadcrumb_match,
     _signal_cluster_tightness,
@@ -136,13 +136,13 @@ def _cluster_at(
 
 class TestHaversineMeters:
     def test_zero_distance_same_point(self):
-        d = _haversine_meters(29.6246, -95.5102, 29.6246, -95.5102)
+        d = haversine_meters(29.6246, -95.5102, 29.6246, -95.5102)
         assert d == pytest.approx(0.0, abs=1e-9)
 
     def test_known_short_distance_houston(self):
         # Two points ~100m apart in Houston (29.6246, -95.5102) and
         # (29.6255, -95.5102) - 0.0009 degrees of latitude is ~100m
-        d = _haversine_meters(29.6246, -95.5102, 29.6255, -95.5102)
+        d = haversine_meters(29.6246, -95.5102, 29.6255, -95.5102)
         # 0.0009 deg latitude * 111139 m/deg = ~100m
         assert d == pytest.approx(100.0, abs=1.0)
 
@@ -160,7 +160,7 @@ class TestHaversineMeters:
         PostGIS: ST_Distance(geog1, geog2) = 22405 meters (approx).
         Python Haversine should agree within 0.5% for this scale of distance.
         """
-        d = _haversine_meters(29.6246, -95.5102, 29.6454, -95.2789)
+        d = haversine_meters(29.6246, -95.5102, 29.6454, -95.2789)
         # Allow 0.5% tolerance - Earth isn't a perfect sphere; PostGIS uses
         # the WGS84 ellipsoid, Haversine assumes a sphere. Below 0.5% delta
         # at this scale is well within "trust the formula" territory.
