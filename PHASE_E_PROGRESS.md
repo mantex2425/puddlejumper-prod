@@ -3,8 +3,8 @@
 **For:** A fresh Claude conversation resuming Phase E at Step 6 sub-step 1c.
 **Author:** Phase E Step 5 closing session (commit 49ea6c8).
 **Date authored:** 2026-04-26.
-**Updated:** 2026-04-27 — sub-step 1b.3 closeout (commit a68447b).
-**Replaces:** prior version at commit 6522ba5 (post sub-step 1b, pre 1c).
+**Updated:** 2026-04-27 — sub-step 1c closeout (commit 72cf951).
+**Replaces:** prior version at commit a68447b (post sub-step 1b.3, pre 1c closeout).
 
 ---
 
@@ -30,49 +30,58 @@
    notice first, then the body, then the full Amendment 1 spec at the end.
 
 5. **This file (`PHASE_E_PROGRESS.md`)** — captures Phase E's current
-   state at end of sub-step 1b. Use this as the entry point for
-   sub-step 1c authoring.
+   state at end of sub-step 1c. Use this as the entry point for
+   sub-step 2 authoring.
 
 6. **The commits since 49ea6c8** — `git log --oneline 49ea6c8..HEAD`
    covers Step 5 closeout + Step 6 design + Step 6 sub-step 0 +
-   Amendment 1 + sub-step 1a + sub-step 1b (1b.1 + 1b.2 + 1b.3).
+   Amendment 1 + sub-step 1a + sub-step 1b (1b.1 + 1b.2 + 1b.3) +
+   sub-step 1b.3 doc refresh + sub-step 1c (Memory–Signal–Latch trilogy
+   complete).
 
-7. **`pudo_planner.py`** (1041 lines) and **`tests/test_pudo_planner.py`**
-   (1650 lines) — the Phase E artifacts.
+7. **`pudo_planner.py`** (1159 lines) and **`tests/test_pudo_planner.py`**
+   (1892 lines) — the Phase E artifacts.
 
 8. **`cluster_detection.py`** (316 lines) and **`tests/test_cluster_detection.py`**
    — houses sub-step 1a's `get_recent_clusters()` primitive per
    Amendment 1.
 
-9. **`where_am_i.py`** (1275 lines) and **`tests/test_where_am_i.py`** —
-   the WAI consumer; sub-step 1b houses `cluster_revisit` topology
-   (Step 3.5 in `evaluate()`) plus the verification suite.
+9. **`where_am_i.py`** (1286 lines) and **`tests/test_where_am_i.py`**
+   (1804 lines) — the WAI consumer; sub-step 1b houses `cluster_revisit`
+   topology (Step 3.5 in `evaluate()`) plus the verification suite.
+   Sub-step 1c renamed `_haversine_meters → haversine_meters` (4 internal
+   call sites + 4 test sites updated; L-6 corollary extension second strike).
 
 ---
 
 ## Current state of the world
 
 ```
-HEAD:                 a68447b (Phase E Step 6 sub-step 1b.3 — cluster_revisit verification gap closed)
-Branch:               patch-00566a-unified-refinement (in lockstep with origin; untracked: apply_substep_1b2_test_fix.py, apply_substep_1b3.py, apply_substep_1b3_fix.py, apply_v26_amendment.py, refresh_progress_1b2.py)
-Tests pytest:         277/277 passing (floor preserved through 1b.1 contract migration + 1b.2 WAI wiring + 1b.3 verification gap closed)
-Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC (NOT re-run; no DB-coupled changes since)
+HEAD:                 72cf951 (Phase E Step 6 sub-step 1c — Memory–Signal–Latch trilogy complete; B-26 PLAN-side latch shipped)
+Branch:               patch-00566a-unified-refinement (in lockstep with origin; untracked patch/refresh scripts + tmp/ + session-handoff doc — see `git status` for current set)
+Tests pytest:         290/290 passing (floor preserved through 1c — +13 tests for B-26 latch: TestIsSamePudoColocation 7 + TestSamePudoColocationLatch 6)
+Tests integration:    22/61 passing (39 failing) per sub-step 0.1 baseline 2026-04-26 23:46:19 UTC (preserved through 1c — test-only contract addition, no DB-coupled changes)
 Live-PG smoke:        4/4 from Phase D Step 5.7.2 (not re-run in Phase E; no DB-coupled changes shipped)
-pudo_planner.py:      1041 lines, 4 sections (A/B/C/D), 11 builders, 68-test pytest suite
-test_pudo_planner.py: 1650 lines (1b.1 added cluster_revisit=False to 1 WhereAmIResult site)
-cluster_detection.py: 316 lines (sub-step 1a SHIPPED — get_recent_clusters() + Cluster.latest)
-test_cluster_detection.py: 471 lines (8 new T1-T8 tests appended in sub-step 1a)
-where_am_i.py:        1275 lines (1b.2 SHIPPED — +117 lines: CLUSTER_REVISIT_MIN_GAP_M=200, _compute_cluster_revisit() helper, _recent_clusters_fn injection, evaluate() Step 3.5, 3 builder signatures expanded)
-test_where_am_i.py:   1b.3 SHIPPED — +420 lines: TestComputeClusterRevisit (12 unit tests, Block A) + TestEvaluateClusterRevisit (7 integration tests, Block B) + _FakeCursor.fetchall() fix (false-negative path closure) + cluster_revisit=False assertion added to existing standard-case test
-pudo_types.py:        Offer + accepted_at:datetime, WhereAmIResult + cluster_revisit:bool (1b.1 SHIPPED)
+pudo_planner.py:      1159 lines, 4 sections (A/B/C/D), 12 builders (1c added _build_noop_same_pudo_no_revisit), 81-test pytest suite
+test_pudo_planner.py: 1892 lines (1b.1 added cluster_revisit=False to 1 WhereAmIResult site; 1c added TestIsSamePudoColocation + TestSamePudoColocationLatch, +13 tests / +242 lines)
+cluster_detection.py: 316 lines (sub-step 1a SHIPPED — get_recent_clusters() + Cluster.latest; unchanged in 1c)
+test_cluster_detection.py: 471 lines (8 new T1-T8 tests appended in sub-step 1a; unchanged in 1c)
+where_am_i.py:        1286 lines (1b.2 SHIPPED +117 lines: cluster_revisit topology; 1c renamed _haversine_meters → haversine_meters as cross-module helper, +11 lines)
+test_where_am_i.py:   1804 lines (1b.3 +420 lines: TestComputeClusterRevisit + TestEvaluateClusterRevisit + _FakeCursor.fetchall() fix + cluster_revisit=False assertion in standard-case test; 1c +rename inventory updates: 1 import + 3 test calls per haversine_meters rename, L-6 corollary extension second strike)
+pudo_types.py:        326 lines. Offer + accepted_at:datetime (1b.1), WhereAmIResult + cluster_revisit:bool (1b.1), PlannerDecision.action expanded to 12-value Literal with noop_same_pudo_no_revisit (1c)
 ```
 
-**Sub-step 1c is the next concrete work** — same-address PLAN-side latch
-(B-26) in `pudo_planner.py`. Refuses `fire_dropoff` if
-`pickup_address == dropoff_address` (or coords ≤ 30m geocoder noise threshold)
-AND `cluster_revisit IS NOT True`. Lifts T79's test-time assertion to a runtime
-gate independent of WAI confidence. Must ship before T75-T79 integration tests
-in sub-step 3 (T79 tests this latch end-to-end).
+**Sub-step 2 is the next concrete work** — Five Pillars synthetic-heartbeat
+block (T70-T74) in `tests/test_pudo_planner.py`. Five integration tests, one
+per pillar (S31-S35), each feeding a synthetic heartbeat sequence to assembled
+`WAI.evaluate() → PudoPlanner.consume()` and asserting the planner emits the
+expected PlannerDecision. T70 reuses `tests/fixtures/7623_heartbeats.json`
+(Forum Park 7623 fixture replay → fire_pickup); T71-T74 require new synthetic
+fixtures (no production capture available; Phase F shadow-mode adds forensic
+replay later). All fixtures declare provenance per L-9. T70-T74 are the FIRST
+integration-level tests of the assembled WAI→PLAN dispatch chain — they prove
+the Memory–Signal–Latch trilogy composes correctly before Phase F wires the
+trilogy into `driver_heartbeat.py`. Treat as load-bearing.
 
 Phase E Steps 1-5 shipped. Step 6 sub-step 0 shipped (0.1 baseline, 0.2 Group E
 inventory closure, 0.3 WAI source-read finding). Step 6 design ratified, then
@@ -86,8 +95,17 @@ SHIPPED across three commits** — `6e1d60f` (1b.1 contract migration:
 258 floor preserved), `6522ba5` (1b.2 WAI wiring: `_compute_cluster_revisit()`
 helper + Step 3.5 in `evaluate()`, +117 lines in `where_am_i.py`, 258 floor
 preserved), `a68447b` (1b.3 verification: 19 new tests + adjunct `_FakeCursor`
-fix, 258 → 277 floor). The Memory–Signal–Latch trilogy of Sub-step 1 is
-two-thirds complete; **1c (B-26 latch) closes it.**
+fix, 258 → 277 floor). **Sub-step 1c SHIPPED at commit 72cf951** — B-26
+PLAN-side latch with Path A (coordinate-only) design, `PUDO_COLOCATION_THRESHOLD_M = 30.0`
+module-level constant per L-10 cat-2 provenance, `_is_same_pudo_colocation`
+pure helper, `_build_noop_same_pudo_no_revisit` builder (12th action variant),
+dispatch-level latch guard (sidesteps L-6 corollary by avoiding signature
+change), 13 new tests (TestIsSamePudoColocation 7 + TestSamePudoColocationLatch
+6), boundary triple at 29.5/30.0/30.5m via REPL probe per L-9 corollary
+(80-iteration convergence). The Memory–Signal–Latch trilogy of Sub-step 1 is
+**COMPLETE.** Sub-step 2 (Five Pillars synthetic-heartbeat block, T70-T74) is
+the first integration-level proof that the trilogy composes correctly under
+runtime dispatch.
 
 ---
 
@@ -127,10 +145,8 @@ two-thirds complete; **1c (B-26 latch) closes it.**
 | 6e1d60f | 6.1b.1    | Contract migration: Offer.accepted_at + WhereAmIResult.cluster_revisit (9 sites, 6 files, 258 floor) |
 | 6522ba5 | 6.1b.2    | WAI wiring: cluster_revisit topology live in evaluate() (11 patches, 1 file, 258 floor) |
 | a68447b | 6.1b.3    | Verification gap closed: TestComputeClusterRevisit (12) + TestEvaluateClusterRevisit (7) + _FakeCursor.fetchall fix (258 → 277 floor) |
-| 86ea117   | 6.0.1     | Integration baseline 22/61; "47 IDs"→61 correction; L-6 corollary |
-| 5a86f2e   | 6.0.2     | Group E inventory closure (39/39 categorized)          |
-| 7863b11   | 6.0.3     | WAI cluster-history source-read finding (stateless)    |
-| 7a8616a   | 6.A1      | Step 6 Amendment 1 — Offer-Anchor Lookback (Gemini ratified) |
+| 840ae49 | 6.1b.3 doc | PHASE_E_PROGRESS.md refresh for sub-step 1b.3 closeout per L-11 |
+| 72cf951 | 6.1c       | B-26 PLAN-side latch — Memory-Signal-Latch trilogy complete (290 floor) |
 
 **Note on Step 5.1:** No commit exists for Step 5.1. The sub-step was the
 test-suite design ratification round (Claude proposes → Gemini reviews →
@@ -481,39 +497,36 @@ Three-commit ship across `6e1d60f` → `6522ba5` → `a68447b`. Together with su
 
 **Architectural rulings exercised across 1b:** L-2 (predict-then-verify on every gate), L-3 (anchor-based patch script — `apply_substep_1b2.py` 572 lines in-tree), L-5 (trailing-newline guard), L-6 (read production artifacts before authoring), L-6 corollary extended to method-invocation sites (1b.2 lesson, now in lessons-learned section), L-7 (cross-check architectural rulings), L-9 (fixture provenance declared), L-9 corollary added (live-haversine vs desk approximation, 1b.3 lesson, now in lessons-learned section), L-10 (CLUSTER_REVISIT_MIN_GAP_M cat-1 provenance), L-11 (this entry).
 
-### Sub-step 1c — Same-address PLAN-side latch (B-26) — NEXT
+### Sub-step 1c — B-26 PLAN-side latch: the "Latch" of the Memory–Signal–Latch trilogy — CLOSED 2026-04-27
 
-Sub-step 1a SHIPPED at `6fe454a` (Memory: `get_recent_clusters()` + `Cluster.latest`; see SHIPPED section above). Sub-step 1b SHIPPED across `6e1d60f` / `6522ba5` / `a68447b` (Signal: contract migration + WAI wiring + verification; see SHIPPED section above). Sub-step 1c is the remaining contract amendment — the runtime safety latch (Latch) that completes the Memory–Signal–Latch trilogy.
+Single-commit ship at `72cf951`. Together with sub-step 1a (Memory: `get_recent_clusters()` + `Cluster.latest`) and sub-step 1b (Signal: `cluster_revisit` topology), closes the Memory–Signal–Latch trilogy of Step 6 sub-step 1. Lifts T79's test-time assertion to a runtime gate independent of WAI confidence: same-PUDO geometric colocation is now a structural refusal, not a heuristic.
 
-**Sub-step assignment ratified Option A (2026-04-27 paired-programming consensus).** 1c stays as its own sub-step rather than folding into early sub-step 2. Rationale: atomicity (B-26 lands as an isolated, revertible commit), engineering symmetry (the trilogy closes cleanly), and risk isolation (if B-26 reveals state-machine edge cases, isolation makes triage cleaner than entanglement with sub-step 2's scope).
+**Implementation (`pudo_planner.py`).** Path A coordinate-only design ratified at session-open: B-15 (address-string equality) deferred to a future sub-step on grounds that geocoded coordinates are the canonical truth and string equality is fragile against geocoder normalization. The latch operates entirely in coordinate space.
 
-- **1c (per Amendment 1):** Same-address PLAN-side latch in
-  `pudo_planner.py` per B-26. Lifts T79's test-time assertion to a
-  runtime gate independent of WAI confidence:
+- Constant: `PUDO_COLOCATION_THRESHOLD_M = 30.0` with L-10 cat-2 provenance comment (theoretical-with-shadow-mode; geocoder-noise floor expected to converge with B-24 telemetry from Phase F shadow runs). Module-level for tunability symmetry with `CLUSTER_REVISIT_MIN_GAP_M`.
+- New pure helper: `_is_same_pudo_colocation(pickup_lat, pickup_lng, dropoff_lat, dropoff_lng)`. Returns True iff `haversine_meters(...) <= PUDO_COLOCATION_THRESHOLD_M`. Uses `<=` semantics (boundary inclusive).
+- New builder: `_build_noop_same_pudo_no_revisit()` — the 12th action variant. Emits `PlannerDecision.action='noop_same_pudo_no_revisit'` for shadow-mode telemetry attribution (B-24 implication). Required `Literal[...]` expansion from 11 → 12 values in `pudo_types.py`; the contract introspection test bumped from `test_action_literal_has_eleven_values` → `_twelve_values`.
+- Latch guard placed at dispatch level inside `consume()`, **not** as a builder parameter — sidesteps the L-6 corollary by avoiding any signature change to existing builders. Guard runs immediately before each `fire_dropoff` emission site: if `_is_same_pudo_colocation(...)` AND `cluster_revisit is not True`, emit `_build_noop_same_pudo_no_revisit()` instead.
 
-  ```
-  IF pickup_address == dropoff_address (or coords <= 30m geocoder noise)
-     AND cluster_revisit IS NOT True:
-         REFUSE to emit fire_dropoff
-         Hold state, await structural confirmation
-  ```
+**Cross-module rename.** `_haversine_meters → haversine_meters` in `where_am_i.py`. Promoted from private to public so `pudo_planner.py` can import it without reaching across the underscore boundary. 4 internal call sites in `where_am_i.py` updated; 4 sites in `tests/test_where_am_i.py` updated (1 import + 3 test calls). The test-side inventory was missed in the original apply and surfaced at apply-time as `pytest` collection `ImportError` — promoted to L-6 corollary extension SECOND STRIKE (now a hard CHECKLIST item; see lessons-learned section).
 
-  Must ship before T75-T79 integration tests in sub-step 3 (T79 tests
-  this latch end-to-end).
+**Tests in `tests/test_pudo_planner.py` (+13 tests / +242 lines).**
 
-  **Open design questions for 1c session-open:**
-  1. Geocoder noise threshold (30m default per Amendment 1) — ratify as
-     module-level constant in `pudo_planner.py` alongside the latch logic
-     so it's as tunable as the 200m topology gap (Gemini suggestion,
-     2026-04-27). Provenance category per L-10 to be locked at session-open.
-  2. Latch action emission — `noop` vs new forensic variant
-     `noop_same_address_no_revisit` for shadow-mode telemetry (B-24
-     implication). Affects PlannerDecision.action `Literal[...]`
-     contract; 12 values vs 11.
+- **`TestIsSamePudoColocation` (7 pure-function unit tests):** Identical coords → True; far apart (>1000m) → False; boundary triple at 29.5m / 30.0m / 30.5m → True / True / False respectively (sharp cutoff verified, `<=` semantics confirmed); typical Houston block (~80m) → False; antipodes → False (sanity); zero-distance Null Island → True. Boundary-triple coordinates derived via REPL probe of `haversine_meters` with 80-iteration binary search converging to `|d - 30.0| < 1e-10` per L-9 corollary refinement.
 
-`DriverStateSnapshot` does NOT change. B-20 closed.
+- **`TestSamePudoColocationLatch` (6 dispatch-integration tests):** Same-PUDO colocation + `cluster_revisit=False` → latch fires (12th action emitted); same-PUDO colocation + `cluster_revisit=True` → fire_dropoff permitted (Houston Loop case); different-PUDO (>30m) + `cluster_revisit` irrespective → fire_dropoff permitted; pickup-branch unaffected by latch (safety property — the latch must not contaminate pickup dispatch); state preservation when latch fires (no spurious side effects); decision-trace contains latch-firing rationale (forensic provenance).
 
-### Sub-step 2 — Five Pillars synthetic-heartbeat block (T70-T74)
+**Floor counts:** pytest 277 → 290 (+13 new tests; 0 modified). Integration unchanged at 22/61 (test-only contract addition; no DB-coupled changes).
+
+**Lessons surfaced.**
+- **L-9 corollary refinement (80-iteration convergence):** First boundary fixture used 50-iteration binary search and gave `+2e-6` over the 30.0m threshold — a fixture that violated `<=` semantics. 80-iteration probe converged to `-1.6e-10`. Promoted: REPL probes for boundary fixtures must converge below floating-point precision noise floor (`< 1e-10`).
+- **L-6 corollary extension SECOND STRIKE:** Rename of `_haversine_meters → haversine_meters` inventoried 4 internal sites correctly but missed 4 test sites. Promoted: any patch renaming a public/private symbol or modifying a method signature must `grep -rn "<symbol>" --include="*.py"` against the entire repo before applying — now a hard CHECKLIST item in L-3 anchor-script authoring, not a soft "should."
+
+**Apply-script forensic record.** `apply_substep_1c.py` (14-patch L-3 anchor script) + `apply_substep_1c_fix.py` (rename-inventory recovery) live in the working tree as untracked files per L-3 backlog discretion.
+
+**Architectural rulings exercised across 1c:** L-2 (predict-then-verify on every gate), L-3 (14-patch anchor-based apply script), L-5 (trailing-newline guard), L-6 (read production artifacts before authoring), L-6 corollary extension SECOND STRIKE (rename inventory generalization, now CHECKLIST), L-7 (cross-check architectural rulings), L-9 (fixture provenance declared in REPL-probe docstrings), L-9 corollary refinement (80-iteration convergence), L-10 (PUDO_COLOCATION_THRESHOLD_M cat-2 provenance), L-11 (this entry).
+
+### Sub-step 2 — Five Pillars synthetic-heartbeat block (T70-T74) — NEXT
 
 Five integration tests, one per pillar. Each test feeds a synthetic
 heartbeat sequence to assembled `WAI.evaluate() → PudoPlanner.consume()`
@@ -719,10 +732,24 @@ production data exists.
 |      | offer-acceptance latency distributions per Amendment 1               |        |
 | B-25 | Fast-errand floor evaluation — counter to B-24 if production shows   | Phase G |
 |      | legitimate intermediate stops below WAI cluster floor                |        |
-| B-26 | Same-address PLAN-side latch in `pudo_planner.py` (NEW per           | Step 6 sub-step 1c |
+| B-26 | Same-address PLAN-side latch in `pudo_planner.py` (NEW per           | CLOSED — Sub-step 1c at 72cf951 |
 |      | Amendment 1). Refuses fire_dropoff if pickup_address == dropoff_address |     |
 |      | AND cluster_revisit IS NOT True. Lifts T79's test-time assertion to  |        |
 |      | runtime gate. Must ship before T75-T79 integration tests             |        |
+| B-27 | POI Adjacency Matrix + Cooperative Cache (NEW per 2026-04-27 Houston | Phase F sub-step (TBD) |
+|      | field shift; surfaced 3 corner-lot S32 failures in single shift,     |        |
+|      | including same-structure inversion proof Planet Fitness/Target).     |        |
+|      | Inverts S32 from `current_road == target_road` (string equality) to  |        |
+|      | `current_road IN adjacency_set` (membership), where adjacency_set is |        |
+|      | computed once at offer-capture via Google Places viewport + Roads    |        |
+|      | API nearestRoads. Four-layer cache architecture: per-offer / driver- |        |
+|      | local persistent / fleet cooperative (mirrors community_offers       |        |
+|      | pattern; positive feedback loop converts mapping gaps into           |        |
+|      | proprietary fleet asset) / adjacency learning (shadow-mode telemetry |        |
+|      | refines the cache). Cache key must be building-footprint not POI     |        |
+|      | alone — Planet Fitness + Target shared structure proof. PREREQUISITE:|        |
+|      | `routing.houston_ways` data integrity audit (see open question Q1).  |        |
+|      | Forensic source: FORENSIC_2026_04_27_HOUSTON_SHIFT.md.               |        |
 
 ---
 
@@ -763,6 +790,8 @@ authoring time.
 
 **Generalization:** Any test fixture that probes a numerical boundary in production code must use the exact same numerical method (function, constants, precision) as the code under test. Approximations introduce false negatives and false positives that no amount of unit-test mock-cursor scaffolding can catch.
 
+**Convergence requirement (sub-step 1c lesson):** REPL probes used to derive boundary-fixture values must converge to floating-point precision noise floor (`|haversine_meters - threshold| < 1e-10`). The 50-iteration binary search used in sub-step 1c authoring gave +2e-6 above threshold and produced a fixture that violated `<=` semantics; an 80-iteration probe converged to -1.6e-10 and the fixture passed. Going forward, boundary-fixture binary searches use 80 iterations as the default.
+
 ### L-6 corollary — Forensic count provenance (NEW, Phase E Step 6 sub-step 0.1)
 
 **Parent lesson:** L-6 (Inspect production artifacts before authoring assertions) lives in PHASE_D_RETRO.md. This corollary extends L-6 to cover forensic counts asserted in design documents.
@@ -780,6 +809,8 @@ authoring time.
 **Protocol change:** Any patch that adds a required parameter to a method signature must inventory ALL direct invocation sites of that method, not just the constructor sites of the types it produces or consumes. Extends the L-6 "read external `Cluster()` call sites before patching" rule from sub-step 1a to method-invocation sites.
 
 **Verification gate (now part of L-3 anchor-script authoring):** Before applying any patch that modifies a method signature, grep the test suite for all direct invocation sites of that method name, list them in the patch script's docstring, and explicitly note whether each site is updated by the patch or already compatible.
+
+**Second strike (sub-step 1c, 2026-04-27):** Rename of `_haversine_meters → haversine_meters` in `where_am_i.py` inventoried 4 internal call sites correctly but missed 4 sites in `tests/test_where_am_i.py` (1 import + 3 test calls). Caught at apply-time via pytest `ImportError`. Generalizes the protocol: any patch that renames a public/private symbol or modifies a method signature must `grep -rn "<symbol>" --include="*.py"` against the entire repo before applying, not just within the modifying module. This is now a hard CHECKLIST item in L-3 anchor-script authoring, not a soft "should.
 
 ### L-10 — Gate threshold provenance traceability (NEW, Phase E Step 6 design)
 
@@ -888,104 +919,131 @@ alternative.
 
 ## Concrete first-message-of-new-chat starter
 
-> I'm resuming Phase E at Step 6 sub-step 1c. Sub-step 1b.3 closed at
-> commit `a68447b` (verification gap closed; TestComputeClusterRevisit
-> 12 unit tests + TestEvaluateClusterRevisit 7 integration tests +
-> _FakeCursor.fetchall() fix + cluster_revisit=False assertion in
-> standard-case test; 277/277 floor; integration unchanged at 22/61).
-> HEAD is `a68447b`. Sub-step 1b SHIPPED in full — the Memory–Signal
-> dyad of the trilogy is complete; 1c is the Latch.
+> I'm resuming Phase E at Step 6 sub-step 2. Sub-step 1c closed at
+> commit `72cf951` (B-26 PLAN-side latch — Memory–Signal–Latch trilogy
+> complete; `_is_same_pudo_colocation` pure helper +
+> `_build_noop_same_pudo_no_revisit` 12th action variant + dispatch-level
+> latch guard; PUDO_COLOCATION_THRESHOLD_M=30.0 with L-10 cat-2 provenance;
+> 13 new tests via TestIsSamePudoColocation 7 + TestSamePudoColocationLatch
+> 6; 277 → 290 floor; integration unchanged at 22/61). HEAD is `72cf951`.
+> Sub-step 1 (1a + 1b + 1c) is COMPLETE — Memory–Signal–Latch trilogy
+> shipped end-to-end at the unit and direct-dispatch level.
 >
-> Floor: pytest 277/277, integration 22/61.
+> Floor: pytest 290/290, integration 22/61.
 >
-> Sub-step 1c ships the same-address PLAN-side latch (B-26) in
-> `pudo_planner.py`. Lifts T79's test-time assertion to a runtime gate
-> independent of WAI confidence:
+> Sub-step 2 ships the Five Pillars synthetic-heartbeat block (T70-T74) —
+> the FIRST integration tests of the assembled `WAI.evaluate() →
+> PudoPlanner.consume()` dispatch chain. Five tests, one per pillar
+> (S31-S35), each feeding a synthetic heartbeat sequence to the assembled
+> chain and asserting the planner emits the expected PlannerDecision:
 >
->   IF pickup_address == dropoff_address (or coords ≤ 30m geocoder
->   noise threshold) AND cluster_revisit IS NOT True:
->       REFUSE to emit fire_dropoff
->       Hold state, await structural confirmation
+> | Test | Pillar | Asserts                                                       |
+> |------|--------|---------------------------------------------------------------|
+> | T70  | S31    | Geometric — Forum Park 7623 fixture replay → fire_pickup      |
+> | T71  | S32    | Structural — synth secondary pickup → fire_stacked_swap       |
+> | T72  | S33    | Temporal — long stop then departure → fire_retroactive        |
+> | T73  | S34    | Collapse — single-heartbeat fire (B-13 deferred)              |
+> | T74  | S35    | Inverse — synth primary pickup STACKED → fire_stacked_revert  |
 >
-> Single commit ship. Must land before T75-T79 integration tests in
-> sub-step 3.
+> T70 reuses the existing `tests/fixtures/7623_heartbeats.json`. T71-T74
+> require new synthetic fixtures (no production capture available; Phase F
+> shadow-mode adds forensic replay later). All fixtures declare provenance
+> per L-9. T70-T74 are load-bearing — they prove the trilogy composes
+> correctly at the integration level before Phase F wires it into
+> `driver_heartbeat.py`.
 >
-> **Sub-step 1c work outline (Gemini-ratifiable; design lives in
-> PHASE_E_PROGRESS.md sub-step 1c section + Amendment 1 spec at end of
-> PHASE_E_STEP_6_DESIGN.md):**
+> Single commit ship target. Must land before sub-step 3 (T75-T79
+> Round-trip block, the "Houston Loop").
 >
-> Block A — Implementation in `pudo_planner.py`:
->   - Module-level constant: `SAME_ADDRESS_GEOCODER_NOISE_M = 30.0`
->     with L-10 provenance comment (category to be ratified at
->     session-open).
->   - Latch helper inside Section D dispatch: refuses fire_dropoff when
->     conditions match.
->   - Existing fire_dropoff dispatch points in `consume()` updated to
->     consult the latch.
+> **Sub-step 2 work outline (Gemini-ratifiable):**
+>
+> Block A — Synthetic fixtures in `tests/fixtures/`:
+>   - T71-T74 each need a heartbeat JSON in the same shape as
+>     `7623_heartbeats.json`. Per-fixture docstring declares provenance
+>     per L-9 (synthetic, not production capture; Phase F shadow-mode
+>     forensic replay deferred).
+>   - Q1 below: per-test JSON files vs inline Python data structures.
 >
 > Block B — Tests in `tests/test_pudo_planner.py`:
->   - Same-address + cluster_revisit=False → refused (latch fires).
->   - Same-address + cluster_revisit=True → permitted (Houston Loop).
->   - Different-address (>30m) → permitted regardless of cluster_revisit.
->   - Boundary cases at 30m geocoder noise threshold (per L-9 corollary,
->     fixture math must use the actual production distance helper —
->     no desk approximations).
->   - State preservation when latch fires (no spurious side effects).
+>   - Dedicated `# Sub-step 2 — Five Pillars synthetic-heartbeat block`
+>     section header for discoverability.
+>   - One TestClass per pillar (TestT70Geometric, TestT71Structural, etc.)
+>     OR one combined TestFivePillars class — Q3 below.
+>   - Each test: load fixture → assemble WAI → drive heartbeats through
+>     `WAI.evaluate() → PudoPlanner.consume()` → assert PlannerDecision.
 >
-> Floor target: 277 → ~290-295. Single commit ship.
+> Floor target: 290 → 295 (5 new tests, no modifications). Single commit.
 >
 > **Open design questions for session-open (resolve before authoring):**
 >
-> 1. **Geocoder noise threshold value/category.** 30m default per
->    Amendment 1. Ratify as module-level constant in `pudo_planner.py`
->    alongside the latch logic so it's as tunable as the 200m topology
->    gap (Gemini suggestion, 2026-04-27). L-10 provenance category to
->    lock: production-data-grounded, theoretical-with-shadow-mode, or
->    re-derive.
+> 1. **Fixture file layout.** Per-test JSON files in `tests/fixtures/`
+>    (matches 7623 precedent; discoverable via filesystem) vs inline
+>    Python data structures in the test class (more readable;
+>    docstring-friendly for L-9 provenance). Recommendation TBD at
+>    session-open.
 >
-> 2. **Latch action emission.** `noop` vs new forensic variant
->    `noop_same_address_no_revisit` for shadow-mode telemetry (B-24
->    implication). Affects PlannerDecision.action `Literal[...]`
->    contract; 12 values vs 11. If new variant: 1c also touches
->    `pudo_types.py` and the contract introspection tests in
->    `TestContractIntrospection` (test_action_literal_has_eleven_values
->    becomes _twelve_values).
+> 2. **Per-test heartbeat sequence length.** 7623 fixture's actual length
+>    determines the parity target for T71-T74. Confirm at session-open
+>    via `wc -l tests/fixtures/7623_heartbeats.json` and a structural
+>    inspection. Likely 8-12 heartbeats per fixture to exercise
+>    `N_HEARTBEATS_TO_FIRE=3` plus surrounding context.
+>
+> 3. **Test class organization.** Five separate classes
+>    (TestT70Geometric, TestT71Structural, ...) for granular pytest -k
+>    filtering, OR one TestFivePillars class with five methods for
+>    discoverability under a single section header. Both viable;
+>    recommendation TBD. Whichever choice, the T-number stays in
+>    test names or comment annotations for cross-reference to
+>    PHASE_E_PROGRESS.md.
+>
+> 4. **WAI cluster-history mock data per test.** T72 (Temporal — long
+>    stop then departure) inherently needs cluster history. T70/T71/T73/T74
+>    likely don't. Each fixture's docstring declares what cluster history
+>    (if any) it injects via the `_FakeCursor` precedent established in
+>    sub-step 1b.3.
+>
+> 5. **T73 (Collapse) scope.** B-13 (single-heartbeat fire) is deferred
+>    to Phase F; T73 must therefore test the dispatch path WITHOUT
+>    asserting B-13's behavior. Test could either (a) assert the planner
+>    correctly delays the fire pending stable-match, or (b) be marked
+>    xfail with B-13 reference. Recommendation TBD.
 >
 > Please read in order:
->   1. PHASE_E_PROGRESS.md (this file — sub-step 1c section + 1b SHIPPED
->      section for trilogy context)
+>   1. PHASE_E_PROGRESS.md (this file — sub-step 2 section + sub-step 1
+>      SHIPPED sections for trilogy context)
 >   2. PHASE_E_KICKOFF.md (architectural ground truth)
->   3. PHASE_E_STEP_6_DESIGN.md — Amendment 1 spec at end (B-26 latch
->      conceptual frame)
->   4. `pudo_planner.py` — current Section D dispatch logic; locate all
->      fire_dropoff emission sites
->   5. `tests/test_pudo_planner.py` — existing fixture conventions for
->      the latch tests
->   6. `pudo_types.py` — Offer.accepted_at + WhereAmIResult.cluster_revisit
->      contracts (1b.1 SHIPPED)
+>   3. PHASE_E_STEP_6_DESIGN.md — Five Pillars taxonomy reference
+>   4. `tests/fixtures/7623_heartbeats.json` — fixture shape precedent
+>   5. `tests/test_pudo_planner.py` — existing dispatch-integration test
+>      idioms (TestSamePudoColocationLatch from sub-step 1c is the most
+>      recent precedent for assembled-chain testing)
+>   6. `tests/test_where_am_i.py` — `_FakeCursor` cluster-history mock
+>      pattern + TestEvaluate idioms
+>   7. `where_am_i.py` — WAI.evaluate() interface for assembly point
+>   8. `pudo_planner.py` — consume() and _decide() for the planner side
+>      of the dispatch chain
 >
-> **Gates before authoring 1c:**
->   - L-11 doc-currency check: HEAD must be `a68447b` (or the doc-refresh
->     commit on top of it), pytest 277, integration 22/61, working tree
+> **Gates before authoring sub-step 2:**
+>   - L-11 doc-currency check: HEAD must be at the doc-refresh commit
+>     on top of `72cf951`, pytest 290, integration 22/61, working tree
 >     clean except untracked patch scripts
->   - L-6: read `pudo_planner.py` Section D dispatch verbatim before
->     authoring; identify all current fire_dropoff emission sites
->   - L-6 corollary extension (1b.2 lesson): if the latch helper has a
->     signature that callers must adopt, inventory ALL direct invocation
->     sites in tests/ before applying the patch
->   - L-9: same-address fixtures must declare provenance; coordinates
->     within 30m must invoke the actual distance helper
->   - L-9 corollary (1b.3 lesson): boundary fixtures at exactly the 30m
->     gate constant must use REPL-probed values from the production
->     distance function, not desk approximations
->   - L-10: SAME_ADDRESS_GEOCODER_NOISE_M = 30.0 declares its provenance
->     in code comment (category 1, 2, or removed — paranoia not allowed)
+>   - L-6: read `WAI.evaluate()` and `PudoPlanner.consume()` verbatim
+>     before authoring any fixture or test scaffolding
+>   - L-9: every synthetic fixture declares provenance in its docstring
+>   - L-9 corollary refinement (1c lesson): if any test depends on a
+>     numerical boundary, REPL-probe with 80-iteration convergence
+>   - L-6 corollary extension SECOND STRIKE (1c lesson, now CHECKLIST):
+>     if any test imports a renamed symbol, `grep -rn` the entire repo
+>     before applying
 >
-> Same paired-programming protocol that worked through 32 Phase E
-> commits applies. Active verification gates: L-2 / L-3 / L-5 / L-6 /
-> L-6 corollary / L-6 corollary extension / L-7 / L-9 / L-9 corollary /
-> L-10 / L-11. L-8 reactivates at Step 7.
+> Same paired-programming protocol that worked through sub-steps 0/1a/1b/1c
+> applies. Active verification gates: L-2 / L-3 / L-5 / L-6 / L-6 corollary /
+> L-6 corollary extension SECOND STRIKE / L-7 / L-9 / L-9 corollary
+> refinement / L-10 / L-11. L-8 reactivates at Step 7.
 >
-> Constraints unchanged: Reconcile dispatch (B-12) is Step 7. 1c stays
-> as its own sub-step (Option A; 2026-04-27 paired-programming
-> consensus). Phase F observability (B-23, B-24, B-25) deferred.
+> Constraints unchanged: Reconcile dispatch (B-12) is Step 7. Phase F
+> heartbeat-loop integration is gated on Phase E sub-steps 2-8 + Step 7
+> complete; the trilogy is dormant in code until then. Phase F
+> observability (B-23, B-24, B-25) deferred. B-27 (POI Adjacency Matrix +
+> Cooperative Cache, NEW per 2026-04-27 Houston field shift) is a Phase F
+> sub-step; see backlog table and `FORENSIC_2026_04_27_HOUSTON_SHIFT.md`.
