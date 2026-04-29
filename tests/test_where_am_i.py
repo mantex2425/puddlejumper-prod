@@ -1121,7 +1121,7 @@ class TestComputeRoadTopology:
             _cluster_fn=_fake_cluster_fn(None),
             _pivot_fn=_fake_pivot(on_wire=True),
         )
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", None)
         assert topo.on_wire is True
         assert topo.off_wire_duration_s == 0
         assert topo.current_road == "Settemont Road"
@@ -1135,7 +1135,7 @@ class TestComputeRoadTopology:
             _cluster_fn=_fake_cluster_fn(None),
             _pivot_fn=_fake_pivot(on_wire=False, pivot_time=ago_30s),
         )
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", None)
         assert topo.on_wire is False
         assert 28 <= topo.off_wire_duration_s <= 32  # allow test latency
 
@@ -1147,7 +1147,7 @@ class TestComputeRoadTopology:
             _cluster_fn=_fake_cluster_fn(None),
             _pivot_fn=_fake_pivot(on_wire=False, pivot_time=None),
         )
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", None)
         assert topo.off_wire_duration_s == 0
 
     def test_negative_duration_clamps(self):
@@ -1159,7 +1159,7 @@ class TestComputeRoadTopology:
             _cluster_fn=_fake_cluster_fn(None),
             _pivot_fn=_fake_pivot(on_wire=False, pivot_time=future),
         )
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", None)
         assert topo.off_wire_duration_s == 0
 
 
@@ -1226,7 +1226,7 @@ class TestMatchCurrentPudo:
         cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         result = wai._match_current_pudo(cluster, topo, _offer(), States.UNCOMMITTED)
         assert result is None
 
@@ -1236,7 +1236,7 @@ class TestMatchCurrentPudo:
         cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         outcome = wai._match_current_pudo(cluster, topo, _offer(), States.ENROUTE)
         assert outcome is not None
         assert outcome.matched is True
@@ -1259,7 +1259,7 @@ class TestMatchCurrentPudo:
         cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         outcome = wai._match_current_pudo(cluster, topo, offer, States.STACKED)
         assert outcome is not None
         assert outcome.matched is True
@@ -1275,7 +1275,7 @@ class TestMatchCurrentPudo:
         cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         with caplog.at_level(logging.WARNING, logger="where_am_i"):
             outcome = wai._match_current_pudo(cluster, topo, offer, States.ENROUTE)
         # All targets skipped -> outcome is None
@@ -1295,7 +1295,7 @@ class TestMatchGhostCache:
         cur = _FakeCursor(ghost_row=None)
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result is None
         # SQL was issued
@@ -1318,7 +1318,7 @@ class TestMatchGhostCache:
         cur = _FakeCursor(ghost_row=ghost_row)
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result is not None
         assert result.status == "at_previous_pudo"
@@ -1343,7 +1343,7 @@ class TestMatchGhostCache:
             _cluster_fn=_fake_cluster_fn(cluster),
             _pivot_fn=_fake_pivot(on_wire=True, current_road="Settemont Road"),
         )
-        topo = wai._compute_road_topology("driver1")
+        topo = wai._compute_road_topology("driver1", cluster)
         result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
         assert result.on_wire is True
         assert result.current_road == "Settemont Road"

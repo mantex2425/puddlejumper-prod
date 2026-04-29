@@ -501,12 +501,21 @@ class _RoadTopology:
     on_target_road is NOT a field here (Q1 ruling, Step 2). It's
     relationship between topology and a specific TargetSpec, computed
     inside each matcher via _signal_on_target_road.
+
+    adjacent_roads (Sprint 2 Step D, B.1-B.6 ratification):
+    Tuple of named roads within ADJACENCY_BUFFER_M (150m) of the
+    cluster centroid. Populated by adjacency.get_adjacent_roads_for_cluster
+    inside _compute_road_topology. Empty tuple when cluster is None.
+    Consumed by _signal_adjacent_road_match (Step E) for off-wire
+    matching: when current_road is a private driveway or null but
+    the cluster is physically adjacent to the offer's named road.
     """
     on_wire: bool                       # currently snapped to a named road?
     current_road: Optional[str]         # name of the snapped road, else None
     last_named_road: Optional[str]      # most recent named road touched
     off_wire_duration_s: int            # 0 when on_wire; else seconds since pivot
     breadcrumb: tuple[str, ...]         # raw road names, recent -> older
+    adjacent_roads: tuple[str, ...] = ()  # named roads within ADJACENCY_BUFFER_M of cluster centroid
 
 
 def _compute_signals(
@@ -738,6 +747,7 @@ _CLASS_DISPATCH = {
 from datetime import datetime, timezone
 
 from cluster_detection import detect_cluster, get_recent_clusters
+from adjacency import get_adjacent_roads_for_cluster
 from pivot_context import get_pivot_context
 from pudo_types import WhereAmIResult, States
 
@@ -876,6 +886,7 @@ class WhereAmI:
         _cluster_fn=detect_cluster,
         _pivot_fn=get_pivot_context,
         _recent_clusters_fn=get_recent_clusters,
+        _adjacency_fn=None,
     ):
         """
         cur: psycopg cursor for ghost-cache SELECT.
@@ -895,6 +906,7 @@ class WhereAmI:
         self._cluster_fn = _cluster_fn
         self._pivot_fn = _pivot_fn
         self._recent_clusters_fn = _recent_clusters_fn
+        self._adjacency_fn = _adjacency_fn or get_adjacent_roads_for_cluster
 
     # =========================================================================
     # Public entry point
@@ -921,7 +933,7 @@ class WhereAmI:
             return self._not_at_pudo(reason="no cluster detected")
 
         # --- Step 2: Topology (single pivot_context call, reused below) ----
-        topo = self._compute_road_topology(driver_id)
+        topo = self._compute_road_topology(driver_id, cluster)
 
         # --- Step 3: Stop context — STUB for v1.0 (Stop Atlas v1.1) -------
         stop_context = "unknown_stop"
@@ -972,7 +984,7 @@ class WhereAmI:
     # Topology adapter
     # =========================================================================
 
-    def _compute_road_topology(self, driver_id: str) -> _RoadTopology:
+    def _compute_road_topology(self, driver_id: str, cluster) -> _RoadTopology:
         """Map pivot_context.get_pivot_context() output onto _RoadTopology.
 
         Per Q7: all topology comes from a single backward heartbeat_log
@@ -1006,12 +1018,19 @@ class WhereAmI:
         # pivot_context returns a list; convert to tuple for frozen dataclass
         breadcrumb = tuple(breadcrumb_raw)
 
+        # Adjacency lookup (Sprint 2 Step D): named roads within 150m of
+        # cluster centroid, for off-wire matching of parking-lot / strip-mall
+        # / apartment-complex cases. Empty tuple when cluster is None per
+        # adjacency.get_adjacent_roads_for_cluster contract.
+        adjacent_roads = self._adjacency_fn(self.cur, cluster)
+
         return _RoadTopology(
             on_wire=on_wire,
             current_road=ctx.get("current_road"),
             last_named_road=ctx.get("last_named_road"),
             off_wire_duration_s=off_wire_duration_s,
             breadcrumb=breadcrumb,
+            adjacent_roads=adjacent_roads,
         )
 
     # =========================================================================

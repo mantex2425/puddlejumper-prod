@@ -100,7 +100,7 @@ def get_adjacent_roads(
     Canonical-rules compliance: uses app_private.coords_to_geography(lat, lng)
     per § I; never raw ST_MakePoint.
     """
-    if lat is None or lng is None:
+    if cur is None or lat is None or lng is None:
         return ()
 
     cur.execute(_ADJACENCY_SQL, (float(lat), float(lng), int(buffer_m)))

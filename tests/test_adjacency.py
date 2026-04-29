@@ -245,3 +245,24 @@ def test_planet_fitness_forensic_case_shape():
         "frontage road must be in whitelist — this is the Planet Fitness back-entrance signal"
     )
     assert len(result) >= 2, "real parking-lot footprints touch multiple named roads"
+
+
+def test_returns_empty_tuple_when_cur_is_none():
+    """Step D fix: WhereAmI is constructed with cur=None in scenario tests
+    (per S31 forensic replay, Step 5.6 ratification). Adjacency runs on
+    every heartbeat, so it must defend against None cursor the same way
+    it defends against None lat/lng — return empty tuple, no SQL."""
+    result = get_adjacent_roads(None, 29.8, -95.5)
+    assert result == ()
+    assert isinstance(result, tuple)
+
+
+def test_for_cluster_returns_empty_when_cur_is_none():
+    """Same defensive guard via the cluster-wrapper convenience function."""
+
+    class _DummyCluster:
+        median_lat = 29.8
+        median_lng = -95.5
+
+    result = get_adjacent_roads_for_cluster(None, _DummyCluster())
+    assert result == ()
