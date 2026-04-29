@@ -418,6 +418,7 @@ class TestForumPark7623SanityCheck:
                 off_wire_duration_s=0,
                 target_road_names=("Settemont Rd", "Joan St"),
             ),
+            "adjacent_road_match": 0.0,  # no adjacent_roads established in this test
         }
 
         # Compute weighted confidence using the intersection weights
@@ -435,14 +436,16 @@ class TestForumPark7623SanityCheck:
         )
 
         # Confidence should clear the STRONG_MATCH threshold (0.7)
-        # Theoretical max with these signals (proximity=0.18, off_wire=0):
-        #   proximity:        0.20 * 0.18 = 0.036
-        #   breadcrumb_match: 0.30 * 1.00 = 0.300
-        #   cluster_tight:    0.15 * 1.00 = 0.150
-        #   cluster_duration: 0.10 * 1.00 = 0.100
-        #   on_target_road:   0.20 * 1.00 = 0.200
-        #   off_wire_pivot:   0.05 * 0.00 = 0.000
-        #   total:                          0.786
+        # Theoretical with these signals (proximity=0.18, off_wire=0,
+        # adjacent_road_match=0 — Step E weights):
+        #   proximity:           0.10 * 0.18 = 0.018
+        #   breadcrumb_match:    0.30 * 1.00 = 0.300
+        #   cluster_tight:       0.15 * 1.00 = 0.150
+        #   cluster_duration:    0.10 * 1.00 = 0.100
+        #   on_target_road:      0.20 * 1.00 = 0.200
+        #   off_wire_pivot:      0.05 * 0.00 = 0.000
+        #   adjacent_road_match: 0.10 * 0.00 = 0.000
+        #   total:                              0.768
         # Above 0.7 - WAI would report at_current_pudo with strong confidence.
         assert confidence > 0.70, (
             f"Forum Park 7623 confidence {confidence:.3f} should be >= 0.70 "
@@ -450,6 +453,53 @@ class TestForumPark7623SanityCheck:
         )
 
 
+# =============================================================================
+# Step E: _signal_adjacent_road_match tests
+# =============================================================================
+
+def test_signal_adjacent_road_match_returns_one_when_target_in_adjacent():
+    """Positive case: target's named_road is in adjacent_roads whitelist."""
+    from where_am_i import _signal_adjacent_road_match
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Hollister", "Northwest Freeway"),
+        target_road_names=("Hollister",),
+    )
+    assert result == 1.0
+
+
+def test_signal_adjacent_road_match_returns_zero_when_no_overlap():
+    """No target road appears in adjacent_roads."""
+    from where_am_i import _signal_adjacent_road_match
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Hollister", "Northwest Freeway"),
+        target_road_names=("Settemont Rd",),
+    )
+    assert result == 0.0
+
+
+def test_signal_adjacent_road_match_returns_zero_for_empty_inputs():
+    """Defensive: empty adjacent_roads OR empty target_road_names -> 0.0.
+    Mirrors the early-return contract of _signal_on_target_road."""
+    from where_am_i import _signal_adjacent_road_match
+    assert _signal_adjacent_road_match((), ("Hollister",)) == 0.0
+    assert _signal_adjacent_road_match(("Hollister",), ()) == 0.0
+    assert _signal_adjacent_road_match((), ()) == 0.0
+
+
+def test_signal_adjacent_road_match_normalizes_via_road_names_match():
+    """Reuses pivot_context._road_names_match — 'Westheimer Rd' should
+    match 'Westheimer Road' (canonical suffix normalization)."""
+    from where_am_i import _signal_adjacent_road_match
+    # Two strings differing only by Rd/Road suffix should still match.
+    # If _road_names_match canonicalizes, this returns 1.0.
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Westheimer Rd",),
+        target_road_names=("Westheimer Road",),
+    )
+    assert result == 1.0, "suffix normalization (Rd <-> Road) must work"
+
+
+# =============================================================================
 # =============================================================================
 # Step 5.3 plumbing tests — _MatchOutcome, _weighted_confidence,
 # _render_reason, _validate_target
@@ -708,6 +758,7 @@ class TestComputeSignals:
         expected_keys = {
             "proximity", "breadcrumb_match", "cluster_tightness",
             "cluster_duration", "on_target_road", "off_wire_pivot",
+            "adjacent_road_match",
         }
         assert set(signals.keys()) == expected_keys
 
@@ -782,10 +833,17 @@ class TestMatchIntersection:
             named_roads=("Settemont Rd", "Joan St"),
         )
         outcome = _match_intersection(cluster, topo, target)
-        # Proximity 1.0 * 0.20 + tightness 1.0 * 0.15 + duration 1.0 * 0.10 = 0.45
-        # Just above MIN_REPORT_THRESHOLD (0.4) — barely matches but well below STRONG
-        assert outcome.confidence < STRONG_MATCH_CONFIDENCE
-        assert outcome.confidence > 0.4
+        # Per Step E: intersection requires road-name evidence to fire.
+        # With no breadcrumb_match, on_target_road, off_wire_pivot, or
+        # adjacent_road_match, only spatial signals (proximity, tightness,
+        # duration) contribute. Their weighted sum is below MIN_REPORT_THRESHOLD,
+        # honoring the test's stated intent ("Should NOT match").
+        #   proximity     1.0 * 0.10 = 0.10
+        #   tightness     1.0 * 0.15 = 0.15
+        #   duration      1.0 * 0.10 = 0.10
+        #   total                    = 0.35  (below 0.40)
+        assert outcome.matched is False
+        assert outcome.confidence < 0.4
 
     def test_null_target_coords(self):
         # S27 case: triangulation failed, target.lat is None — fail closed

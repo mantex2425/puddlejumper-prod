@@ -92,36 +92,40 @@ _PIVOT_FULL_OFF_WIRE_S = 30
 
 _CONFIDENCE_WEIGHTS = {
     "intersection": {
-        "proximity":         0.20,
-        "breadcrumb_match":  0.30,
-        "cluster_tightness": 0.15,
-        "cluster_duration":  0.10,
-        "on_target_road":    0.20,
-        "off_wire_pivot":    0.05,
+        "proximity":            0.10,
+        "breadcrumb_match":     0.30,
+        "cluster_tightness":    0.15,
+        "cluster_duration":     0.10,
+        "on_target_road":       0.20,
+        "off_wire_pivot":       0.05,
+        "adjacent_road_match":  0.10,
     },
     "single_road": {
-        "proximity":         0.10,
-        "breadcrumb_match":  0.40,
-        "cluster_tightness": 0.15,
-        "cluster_duration":  0.15,
-        "on_target_road":    0.15,
-        "off_wire_pivot":    0.05,
+        "proximity":            0.05,
+        "breadcrumb_match":     0.35,
+        "cluster_tightness":    0.15,
+        "cluster_duration":     0.15,
+        "on_target_road":       0.15,
+        "off_wire_pivot":       0.05,
+        "adjacent_road_match":  0.10,
     },
     "number_on_street": {
-        "proximity":         0.40,
-        "breadcrumb_match":  0.20,
-        "cluster_tightness": 0.15,
-        "cluster_duration":  0.10,
-        "on_target_road":    0.15,
-        "off_wire_pivot":    0.00,
+        "proximity":            0.30,
+        "breadcrumb_match":     0.20,
+        "cluster_tightness":    0.15,
+        "cluster_duration":     0.10,
+        "on_target_road":       0.15,
+        "off_wire_pivot":       0.00,
+        "adjacent_road_match":  0.10,
     },
     "apartment_complex": {
-        "proximity":         0.10,
-        "breadcrumb_match":  0.10,
-        "cluster_tightness": 0.20,
-        "cluster_duration":  0.15,
-        "on_target_road":    0.05,
-        "off_wire_pivot":    0.40,
+        "proximity":            0.10,
+        "breadcrumb_match":     0.10,
+        "cluster_tightness":    0.20,
+        "cluster_duration":     0.15,
+        "on_target_road":       0.05,
+        "off_wire_pivot":       0.40,
+        "adjacent_road_match":  0.00,
     },
 }
 
@@ -292,6 +296,42 @@ def _signal_on_target_road(
     for target_road in target_road_names:
         if _road_names_match(current_road, target_road):
             return 1.0
+    return 0.0
+
+
+def _signal_adjacent_road_match(
+    adjacent_roads: tuple[str, ...],
+    target_road_names: tuple[str, ...],
+) -> float:
+    """Is any of the target's named roads in the cluster's adjacent-roads
+    whitelist?
+
+    Sprint 2 Step E (B.1-B.6 ratification). Complements _signal_on_target_road
+    for the off-wire case: when the GPS-snapped current_road is a private
+    driveway, internal lot road, or null, but the cluster IS physically
+    adjacent (within ADJACENCY_BUFFER_M = 150m) to a road named in the
+    target's address.
+
+    Solves the Planet Fitness / strip-mall back-entrance / hospital
+    parking-lot cases where on_target_road is 0 because the snap missed.
+
+    Step function (boolean by nature):
+      - any target_road in adjacent_roads:   1.0
+      - adjacent_roads is empty:             0.0
+      - target_road_names is empty:          0.0
+      - no overlap:                          0.0
+
+    Reuses pivot_context._road_names_match for canonical normalization
+    (same comparison style as on_target_road, breadcrumb_match,
+    off_wire_pivot — three other signals already use it). Ensures
+    "Westheimer Rd" vs "Westheimer Road" don't false-negative.
+    """
+    if not adjacent_roads or not target_road_names:
+        return 0.0
+    for adjacent_road in adjacent_roads:
+        for target_road in target_road_names:
+            if _road_names_match(adjacent_road, target_road):
+                return 1.0
     return 0.0
 
 
@@ -552,6 +592,9 @@ def _compute_signals(
             last_named_road=topo.last_named_road,
             off_wire_duration_s=topo.off_wire_duration_s,
             target_road_names=target.named_roads,
+        ),
+        "adjacent_road_match": _signal_adjacent_road_match(
+            topo.adjacent_roads, target.named_roads,
         ),
     }
 
