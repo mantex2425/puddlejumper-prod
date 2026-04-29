@@ -129,8 +129,9 @@ The data is the gate, not a sub-step count.
 
 ## Status
 
-**Sprint 1 (Wire WAI + logging):** ACTIVE TODAY
-**Sprint 2 (Iterate based on data):** queued (opens after first shift)
+**Sprint 1 (Wire WAI + logging):** SHIPPED 2026-04-29 morning, deployed Cloud Run revision `puddlejumper-api-00574-gw9`. Truth table `pudo_decision_context` filling.
+**Sprint 2 (Adjacency lifeboat):** SHIPPED 2026-04-29 evening, deployed Cloud Run revision `puddlejumper-api-00575-mch`. 5 commits pushed (`09b68d6` through `140b45f`). pytest 309/309. See "Sprint 2 closeout" section below.
+**Sprint 3 (POI + shadow-replay):** queued. See updated backlog at end of doc.
 
 LFG. 🎩🐸🏁---
 
@@ -205,10 +206,63 @@ Earlier in this sprint plan, Sprint 1 was framed as "wire WAI live with logging"
 
 WAI has no "divergence" classification — the four `WhereAmIResult.status` literals are stop-detection only (`at_current_pudo`, `at_previous_pudo`, `at_unknown_pudo`, `not_at_pudo`). When a driver is moving and not near a PUDO, WAI returns `not_at_pudo` and Planner emits `noop`. Under PUDO-FIRST, this is correct: stale state on shift-end (driver quits mid-ENROUTE without a resolving offer) is acceptable for the practice/anger phases. Truth table will surface the signature (many consecutive `not_at_pudo` rows then nothing) for the Sprint 2 stale-state cleanup script.
 
+---
+
+## Sprint 2 closeout — adjacency shipped (2026-04-29 evening)
+
+Sprint 2 ratified earlier in the day as B-strict-pragmatic Trilogy wiring + adjacency lifeboat. Both halves shipped. Deployment is live.
+
+### What shipped
+
+Five atomic commits on `patch-00566a-unified-refinement`, each individually paired-programming reviewed (Claude proposes → Gemini reviews → execution):
+
+```
+140b45f  feat(where_am_i): add adjacent_road_match signal (Step E)
+1790d2a  feat(where_am_i): wire adjacency into _RoadTopology (Step D, Option β)
+22f64ef  feat(adjacency): DIAGNOSE primitive for parking-lot road whitelist
+d0d0087  feat(heartbeat): wire Trilogy (WAI + PudoPlanner) per PUDO-FIRST B-strict-pragmatic
+09b68d6  docs: append PUDO-FIRST directive to SPRINT_PLAN, update INDEX
+```
+
+Capability map:
+
+- **Step 6c (Trilogy wiring)** — `driver_heartbeat.py` calls `WhereAmI` + `PudoPlanner` per PUDO-FIRST B-strict. All 12 `PlannerDecision` actions wired (including stacked-swap recovery for implicit cancels). `pudo_decision_context` row written every heartbeat. `check_convergence` ladder dead. ABORT GUARD removed.
+- **Step C (adjacency primitive)** — `adjacency.py` at repo root. `get_adjacent_roads(cur, lat, lng, buffer_m=150)` + cluster wrapper. Hits `routing.houston_ways` GIST index. Defensive guards on `cur=None`, `lat/lng=None`. 15 unit tests.
+- **Step D (topology integration)** — `_RoadTopology` gains `adjacent_roads: tuple[str, ...] = ()`. `WhereAmI._compute_road_topology(driver_id, cluster)` populates it via injection seam. 11 test call sites updated.
+- **Step E (signal + weights)** — `_signal_adjacent_road_match` reuses `pivot_context._road_names_match` (Rd↔Road normalization). `_compute_signals` returns 7th key. `_CONFIDENCE_WEIGHTS` redistributed for 3 live classes (intersection, single_road, number_on_street); apartment_complex weights row gains `adjacent_road_match: 0.00` as dormant pass-through; poi unchanged (stub). Each row sums to 1.00. 4 new signal tests.
+
+Test floor: pytest 290 → 309. No regressions.
+
+### What we learned forensically (case studies attempted)
+
+Two empirical case studies attempted; both surfaced infrastructure gaps rather than matcher answers:
+
+**April 17 Lexington Blvd case (offer 6007).** "Lexington Blvd, Sugar Land, Texas" classifies as `single_road`. Adjacency at the geocoded centroid `(29.5912811, -95.6200022)` returns 6 roads including `Lexington Boulevard`, plus `East Mall Access Road`/`Mall Ring Road` confirming commercial-lot character. `_road_names_match("Lexington Boulevard", "Lexington Blvd")` returns True. Therefore: **if a cluster had formed at the centroid, `adjacent_road_match=1.0` would fire**. Could not empirically validate confidence math because **zero heartbeats logged for driver on April 17** — `heartbeat_log` empty for that date, predates current logging discipline.
+
+**April 27-28 American Airlines case (offer 7579 / decision_log 8203).** Offer was ACCEPTED (`ACCEPT, Rates met`) and STACKED on top of an in-progress trip. Heartbeats exist for `current_offer_id='8203'` but only 5 rows over 22 seconds, all in `STACKED` state on the freeway 18-19 km from the geocoded dropoff. Trace ends mid-trip — state machine never advanced 8203 to ENROUTE/IN_TRIP. **Failure mode is upstream of the matcher**, not POI-stub. Empirical "would Step E have fired" answer is therefore unavailable from this trace.
+
+**Critical schema finding from the AA forensic:** `heartbeat_log.current_offer_id` is keyed on `decision_log.id`, NOT `offer_history.id`. Forensic queries that join the two must use `offer_history.decision_log_id` as the bridge. **Logged for shadow-replay harness work (B-NEW-12).**
+
+### Lessons logged
+
+- **L-6 SECOND STRIKE corollary refined:** for any contract change to test fixtures, grep ALL forms of fixture construction including multi-line function-call values, not just literal-value assignments. Three test-fixture cascades hit and recovered today — Step D signature change (11 call sites missed initially), Step E `off_wire_pivot` regex (matched 0 of 3 actual sites), test_proximity_only_low_confidence assertion drift (test docstring already documented post-Step-E intent; assertion was contradicting docstring).
+- **Apply script discipline held strong.** L-3 envelope (md5+lines+anchor uniqueness Phase 1; in-memory transform Phase 2; atomic os.replace + read-back + sentinel sweep Phase 3) caught every transform. Idempotency checks prevented double-apply. Three recovery patches (Step D fix, Step E fix, surgical str_replace for proximity_only test) all clean.
+- **Transfer-pipeline newline-strip recovery is reliable.** Every download → upload cycle strips trailing newline. `printf "\n" >> file` recovers. Validate with md5+lines+syntax check before running.
+- **"Bench is built; calibration ahead":** Sprint 1 + Sprint 2 shipped the perception engine plumbing. POI matcher, ground-truth labeling pipeline, shadow-replay harness, and weight calibration are different rhythm of work — Sprint 3 territory.
+
+---
+
 ### Sprint 2 backlog (deferred from Sprint 1)
 
 - **B-NEW-1: Implicit cancellation forensic case.** First labeled row in `pudo_decision_context` where `fire_stacked_swap` fires for a primary the driver never confirmed as cancelled — i.e. the 2026-04-28 field event reproduced. Validates the recovery path empirically.
 - **B-NEW-2: Stale-state cleanup.** Driver quits mid-ENROUTE → row sits forever. Build post-shift script that reads `pudo_decision_context` and resets stale states.
-- **B-NEW-3: Adjacency logic** if straightroad classification fires false-negatives on parking lots (carry-forward from prior Sprint 2 plan).
-- **B-NEW-4: WAI classification refinement** if `at_unknown_pudo` fires too often or too rarely (carry-forward).
-- **B-NEW-5: 3 mislabeled `routing.houston_ways` rows** (Terramont/Player Bend) cleanup if adjacency logic queries the table (carry-forward).
+- **B-NEW-3: Adjacency logic.** **DONE** as Steps C/D/E above (commits `22f64ef`, `1790d2a`, `140b45f`). Covers parking-lot back-entrance / strip-mall / commercial-lot cases for `intersection`, `single_road`, `number_on_street` classes.
+- **B-NEW-4: WAI classification refinement** based on truth-table data once shifts are recorded (carry-forward).
+- **B-NEW-5: 3 mislabeled `routing.houston_ways` rows** (Terramont/Player Bend) cleanup (carry-forward).
+- **B-NEW-6: Replace naive address parser.** Deferred — `classify_address` is sufficient for Sprint 2 scope. Revisit if truth-table data shows misclassification rate >5%.
+- **B-NEW-7: Validate or delete `apartment_complex` matcher.** Currently unreachable — `classify_address` never produces this bucket. Either wire a path that produces it (apartment-name keywords) or delete the dead matcher and weights row.
+- **B-NEW-8: Schema migration permission audit.** Bake `GRANT USAGE ON SEQUENCE` into DDL by default. Discovered when `pudo_decision_context_id_seq` USAGE grant was missing post-create and broke first deploy.
+- **B-NEW-9: Polygon-aware POI matching (Approach 1).** Replace `_match_poi_stub`. Load OSM `building`/`amenity` polygon data into a new schema. Per-cluster geometric-inside / near-perimeter check against polygon footprint. Covers hospitals, malls, named businesses with defined footprints. Does NOT cover small businesses without OSM polygons. Estimated 2-3 focused days.
+- **B-NEW-10: Google Places Address Descriptors (Approach 2).** Per-heartbeat reverse-geocode call. `spatial_relationship in (BESIDE, WITHIN)` and `travel_distance < 50m`. Requires H3-keyed cache to control API costs (~$5/1000 calls). Adds 100-300ms latency per call; may impact 5-second heartbeat cadence. Last-resort fallback when polygon matching fails. Estimated ~1 week.
+- **B-NEW-11: Driver-PUDO-history (Approach 3).** New table `driver_pudo_history` keyed on `(driver_id, cluster_h3)`. Records every successful PUDO. On future visits to the same H3, treat the historical cluster centroid as a strong fire signal. Solves repeat-route case. Cold-start problem unresolved. Wires the EXECUTE side of the planner's `cache_ghost` action. Estimated 2-3 weeks.
+- **B-NEW-12: Shadow-replay harness.** Given an offer_id (or decision_log_id), reconstruct heartbeat sequence from `heartbeat_log`, run each heartbeat through current `WhereAmI`/`PudoPlanner` pipeline offline, compare predicted outcome to historical `actual_*` fields. Useful for validating Step E weight tuning, future POI matcher, and any matcher refactor before deploying. Bridge between the offer_history/heartbeat_log schema split (current_offer_id keyed on decision_log.id) is required. Estimated 1-2 days.
