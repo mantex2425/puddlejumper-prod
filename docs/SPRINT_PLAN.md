@@ -132,4 +132,83 @@ The data is the gate, not a sub-step count.
 **Sprint 1 (Wire WAI + logging):** ACTIVE TODAY
 **Sprint 2 (Iterate based on data):** queued (opens after first shift)
 
-LFG. 🎩🐸🏁
+LFG. 🎩🐸🏁---
+
+## PUDO-FIRST DIRECTIVE (2026-04-29 evening — ratified)
+
+**Mantra:** if the system cannot accurately identify a PUDO, it is worthless. Architecture is secondary; ground truth is everything.
+
+### I. Singular objective
+
+Until further notice, the only purpose of any sprint, test, or line of code is to prove 100% accuracy in PUDO identification. We are building a perception engine, not a state manager.
+
+### II. Operational constraints
+
+1. **Single rides only.** Andrew accepts single-trip offers only.
+2. **No stacks (operationally).** Andrew does not accept stacked offers.
+3. **No parachutes.** BMOAR is dead. `check_convergence`, `SET_CANDIDATE`, and the legacy `ABORT` guard are all removed. If perception fails, the truth table records the failure and we fix the logic.
+
+#### II.2 amendment — "no stacks" means operational, not architectural
+
+"No stacks" means Andrew does not accept stacked offers. It does NOT mean STACKED-state code is dead.
+
+Implicit stacks still occur: Uber sends a new offer mid-IN_TRIP because the primary rider silently cancelled (CANONICAL § X — Implicit Cancellation). The system must perceive these and recover. The Trilogy's STACKED disambiguation path remains live because GPS truth at the next pickup is the ONLY signal that resolves the implicit cancel — exactly the case that makes WAI valuable.
+
+**Concrete consequence:** all 12 `PlannerDecision` actions are wired into `driver_heartbeat.py` dispatch in Sprint 1, including `fire_stacked_swap`, `fire_stacked_revert`, and the two `reconcile_missed_*` actions. Stubbing handlers to `noop` would break the canonical recovery path the moment Uber teleports a driver from a failing primary into a new pickup.
+
+**Field event 2026-04-28 (Andrew):** arrived at pickup → IN_TRIP fired correctly → passenger silently cancelled → new offer arrived → state went STACKED → Andrew was actually ENROUTE to the new offer. This is the canonical implicit-cancellation pattern. Under wired Trilogy, arrival at the new pickup will resolve via `fire_stacked_swap`. The truth table will capture the resolution path as the first labeled case.
+
+### III. Simplified state surface (driver-perspective)
+
+Four logical states matter to the perception engine:
+
+- **UNCOMMITTED** — idle, looking for work.
+- **ENROUTE** — navigating to a known pickup.
+- **IN_TRIP** — navigating to a known dropoff.
+- **UNKNOWN** — a stop that the system cannot explain (the Sheraton case). This is where the product's intelligence is born.
+
+(STACKED remains alive in the state machine as a holding pattern for implicit-cancel recovery; it is not a driver-perspective primary state.)
+
+### IV. Practice phase ("happy trail")
+
+Execute a series of easy single-trip rides to surface the variety of PUDO geometries (target: 10–30 variants).
+
+**Goal:** build a robust library of successful identifications across geometries — intersections, single roads, POIs, apartment gates.
+
+### V. Anger phase (recovery testing)
+
+Once happy-trail rides show clean identification, deliberately drive:
+
+1. **Declined rides** — prove the system can re-parent a ride it didn't formally accept.
+2. **Unseen locations** — prove the system can synthesize a `TargetSpec` from an "unknown" stop without breaking the state machine.
+
+### VI. Success gate
+
+Valuation starts at the curb. If the system cannot accurately assign value and coordinates to a pickup location, it cannot scale. No commercialization until identification is robust, repeatable, and unbreakable.
+
+---
+
+## Sprint 1 — B-strict configuration (2026-04-29 evening)
+
+### Architectural decision: Option B — Full Replace (ratified)
+
+Earlier in this sprint plan, Sprint 1 was framed as "wire WAI live with logging" without specifying how WAI relates to the legacy `check_convergence` ladder. The 2026-04-29 evening session ratified the answer:
+
+- `check_convergence` is dead. Skipped entirely for the heartbeat handler.
+- Legacy `ABORT` guard (CANONICAL § XII) is removed. PUDO-FIRST § II.2 operational constraint (no stacks accepted) is what makes this safe — implicit cancels still recover via `fire_stacked_swap`.
+- Watchdog module-globals (`_stopped_since`, `_candidate_lat/lng/at`, `_reset_watchdog_state`) are deleted. Dead code under B-strict.
+- All 12 `PlannerDecision` actions are wired (see § II.2 amendment).
+- No feature gate (`WAI_PLANNER_ENABLED_DRIVERS` is not added). Rollback is `git revert`.
+- The Trilogy is the sole nervous system. The truth table (`pudo_decision_context`) is the only safety net.
+
+### Divergence handling (deferred to Sprint 2)
+
+WAI has no "divergence" classification — the four `WhereAmIResult.status` literals are stop-detection only (`at_current_pudo`, `at_previous_pudo`, `at_unknown_pudo`, `not_at_pudo`). When a driver is moving and not near a PUDO, WAI returns `not_at_pudo` and Planner emits `noop`. Under PUDO-FIRST, this is correct: stale state on shift-end (driver quits mid-ENROUTE without a resolving offer) is acceptable for the practice/anger phases. Truth table will surface the signature (many consecutive `not_at_pudo` rows then nothing) for the Sprint 2 stale-state cleanup script.
+
+### Sprint 2 backlog (deferred from Sprint 1)
+
+- **B-NEW-1: Implicit cancellation forensic case.** First labeled row in `pudo_decision_context` where `fire_stacked_swap` fires for a primary the driver never confirmed as cancelled — i.e. the 2026-04-28 field event reproduced. Validates the recovery path empirically.
+- **B-NEW-2: Stale-state cleanup.** Driver quits mid-ENROUTE → row sits forever. Build post-shift script that reads `pudo_decision_context` and resets stale states.
+- **B-NEW-3: Adjacency logic** if straightroad classification fires false-negatives on parking lots (carry-forward from prior Sprint 2 plan).
+- **B-NEW-4: WAI classification refinement** if `at_unknown_pudo` fires too often or too rarely (carry-forward).
+- **B-NEW-5: 3 mislabeled `routing.houston_ways` rows** (Terramont/Player Bend) cleanup if adjacency logic queries the table (carry-forward).

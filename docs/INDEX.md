@@ -1,7 +1,7 @@
 # PuddleJumper Document Index
 
 **Status:** manifest of all active decision documents. Paste at the start of every chat session.
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-29 evening (PUDO-FIRST ratified)
 **Active docs:** 10 (post-audit cleanup)
 **Archive:** `docs/archive/` (7 superseded docs preserved for git history)
 
@@ -24,7 +24,7 @@ These three docs define how Claude operates and what rules apply. **Always loade
 
 - **SESSION_PROTOCOL.md** (149 lines) — How Claude and Andrew work together: paired-programming cycle (Claude proposes → Gemini reviews → consensus → execute), Claude behavior rules (CLI-only, push back when wrong, no preambles, Python heredocs over sed), output formatting, paste-safety rules (the 2026-04-27/28 hazards), pre-modification discipline, lessons reference (L-2 through L-11), infrastructure reference.
 
-- **SPRINT_PLAN.md** (135 lines) — Current sprint structure: 2 sprints to launch (Sprint 1 = wire WAI live with logging; Sprint 2 = iterate based on production data). What changed in the 2026-04-29 pivot. Discipline rules kept/added/dropped. **This is the "what we're doing now" doc.**
+- **SPRINT_PLAN.md** (214 lines) — Current sprint structure: 2 sprints to launch (Sprint 1 = wire WAI live with logging; Sprint 2 = iterate based on production data). Includes the PUDO-FIRST DIRECTIVE (2026-04-29 evening ratification) — singular objective: prove 100% PUDO identification accuracy. Architectural shape locked: B-strict full replace, all 12 PlannerDecision actions wired, no feature gate. **This is the "what we're doing now" doc.**
 
 ---
 
