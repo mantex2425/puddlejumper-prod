@@ -1,0 +1,150 @@
+# PuddleJumper Session Protocol
+
+**Status:** how Claude and Andrew work together. Edits as workflow evolves.
+**Load:** at the start of every chat session, alongside `CANONICAL_RULES.md` and `INDEX.md`.
+
+---
+
+## Paired Programming Cycle
+
+Claude proposes → Gemini reviews (sometimes Grok) → consensus → Claude provides CLI execution instructions → Andrew runs → commit + push immediately, never bundle.
+
+Claude does not write design docs ahead of code. Claude does not invent architectural decisions without ratification. When a design choice needs to be made, Claude proposes it and waits for Gemini ratification before implementation.
+
+---
+
+## Claude Behavior Rules
+
+These rules supplement the user preferences and define how Claude operates throughout each session.
+
+### CLI and psql only
+
+Andrew copies commands into his terminal on the `puddle-jumper` VM. **Never propose Python REPL sessions or "just run this locally."** Use `python3 <<'PYEOF' ... PYEOF` heredocs when Python is needed — they run in one shot from the CLI.
+
+### Push back when direction is wrong
+
+**Do not just comply.** When Andrew's instinct or instruction conflicts with what Claude believes is correct, Claude pushes back with reasoning. Challenge "while we're here" impulses that scope-creep work. Honor deliberate decisions even when they break Claude's own pattern. Andrew's prior pushback ("stop the documentation horror") corrected a real waterfall pattern Claude was perpetuating — Claude should have caught it first.
+
+### No verbose preambles
+
+Answer directly. Explain choices only when asked or when the choice has tradeoffs worth surfacing. No "Great question!" / "Let me think about this..." / "Here's what I'm going to do..." setup before the actual answer.
+
+### Python heredocs, never sed for code edits
+
+`sed` eats special characters and makes surgical edits unreviewable. For code changes, use Python `str_replace` patterns or full-file rewrites with anchor verification. Reserve `sed` for read-only output transformations (`sed -n '120,140p'` to view a range).
+
+---
+
+## Output Formatting
+
+- **SQL:** wrap in `psql` for CLI execution. Andrew runs from his terminal.
+- **Long output:** send to `/tmp/<descriptor>.txt` then `cat`. Avoids heredoc size issues when copying to chat.
+- **Apply scripts >200 lines:** L-3 envelope (Phase 1 verify + idempotency / Phase 2 in-memory transform + per-patch delta gate / Phase 3 atomic disk write + read-back + sentinel sweep).
+- **File transfers:** `scp` from `/mnt/user-data/outputs/` to VM. Never raw paste of multi-line content.
+
+---
+
+## Paste Safety (Critical)
+
+**NEVER paste multi-line markdown content to bash terminal.** Two failure modes hit the codebase 2026-04-27/28:
+
+1. **`> ` blockquote prefix** is interpreted by bash as redirect operator. Pasting a markdown blockquote can truncate files to zero bytes. (`PHASE_E_PROGRESS.md` was lost this way mid-session and recovered via `git checkout HEAD --`.)
+
+2. **Bare lines like "Floor", "Single", "1."** are interpreted by bash as commands and create empty files with those names in the working directory. (~12 garbage files cleaned up via targeted `rm` after a forensic doc paste.)
+
+**Mandatory transfer pattern:**
+
+- For new files: `scp` from `/mnt/user-data/outputs/` to VM
+- For inline content via heredoc: use a unique sentinel verifiably absent from content (e.g., `MSG_EOF`, `PROBE_EOF`)
+- For terminal output: pipe to `> /tmp/output.txt` then `cat /tmp/output.txt`
+
+**Never recommend pasting markdown blockquote content (lines starting with `> `) directly into bash.**
+
+---
+
+## Pre-Modification Discipline
+
+Before Claude proposes any code change to existing files:
+
+1. **Read the current code.** Don't assume what's there. `cat` it, `sed` a range, `grep` for the relevant function.
+2. **Read the relevant design document** if one exists in INDEX.md.
+3. **Confirm understanding** with Andrew before authoring. "I'm about to change X, here's what I think it currently does, am I right?"
+
+This prevents the "write over the top of existing functionality with assumptions" failure mode.
+
+---
+
+## Document-Driven Memory
+
+Andrew cannot hold the full architecture in his head. Claude cannot remember decisions across sessions.
+
+**The bridge:** INDEX.md.
+
+- INDEX.md is pasted at the start of every chat session as the manifest of all decision documents.
+- When Claude needs context Claude doesn't have, Claude asks Andrew to `cat` the relevant document from the VM.
+- Claude never guesses at past architectural decisions. Claude either knows it from the loaded docs, or asks for the source.
+
+When a new long-term decision is locked:
+
+1. Build the thing (code, tests, drives)
+2. Document the outcome in one focused markdown file
+3. Update INDEX.md to point to it
+4. Commit both
+5. Next session: paste INDEX.md, Claude knows what exists
+
+**No design documents before code ships.** Documents capture outcomes, not plans.
+
+---
+
+## Anti-Waterfall Discipline
+
+Phase E sub-steps 1a-1c shipped via heavy ratification protocol because they were architectural amendments to data contracts. That protocol was correct for that work.
+
+**That protocol is wrong for activation work.** Wiring WAI into production, building log tables, iterating against real data — these don't need design docs, sub-step closeout refreshes, or forensic write-ups for every finding.
+
+The active discipline through launch:
+
+- **If it isn't code or a test to prove the code, it doesn't get written.**
+- **Bugs get a commit message.** Findings get one paragraph in `sprint_plan.md` if they affect future sprints.
+- **No multi-hundred-line forensic docs.** The Houston shift forensic and the houston_ways audit (commits `773aa49`, `48297bf`) are exceptions because they captured field data that tests can't generate.
+- **L-11 doc-currency gate is lightweight.** Run pytest + git status at session-open. Skip the full progress-doc currency check.
+
+---
+
+## Lessons Reference (L-N)
+
+These are the active discipline gates from Phase D and Phase E:
+
+| Gate | What it enforces |
+|------|------------------|
+| L-2  | Predict-then-verify on every gate (line counts, byte counts, sentinels) |
+| L-3  | Anchor-based patch script with Phase 1/2/3 envelope |
+| L-5  | Trailing-newline guard on file writes |
+| L-6  | Read production artifacts verbatim before authoring |
+| L-6 corollary | Inventory ALL invocation sites of any modified method signature |
+| L-6 corollary extension SECOND STRIKE | `grep -rn "<symbol>" --include="*.py"` against entire repo before any rename or signature change. **CHECKLIST item, not a soft "should."** |
+| L-7  | Cross-check architectural rulings before proposing |
+| L-9  | Every fixture declares provenance in its docstring |
+| L-9 corollary refinement | REPL probes for boundary fixtures must converge to `< 1e-10`. Default 80 iterations |
+| L-10 | Gate threshold provenance categorized (cat-1 production-data-grounded / cat-2 theoretical-with-shadow-mode / cat-3 paranoia, NOT ALLOWED) |
+| L-11 | Doc-currency check at session-open and session-close (lightweight version through launch) |
+
+L-8 (live-PG smoke) reactivates after launch.
+
+---
+
+## Infrastructure Reference
+
+- VM: `andrew@puddle-jumper` via IAP tunnel
+- DB: `psql -h 10.128.0.2 -U postgres -d puddlejumper`
+- Deploy: `bash deploy.sh` from `~/puddlejumper-prod/`
+- Cloud Run region: `us-central1`
+- Driver ID: `UjT1hE9eBXh2q95aSZYOkzDJ8lo1`
+- Market ID: `6a35d28b-8e6c-4d60-94aa-2661e2650863`
+
+---
+
+## Notes
+
+- This document evolves. When a new protocol rule is identified (like the paste-safety rules from 2026-04-27/28), it gets added here.
+- This document is **not** a place for architectural decisions. Those go in `CANONICAL_RULES.md` (eternal) or specific decision docs (referenced in `INDEX.md`).
