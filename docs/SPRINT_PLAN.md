@@ -135,6 +135,115 @@ The data is the gate, not a sub-step count.
 
 LFG. 🎩🐸🏁---
 
+## Sprint A — Architectural Pivot (2026-04-30 morning)
+
+**Status:** Ratified by paired-programming (Andrew + Claude + Gemini). Implementation pending. Production rolled back to `puddlejumper-api-00575-mch` while pivot work proceeds.
+
+### Trigger
+
+Two production-blocking bugs surfaced from the morning shift on `00576-f4p`:
+
+1. **Bug 1:** `NameError: name '_just_nailed_pickup' is not defined` at `driver_heartbeat.py:524`. Crashes every heartbeat in IN_TRIP/STACKED state. Introduced by Step E patches; not caught by unit tests because they mock `state_row` and don't exercise the IN_TRIP branch in this path.
+
+2. **Bug 2:** `AttributeError: 'dict' object has no attribute 'lower'` in `pivot_context.py:276` → `address_utils.py:54`. Surfaced by the offer-coords wiring patch (`00576-f4p`); previously dormant because WAI was getting `current_offer=None` and never reaching `_match_single_road`.
+
+Tonight's data:
+- 6,037 heartbeats logged across the shift
+- Zero `at_current_pudo` matches
+- Three days of wiring work, zero PUDO matches in production
+
+The morning voice session diagnosed the deeper issue: **the deterministic state machine duplicates spatial reasoning that WAI already does.** The state machine predicts where the driver will be next; WAI observes where the driver actually is. Two sources of truth, two places for the math to be wrong.
+
+### Decision
+
+Pivot from "wire WAI alongside the state machine" to **"WAI as single source of truth, state machine dissolved."**
+
+The full architectural specification lives in `docs/SIMPLIFIED_ARCHITECTURE.md` (407 lines, 12 sections, ratified by Gemini as Product Law for Sprint A).
+
+Core principle: WAI is the single source of truth about which offer is currently being driven. State follows observation rather than predicting it.
+
+Three corollaries:
+1. `current_offer_id` is a derived value, not a source of truth
+2. The 4-state machine collapses to a 1-bit memory
+3. Recovery from anomalies is structural, not reactive
+4. **WAI is a Matcher, not a Sensor** — a GPS cluster is NOT a PUDO; only `WAI.evaluate(queue, cluster)` produces PUDO matches
+
+### Sprint A scope
+
+Per `SIMPLIFIED_ARCHITECTURE.md` §11:
+
+1. Fix Bug 2 in `pivot_context.py:276` (extract road name from breadcrumb dict before passing to `canonicalize_address`). Estimated: 30 minutes.
+2. Modify `WhereAmI.evaluate()` signature to accept queue (list of offers) instead of single offer. Map-Reduce contract per §3. Estimated: 2-3 hours.
+3. Rewrite `driver_heartbeat.py` heartbeat handler around the reactive observation flow (~600 lines → ~100). Estimated: 3-4 hours.
+4. Extend `pudo_decision_context` schema for queue-evaluation logging. Estimated: 30 minutes.
+5. Smoke test with Bruno + simulated heartbeats. Estimated: 1 hour.
+6. Test suite realignment (Gemini's flagged "hidden iceberg"). Estimated: 5-8 hours.
+7. Deploy and validate against real shift.
+
+Total: 12-15 hours of focused work plus a validation shift. Plausibly 3 sessions.
+
+### What survives, what's replaced, what's vestigial
+
+**Survives:**
+- `where_am_i.py` evaluation logic (extended to accept queue)
+- `cluster_detection.py` (unchanged)
+- `pivot_context.py` (after Bug 2 fix)
+- `pudo_planner.py` (collapses to 3 actions: fire_pickup, fire_dropoff, implicit_cancel_then_pickup)
+- All Sprint 1/2 work on adjacency (Steps C/D/E commits `22f64ef`, `1790d2a`, `140b45f`)
+
+**Replaced:**
+- `driver_heartbeat.py` heartbeat handler — rewritten per §3
+- B-12 reconciliation logic — deleted
+- Atomic swap / STACKED state handling — deleted
+- Convergence engine threshold ladder — deleted
+
+**Vestigial:**
+- State machine code (`DriverStateMachine`, `sm_transition`, transition matrix) — left in place but unused
+
+### Sprint A refinements (Gemini ratifications)
+
+Three structural additions beyond the core principle:
+
+1. **Queue Synchronization** — Postgres as canonical source. Read offer queue with `FOR UPDATE SKIP LOCKED` pattern on every heartbeat. No in-memory caching.
+
+2. **Motion Gate** — transitions only fire when cluster is "Closed" (speed <2mph for ≥20s). Hard architectural rule, not just a WAI heuristic. Prevents drive-by false positives.
+
+3. **Triangulation Filter** for pricing context — for each inbound offer, compute `D_actual` (driver GPS to new pickup) and `D_intent` (current dropoff to new pickup). If `D_actual < D_intent` or within buffer (default 500m), use driver GPS. Otherwise use current dropoff. Self-corrects the canceled-ride pricing failure mode without needing explicit cancellation detection.
+
+### Sprint B — Validation against real shift
+
+After Sprint A ships, drive a full shift with the new architecture active. Build the truth table from real production data. Validate the 8 documented assumptions (A1-A8) in `SIMPLIFIED_ARCHITECTURE.md` §10.
+
+Specifically check:
+- A1: WAI matching reliability ≥ 90% in production
+- A2: Implicit cancellation via "different pickup match" works on real Sheraton-class scenarios
+- A4: Triangulation buffer of 500m correctly calibrated
+- A5: Motion gate of 2mph / 20s correctly identifies "stopped at PUDO"
+
+If validation passes, proceed to commercial launch prep. If validation fails, the failure mode is documented in §10 with a specific fallback strategy.
+
+### Why Sprint 1's "wire WAI live" approach was insufficient
+
+Sprint 1 (B-strict trilogy wiring) shipped on `00574-gw9` and ran 6,037 heartbeats with zero `at_current_pudo` matches. The diagnosis: WAI was wired into the heartbeat handler, but the state machine still owned the truth about which offer was active. WAI was a passenger, not a driver. When the state machine's predicted state didn't match reality (corner-lot failures, geocode drift), the entire chain failed silently.
+
+Sprint A inverts this: WAI drives, state follows. The class of bugs Sprint 1 produced (state-machine interlocks, atomic swap fragility, undefined interlock variables) cannot exist in the new architecture because the state machine isn't there to interlock with.
+
+### Discipline rules update
+
+- **`SIMPLIFIED_ARCHITECTURE.md` is canonical.** Edits to its core sections (§2, §4, §5, §7, §8, §10) require paired ratification.
+- **No fast-path PUDO inference outside `WAI.evaluate()`.** §10 A8 names this as architectural commitment, not coding convention. Any PR that infers PUDO state from cluster proximity outside WAI must be rejected and routed through WAI instead.
+- **Bug 1 (`_just_nailed_pickup`) is not fixed.** It's in code that Sprint A replaces. Don't waste cycles patching it.
+- **Bug 2 (`pivot_context.py` dict.lower) IS fixed in Sprint A step 1.** It's in WAI itself, applies regardless of architecture.
+
+### Status
+
+**Sprint A:** SCOPED, ratified, awaiting first implementation session.
+**Sprint B:** queued behind Sprint A.
+
+Production traffic on `puddlejumper-api-00575-mch` (last known stable revision before `00576-f4p` exposed Bug 2). Bug 1 may still trigger in IN_TRIP/STACKED states, but `00575-mch` is the production state that ran the last several shifts. Acceptable risk while pivot work proceeds.
+
+---
+
 ## PUDO-FIRST DIRECTIVE (2026-04-29 evening — ratified)
 
 **Mantra:** if the system cannot accurately identify a PUDO, it is worthless. Architecture is secondary; ground truth is everything.

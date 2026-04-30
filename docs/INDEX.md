@@ -1,9 +1,10 @@
 # PuddleJumper Document Index
 
 **Status:** manifest of all active decision documents. Paste at the start of every chat session.
-**Last updated:** 2026-04-29 evening (PUDO-FIRST ratified)
-**Active docs:** 10 (post-audit cleanup)
+**Last updated:** 2026-04-30 (Sprint A architectural pivot)
+**Active docs:** 11 (added SIMPLIFIED_ARCHITECTURE.md)
 **Archive:** `docs/archive/` (7 superseded docs preserved for git history)
+**Architectural pivot in flight:** Sprint A — see SIMPLIFIED_ARCHITECTURE.md and SPRINT_PLAN.md
 
 ---
 
@@ -20,11 +21,13 @@
 
 These three docs define how Claude operates and what rules apply. **Always loaded.**
 
-- **CANONICAL_RULES.md** (228 lines) — Eternal product law: coordinate functions, UTC time, 4-box controller, ABORT guard, state levels (UNCOMMITTED/ENROUTE/IN_TRIP/STACKED), enforcement layers, Postgres/Python boundary. Source of truth for product architecture. Edits require explicit ratification.
+- **CANONICAL_RULES.md** (228 lines) — Eternal product law: coordinate functions (Section I), UTC time (Section II), 4-box controller, ABORT guard, enforcement layers, Postgres/Python boundary. **Note:** State levels sections (UNCOMMITTED/ENROUTE/IN_TRIP/STACKED, Sections XI-XIII) are being superseded by SIMPLIFIED_ARCHITECTURE.md when Sprint A ships. Until then, both apply: legacy state machine in production (00575-mch), simplified architecture in design. Edits to non-superseded sections require explicit ratification.
 
 - **SESSION_PROTOCOL.md** (149 lines) — How Claude and Andrew work together: paired-programming cycle (Claude proposes → Gemini reviews → consensus → execute), Claude behavior rules (CLI-only, push back when wrong, no preambles, Python heredocs over sed), output formatting, paste-safety rules (the 2026-04-27/28 hazards), pre-modification discipline, lessons reference (L-2 through L-11), infrastructure reference.
 
-- **SPRINT_PLAN.md** (214 lines) — Current sprint structure: 2 sprints to launch (Sprint 1 = wire WAI live with logging; Sprint 2 = iterate based on production data). Includes the PUDO-FIRST DIRECTIVE (2026-04-29 evening ratification) — singular objective: prove 100% PUDO identification accuracy. Architectural shape locked: B-strict full replace, all 12 PlannerDecision actions wired, no feature gate. **This is the "what we're doing now" doc.**
+- **SPRINT_PLAN.md** (377 lines) — Current sprint structure with Sprint A architectural pivot at top. **Sprint A (2026-04-30):** WAI as single source of truth, state machine dissolved. **Sprint B:** validation against real shift. Below the pivot section, historical record of Sprint 1 (B-strict trilogy wiring, SHIPPED 00574-gw9) and Sprint 2 (adjacency lifeboat, SHIPPED 00575-mch) preserved verbatim, plus PUDO-FIRST DIRECTIVE (2026-04-29 evening) and B-NEW-1 through B-NEW-12 backlog. **This is the "what we're doing now" doc.**
+
+- **SIMPLIFIED_ARCHITECTURE.md** (407 lines) — Architectural specification for the simplified ride identification system. Ratified 2026-04-30 morning by paired-programming (Andrew + Claude + Gemini). 12 sections: core principle (WAI as source of truth), data flow with Map-Reduce evaluation contract, match resolution (5 cases including implicit-cancel Ghost Ride recovery), disambiguation rules (3 multi-match scenarios), Queue Synchronization (Postgres canonical), Motion Gate (transition prerequisite), Triangulation Filter (pricing context), dispatch surface (3 actions), 8 documented assumptions (A1-A8) with validation paths and fallback strategies, implementation scope (12-15 hours estimated). **This is Product Law for Sprint A.** Edits to core sections (§2, §4, §5, §7, §8, §10) require paired ratification.
 
 ---
 
@@ -78,9 +81,11 @@ Superseded docs preserved for git history. **Do not load — they contain stale 
 
 - **Repo:** `~/puddlejumper-prod/`
 - **Active branch:** `patch-00566a-unified-refinement`
-- **HEAD at index authoring:** `48297bf`
-- **Test floor:** pytest 290/290, integration 22/61
-- **Trilogy status:** SHIPPED in code (`72cf951`), DORMANT in production (not yet wired into `driver_heartbeat.py` — Sprint 1 today)
+- **HEAD at index update:** post-`df8fc5b` (doc cleanup), pending Sprint A architecture commit
+- **Test floor:** pytest 309/309, integration 22/61
+- **Trilogy status:** SHIPPED and WIRED in code (Sprint 2 closeout, deployed 00575-mch). Dormant per architecture pivot — Sprint A rewrites the heartbeat handler around WAI-as-source-of-truth.
+- **Production traffic:** `puddlejumper-api-00575-mch` (rolled back from `00576-f4p` on 2026-04-30 after Bug 2 surfaced). Bug 1 (`_just_nailed_pickup` undefined) may still trigger in IN_TRIP/STACKED branches; acceptable risk while Sprint A proceeds.
+- **Sprint A status:** SCOPED, ratified, awaiting first implementation session.
 
 ---
 
