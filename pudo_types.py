@@ -121,6 +121,51 @@ class Offer:
 
 
 # ============================================================================
+# WAIMatch — the naked-list contract for the queue-aware evaluate()
+# ============================================================================
+#
+# Per SIMPLIFIED_ARCHITECTURE.md §3 and the "Pure Sensor" encapsulation
+# discipline ratified 2026-04-30: WAI returns only what targets matched the
+# cluster. The downstream heartbeat handler interprets the list against
+# current_offer_id per §4 Cases A-E and §5 disambiguation rules.
+#
+# Three fields. No more. No status labels (those are handler-derived). No
+# coordinates (those live on the cluster). No topology (internal to the
+# matcher's confidence computation, not exposed). Per §10 A8, this is the
+# sole legitimate output shape of the matcher pipeline.
+
+WAI_CONFIDENCE_THRESHOLD: float = 0.40
+"""Canonical matcher threshold per SIMPLIFIED_ARCHITECTURE.md §3 step 3d.
+
+WAI.evaluate() returns only matches whose confidence clears this floor.
+Below threshold, the match doesn't count. Tuning this value is matcher-
+calibration scope (per §11 and §10 A1's evening empirical state — current
+real-world matches sit at 0.404-0.409, threshold-edge sensitive).
+"""
+
+
+@dataclass(frozen=True)
+class WAIMatch:
+    """A single match returned by WhereAmI.evaluate().
+
+    Per the naked-list contract (SIMPLIFIED_ARCHITECTURE.md §3): WAI is a
+    Pure Sensor that reports what targets matched the cluster. The downstream
+    interpreter (heartbeat handler) reads coordinates from the cluster object
+    and offer queue directly, and applies §4 case-resolution rules to decide
+    which actions to fire.
+
+    Encapsulation discipline: this dataclass is intentionally minimal. No
+    coordinates (handler reads from cluster). No topology (internal to
+    confidence computation). No status labels (handler derives from match
+    list + current_offer_id 1-bit memory). Per §10 A8, code that bypasses
+    WAI to infer PUDOs from raw cluster proximity violates the architecture.
+    """
+    offer_id: str
+    location_type: Literal["pickup", "dropoff"]
+    confidence: float
+
+
+# ============================================================================
 # WhereAmIResult — the diagnostic output of WhereAmI.evaluate()
 # ============================================================================
 
