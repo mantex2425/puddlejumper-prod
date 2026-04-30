@@ -95,6 +95,19 @@ Every heartbeat:
 8. Insert log row into pudo_decision_context
    - Captures queue evaluated, match result, current_offer_id before/after,
      pricing context used, motion gate result
+   - **Cluster data MUST be logged independently of WAI outcome.** The
+     cluster_lat / cluster_lng / cluster_size / cluster_duration_s columns
+     are populated from the cluster object returned by detect_cluster() in
+     step 1, NOT from WAI's result. Even if WAI returns no match, even if
+     WAI raises an exception, the cluster data must be preserved.
+     Rationale: forensic analysis (post-shift) depends on knowing where
+     the driver actually clustered. The current heartbeat handler (pre-
+     pivot) reads `cluster = wai_result.cluster if wai_result and
+     wai_result.cluster else None`, which couples cluster logging to WAI
+     success. The 2026-04-30 smoke test surfaced this as a real data-loss
+     pattern: yesterday's offers had healthy clustering but zero rows
+     logged because WAI was getting current_offer=None and not
+     populating wai_result.cluster.
 ```
 
 That is the entire heartbeat handler. Existing handler is ~600 lines; this one is plausibly ~100.
@@ -281,7 +294,15 @@ The architecture trusts WAI's match output as ground truth. If WAI accuracy is m
 
 **Validation path:** truth table from first 50-100 production rides. Specifically the `wai_status` distribution and whether `at_current_pudo` matches correlate with actual fare completions.
 
+**Empirical state at 2026-04-30:** smoke test against 24 hours of historical clusters (867 sampled) produced 1 CONFIDENT match across ~80 driving-time evaluations. The single confident match was offer 8303's pickup approach at confidence 0.409 — barely above the 0.40 threshold, single decisive winner over 17 queue offers. This tells us:
+  - WAI's matchers CAN return correct, decisive matches for real production geometry (not fundamentally broken)
+  - The match landed at the edge of the threshold (0.409 vs 0.400 cutoff) — threshold may be poorly calibrated for real-world geocode offsets
+  - Most production heartbeats during driving did NOT produce confident matches; A1's 90% target is not currently met at the matcher layer
+  - Production WAI was returning at_unknown_pudo with confidence 0 for the same cluster (4696) because `_assemble_offer` was building offers from `dts.*` (NULL) instead of `decision_log.*` (populated). The wiring layer was masking matcher capability.
+
 **If A1 fails:** consider hybrid model — WAI is primary source of truth, but a lightweight state-machine fallback covers low-confidence WAI results.
+
+**Sprint A implication:** matcher work (threshold tuning, signal weight calibration) is real scope, not just wiring. The smoke test framework (`tmp/smoke_test_wai_queue_v2.py`) is reusable for empirical iteration.
 
 ### A2: Implicit cancellation via "different pickup match" is reliable
 
@@ -342,6 +363,18 @@ The architecture relies on Case D (different-pickup match) to detect implicit ca
 
 **If A7 fails:** explicit timeout on `current_offer_id` (e.g., if set for > 60 minutes without progress, mark as anomaly and clear).
 
+### A9: Cluster detection fires reliably during real PUDOs
+
+The architecture assumes `detect_cluster()` produces a Cluster object during the brief window when a driver actually stops at a pickup or dropoff. If clusters only form for sustained stops (5+ minutes) and not for typical 30-60 second pickups, the architecture has nothing to evaluate against during real PUDO events.
+
+**Empirical state at 2026-04-30:** unknown. The 2026-04-30 smoke test surfaced that the existing heartbeat handler couples cluster logging to WAI success (`cluster = wai_result.cluster if wai_result.cluster else None`). For 15 of 18 offers in the past 24 hours, zero cluster rows were logged — but Andrew specifically remembers stopping for those PUDOs (and stopping deliberately longer than usual). This strongly suggests the cluster detector was firing but the data was being discarded by the wiring, not that clusters failed to form.
+
+**Validation path:** in Sprint A's heartbeat handler rewrite, log cluster data unconditionally (per §3 step 8). Run a clean shift. Then query: of all completed PUDOs (`offer_history.actual_pickup_at`, `offer_history.actual_dropoff_at`), what percentage had at least one heartbeat with non-NULL cluster_lat within ±60 seconds of the timestamp?
+
+If ≥90%, A9 holds. If lower, investigate cluster_detection thresholds (window_sec, min_samples, max_speed_mph) for tuning.
+
+**If A9 fails:** the issue is upstream of WAI. Tune cluster_detection (likely lower min_samples or extend window_sec) before WAI matching can produce reliable A1 results. May require dual-tier cluster detection (one tight cluster for "definitely stopped at curb," one looser cluster for "approaching destination, slowing").
+
 ### A8: WAI is the only legitimate path from cluster to PUDO
 
 The "Matcher, not Sensor" corollary in §2 is an architectural commitment, not just a coding convention. Future code (including features added in Phase F or B-27 work) may be tempted to add fast-path heuristics like "if cluster within 30m of dropoff geocode, fire dropoff" as performance optimizations or fallback paths.
@@ -387,9 +420,10 @@ The "Matcher, not Sensor" corollary in §2 is an architectural commitment, not j
 - Schema extension for `pudo_decision_context` — 30 minutes
 - Smoke testing and Bruno fixtures — 1 hour
 - Test suite realignment — **5-8 hours** (per Gemini's flag, this is the hidden iceberg)
+- Matcher tuning iterations — **scope dependent on first-shift data** (per 2026-04-30 smoke test, threshold/signal weights for intersection class need empirical calibration; reserve 2-4 hours per round)
 - First-shift validation — one full shift
 
-Total estimate: 12-15 hours of focused work plus a validation shift. Plausibly 3 sessions.
+Total estimate: 12-15 hours of focused work plus a validation shift, with matcher tuning as a likely follow-up cycle. Plausibly 3 sessions plus iteration.
 
 ---
 
@@ -400,6 +434,8 @@ Total estimate: 12-15 hours of focused work plus a validation shift. Plausibly 3
 - 2026-04-30 morning: Andrew identified Triangulation Filter as the pricing-context solution; Gemini ratified
 - 2026-04-30: Andrew added the "Matcher, not Sensor" reinforcement (§2 corollary 4 + §10 A8) to prevent future fast-path drift
 - 2026-04-30: Gemini ratified the formalized document and contributed the Map-Reduce evaluation contract (§3) and the Live Fire test framing (S5.1, S7, S8 covered by §5.1, §7, §8 respectively)
+- 2026-04-30 afternoon: Smoke test against 24h of historical heartbeats surfaced cluster-data-loss pattern (15 of 18 offers had zero cluster rows logged due to wiring coupling cluster logging to WAI success). Added §3 step 8 clarification ("cluster data MUST be logged independently of WAI outcome") and §10 A9 (cluster detection reliability assumption).
+- 2026-04-30 evening: Smoke test 2026-04-30: empirical findings — queue-evaluation harness (`tmp/smoke_test_wai_queue_v2.py`) tested 80 driving-time cluster evaluations across 18 offers. 1 CONFIDENT match (offer 8303 pickup, conf 0.409). Findings folded into A1 (matcher capability + calibration scope) and §11 (matcher tuning as iteration cycle). Production-vs-smoke-test divergence (production at_unknown_pudo=0 conf, smoke test at_current_pudo=0.409) confirmed root cause was wiring layer (`_assemble_offer` reading dts.* NULL coords instead of dl.*), supporting the architectural pivot's premise.
 - 2026-04-30: this document formalized as canonical reference and ratified as Product Law for Sprint A
 
 **Modification policy:** changes to §2 (Core Principle), §4 (Match Resolution), §5 (Disambiguation), §7 (Motion Gate), §8 (Triangulation Filter), §10 (Documented Assumptions) require paired ratification. Implementation details in §3, §6, §9, §11 may be updated as production data informs them.
