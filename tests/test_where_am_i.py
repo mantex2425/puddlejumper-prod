@@ -1105,16 +1105,34 @@ def _fake_pivot(
     pivot_time=None,
     breadcrumb: list = None,
 ):
-    """Build a fake pivot_context return dict for tests."""
+    """Build a fake pivot_context return dict for tests.
+
+    The breadcrumb argument accepts a convenience shape — a list of road-name
+    strings — and coerces it to the production segment-dict shape produced by
+    pivot_context._build_breadcrumb ({road_name, entered_at, exited_at}).
+    The coercion uses placeholder UTC timestamps because no test currently
+    exercises entered_at / exited_at semantics; if a future test needs real
+    timestamps, pass pre-built segment dicts directly and the coercion is
+    skipped (isinstance dict pass-through).
+    """
     if breadcrumb is None:
         breadcrumb = ["Settemont Road"]
+    # Coerce string-shape convenience input to production segment-dict shape.
+    # Pass-through for entries that are already dicts (lets future tests
+    # supply real-shape segments when timing matters).
+    _now = datetime.datetime.now(datetime.timezone.utc)
+    breadcrumb_segments = [
+        seg if isinstance(seg, dict)
+        else {"road_name": seg, "entered_at": _now, "exited_at": _now}
+        for seg in breadcrumb
+    ]
     def _pivot_fn(driver_id, cur, anchor_time=None):
         return {
             "on_wire": on_wire,
             "current_road": current_road,
             "last_named_road": last_named_road,
             "pivot_time": pivot_time,
-            "breadcrumb": breadcrumb,
+            "breadcrumb": breadcrumb_segments,
         }
     return _pivot_fn
 

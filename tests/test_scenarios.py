@@ -221,13 +221,25 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
     def fake_cluster_fn(driver_id, cur):
         return cluster
 
+    # Production breadcrumb shape (per pivot_context._build_breadcrumb):
+    # list of segment dicts {road_name, entered_at, exited_at}. The
+    # _RoadTopology.breadcrumb adapter (where_am_i._compute_road_topology)
+    # projects road_name strings; placeholder UTC timestamps satisfy the
+    # adapter's filter (seg.get("road_name")) without tests having to
+    # assert on entered_at / exited_at semantics.
+    _now = datetime.now(timezone.utc)
+    _breadcrumb_segments = [
+        {"road_name": name, "entered_at": _now, "exited_at": _now}
+        for name in ("Settemont Road", "Fondren Road")
+    ]
+
     def fake_pivot_fn(driver_id, cur, anchor_time=None):
         return {
             "on_wire": True,
             "current_road": "Settemont Road",
             "last_named_road": "Settemont Road",
             "pivot_time": None,
-            "breadcrumb": ["Settemont Road", "Fondren Road"],
+            "breadcrumb": _breadcrumb_segments,
         }
 
     # --- Run evaluate() ---------------------------------------------------

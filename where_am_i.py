@@ -1058,8 +1058,13 @@ class WhereAmI:
             off_wire_duration_s = max(0, int(delta.total_seconds()))
 
         breadcrumb_raw = ctx.get("breadcrumb") or ()
-        # pivot_context returns a list; convert to tuple for frozen dataclass
-        breadcrumb = tuple(breadcrumb_raw)
+        # pivot_context returns a list of segment dicts ({road_name, entered_at,
+        # exited_at}); _RoadTopology.breadcrumb is typed tuple[str, ...] and all
+        # downstream signal consumers assume road-name strings. Project the
+        # road_name field here, filter out any segments missing it.
+        breadcrumb = tuple(
+            seg["road_name"] for seg in breadcrumb_raw if seg.get("road_name")
+        )
 
         # Adjacency lookup (Sprint 2 Step D): named roads within 150m of
         # cluster centroid, for off-wire matching of parking-lot / strip-mall
