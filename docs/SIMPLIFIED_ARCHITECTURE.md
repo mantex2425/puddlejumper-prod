@@ -116,7 +116,7 @@ That is the entire heartbeat handler. Existing handler is ~600 lines; this one i
 
 ## 4. Match resolution rules
 
-WAI returns one of four answers each heartbeat (after motion gate clears):
+WAI returns one of seven answers each heartbeat (after motion gate clears):
 
 ### Case A: WAI returns `None` (no match against any offer in queue)
 
@@ -150,6 +150,27 @@ WAI returns one of four answers each heartbeat (after motion gate clears):
 ### Case E: WAI returns multiple matches (e.g., same-location pickup AND dropoff)
 
 - See §5 Disambiguation Rules
+
+### Case F: WAI returns `(matched_id, "dropoff")` and `current_offer_id != matched_id` (missed-pickup recognition)
+
+- Driver completed a ride whose pickup was never auto-confirmed
+- WAI matches the dropoff cluster against an offer in the queue, but `current_offer_id` is either NULL (no active ride tracked) or set to a different offer
+- Implicit conclusion: the ride happened end-to-end in physical reality, but the pickup auto-fire didn't observe it. The dropoff observation is reliable (driver is at the dropoff geocode, cluster confirms)
+- This is the simplified-architecture analog of the legacy S33 (Calhoun missed-pickup) scenario, surfaced synchronously at the dropoff heartbeat rather than via post-hoc reconciliation scan
+- Per S33 R1 policy (ratified 2026-04-26): mark the dropoff honestly as occurring; do NOT retroactively synthesize a pickup at any cluster point
+- fire_dropoff(matched_id, outcome=pickup_missed)
+- `current_offer_id = NULL`
+- Log severity: **WARNING** (notable deviation from happy path; tracked operationally for Uber-pin-quality drift)
+- Log payload: `offer_id`, `current_offer_id_at_match`, `cluster_centroid_lat/lng`, `cluster_duration_s`, `confidence`, `pickup_address`, `dropoff_address`
+
+### Case G: WAI returns `(matched_id, "pickup")` and `current_offer_id == matched_id` (pickup re-match while active)
+
+- Driver returned to pickup geocode while the ride is in progress (circled the block, picked up something they forgot, geocode happens to overlap the dropoff path, etc.)
+- `current_offer_id` is already set to the matched offer; pickup auto-fire already happened
+- **No fire action.** Idempotency safety net — `fire_pickup` should never fire twice for the same offer
+- `current_offer_id` unchanged
+- Log severity: **DEBUG** (routine; not operationally interesting)
+- Log payload: `offer_id`, `cluster_centroid_lat/lng`, `cluster_duration_s` — minimal, for forensic completeness only
 
 ---
 
@@ -446,6 +467,7 @@ Total estimate: 12-15 hours of focused work plus a validation shift, with matche
 - 2026-04-30 afternoon: Smoke test against 24h of historical heartbeats surfaced cluster-data-loss pattern (15 of 18 offers had zero cluster rows logged due to wiring coupling cluster logging to WAI success). Added §3 step 8 clarification ("cluster data MUST be logged independently of WAI outcome") and §10 A9 (cluster detection reliability assumption).
 - 2026-04-30 evening: Smoke test 2026-04-30: empirical findings — queue-evaluation harness (`tmp/smoke_test_wai_queue_v2.py`) tested 80 driving-time cluster evaluations across 18 offers. 1 CONFIDENT match (offer 8303 pickup, conf 0.409). Findings folded into A1 (matcher capability + calibration scope) and §11 (matcher tuning as iteration cycle). Production-vs-smoke-test divergence (production at_unknown_pudo=0 conf, smoke test at_current_pudo=0.409) confirmed root cause was wiring layer (`_assemble_offer` reading dts.* NULL coords instead of dl.*), supporting the architectural pivot's premise.
 - 2026-04-30 late evening: Bug 2 (breadcrumb segment-dict contract violation) closed in commit `f27b2cf` across three files (`where_am_i._compute_road_topology`, `tests/test_where_am_i._fake_pivot`, `tests/test_scenarios._replay_S31`). Test floor restored to 309/309 from a 22-failure cascade during the diagnosis cycle. High-resolution smoke test on offer 8303's window (every cluster, no sampling) revealed a 13-heartbeat sustained dwell scoring 0.404-0.409 against 8303 with runner-up 0.000 — confirming Motion Gate trajectory shape (§7) and Map-Reduce decisiveness (§3) for this case while exposing threshold-edge calibration as the dominant matcher-tuning concern. §10 A1's empirical-state subsection extended to capture the corrected "13 heartbeats / 1 PUDO event" framing.
+- 2026-04-30 late evening: §4 amended with Cases F (missed-pickup recognition, the simplified-architecture analog of S33) and G (pickup re-match while active, idempotency safety net). Discovered during Stage B blueprint design while drafting `dispatch.py`'s pure-function §4 case logic. Without explicit enumeration, both cases would have routed to ambiguous-match-fail-closed — defensible but noisy for known-correct scenarios. Doc/code synchronization from day one of `dispatch.py` shipping.
 - 2026-04-30: this document formalized as canonical reference and ratified as Product Law for Sprint A
 
 **Modification policy:** changes to §2 (Core Principle), §4 (Match Resolution), §5 (Disambiguation), §7 (Motion Gate), §8 (Triangulation Filter), §10 (Documented Assumptions) require paired ratification. Implementation details in §3, §6, §9, §11 may be updated as production data informs them.
