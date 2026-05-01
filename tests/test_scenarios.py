@@ -33,7 +33,7 @@ import pytest
 
 from where_am_i import WhereAmI, STRONG_MATCH_CONFIDENCE
 from cluster_detection import Cluster
-from pudo_types import States, TargetSpec, Offer
+from pudo_types import TargetSpec, Offer
 from datetime import datetime, timezone
 
 
@@ -155,24 +155,20 @@ def test_scenario_forensic_replay(scenario_id, scenario_data):
 def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
     """Forum Park 7623 forensic replay.
 
+    Cut B2: assert via evaluate_with_diagnostics(). Reads structured signals
+    from DiagnosticContext.per_target_outcomes instead of parsing the
+    rendered reason string.
+
     The canonical motivating case for WAI: BMOAR's 200m proximity gate
     failed at this 30-second stop, but the cluster math at T+25s would
-    have produced a strong cluster at the actual pickup. WAI v1.0 must
+    have produced a strong cluster at the actual pickup. WAI must
     reproduce a successful diagnosis on this exact data.
-
-    We construct the cluster and topology from the fixture's documented
-    actual_stop_location, then run evaluate() and assert against S31's
-    [fixture] block expectations.
     """
     fixture = scenario_data["fixture"]
     metadata = heartbeats["metadata"]
     stop = heartbeats["actual_stop_location"]
 
     # --- Construct the Cluster ---------------------------------------------
-    # Fixture documents: 30 seconds, 4 heartbeats observed, GPS coords stable
-    # to 7 decimal places (so spread is effectively zero — very tight).
-    # We use spread_m=15 (the tight threshold) so cluster_tightness=1.0,
-    # matching the documented expected_signals.
     cluster = Cluster(
         n=stop["last_observed_row_index"] - stop["first_observed_row_index"] + 1,
         median_lat=stop["lat"],
@@ -183,30 +179,17 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
     )
 
     # --- Construct the Offer with canonical pickup intersection -----------
-    # The fixture's metadata gives us the actual pickup address verbatim:
-    # "Joan St & Settemont Rd, Houston, Texas"
-    # The recorded pickup coords are where the driver manual-nailed (~1100m
-    # off); we use the actual stop coords as proxy for where the geocoded
-    # intersection should be. For the replay, we offset slightly to recreate
-    # the documented 205m-away condition that motivates the test.
     pickup = TargetSpec(
-        lat=stop["lat"] + 0.00184,  # ~205m north — produces proximity≈0.18
+        lat=stop["lat"] + 0.00184,  # ~205m north - produces proximity~0.18
         lng=stop["lng"],
         address_class="intersection",
         named_roads=("Settemont Rd", "Joan St"),
     )
-    # Dropoff is irrelevant for ENROUTE state but the Offer dataclass
-    # requires it — use a placeholder.
     dropoff = TargetSpec(
         lat=29.7000, lng=-95.4000,
         address_class="number_on_street",
         named_roads=("Anywhere St",),
     )
-    # accepted_at: forensic anchor for 7623_heartbeats fixture (v2.6 amendment).
-    # The earliest fixture heartbeat is at 2026-04-23T20:51:59.735Z; this
-    # value is 7 minutes prior — a realistic Houston ENROUTE leg duration
-    # that comfortably exceeds get_recent_clusters()'s 60-second preroll
-    # buffer. See tests/fixtures/7623_heartbeats.json for the full record.
     offer = Offer(
         offer_id=metadata["current_offer_id_text"],
         accepted_at=datetime(2026, 4, 23, 20, 45, 0, tzinfo=timezone.utc),
@@ -215,18 +198,9 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
     )
 
     # --- Construct the topology (happy-path: Settemont on-wire) -----------
-    # Per Gemini Step 5.6 ratification: the happy-path topology is what S31
-    # documents as the expected case. Houston-gap topology variants belong
-    # in Step 5.7's live-PG smoke tests.
     def fake_cluster_fn(driver_id, cur):
         return cluster
 
-    # Production breadcrumb shape (per pivot_context._build_breadcrumb):
-    # list of segment dicts {road_name, entered_at, exited_at}. The
-    # _RoadTopology.breadcrumb adapter (where_am_i._compute_road_topology)
-    # projects road_name strings; placeholder UTC timestamps satisfy the
-    # adapter's filter (seg.get("road_name")) without tests having to
-    # assert on entered_at / exited_at semantics.
     _now = datetime.now(timezone.utc)
     _breadcrumb_segments = [
         {"road_name": name, "entered_at": _now, "exited_at": _now}
@@ -242,97 +216,83 @@ def _replay_S31(scenario_data: dict, heartbeats: dict) -> None:
             "breadcrumb": _breadcrumb_segments,
         }
 
-    # --- Run evaluate() ---------------------------------------------------
-    # cur=None is OK: ghost-cache SELECT is reachable only when the current
-    # PUDO match fails, and S31's expected outcome is a successful current-
-    # PUDO match. If the test ever falls through to ghost-cache, that's a
-    # regression and the AttributeError will fail the test loudly.
+    # --- Run evaluate_with_diagnostics ------------------------------------
     wai = WhereAmI(cur=None, _cluster_fn=fake_cluster_fn, _pivot_fn=fake_pivot_fn)
-    result = wai.evaluate(
+    matches, diagnostics = wai.evaluate_with_diagnostics(
         driver_id=metadata["driver_id"],
-        current_offer=offer,
-        state=States.ENROUTE,
+        queue=[offer],
     )
 
-    # --- Assert against S31's [fixture] block -----------------------------
-    # The fixture's expectations are fully data-driven (no hardcoded values
-    # in test code). All assertion targets come from the TOML.
-
-    # 1. Status: read from fixture (production schema: expected_status)
-    expected_status = fixture["expected_status"]
-    assert result.status == expected_status, (
-        f"S31 vindication failed: expected status={expected_status!r}, got "
-        f"status={result.status!r}, reason={result.reason!r}"
+    # --- Find the pickup match for this offer -----------------------------
+    # The Map-Reduce contract returns the highest-confidence candidate(s)
+    # above threshold. For S31, only the pickup target is geographically
+    # close; dropoff is far. So a single-element matches list with
+    # location_type=="pickup" is the expected outcome.
+    pickup_match = next(
+        (m for m in matches
+         if m.offer_id == offer.offer_id and m.location_type == "pickup"),
+        None,
+    )
+    assert pickup_match is not None, (
+        f"S31 vindication failed: no pickup match in matches={matches!r}. "
+        f"per_target_outcomes={diagnostics.per_target_outcomes!r}"
     )
 
-    # 2. Pudo type: read from fixture
-    expected_pudo_type = fixture["expected_pudo_type"]
-    assert result.pudo_type == expected_pudo_type
+    # --- Find the corresponding outcome for signal-floor checks -----------
+    # DiagnosticContext.per_target_outcomes is the structured analog of the
+    # old WhereAmIResult.reason string. Each entry is
+    # (offer_id, location_type, MatchOutcome).
+    pickup_outcome = next(
+        (outcome for (oid, ltype, outcome) in diagnostics.per_target_outcomes
+         if oid == offer.offer_id and ltype == "pickup"),
+        None,
+    )
+    assert pickup_outcome is not None, (
+        f"S31: pickup match present but pickup outcome missing from "
+        f"per_target_outcomes. matches={matches!r} diagnostics={diagnostics!r}"
+    )
 
-    # 3. Offer ID: from heartbeat metadata (the canonical 7623)
-    assert result.offer_id == metadata["current_offer_id_text"]
+    # --- Assert against fixture-documented floors -------------------------
 
-    # 4. Confidence: must clear the documented floor
+    # 1. Confidence floor (TOML: expected_confidence_min)
     expected_min = fixture["expected_confidence_min"]
-    assert result.confidence >= expected_min, (
-        f"S31 confidence {result.confidence:.3f} below expected_confidence_min "
-        f"{expected_min}. Reason: {result.reason}"
+    assert pickup_match.confidence >= expected_min, (
+        f"S31 confidence {pickup_match.confidence:.3f} below "
+        f"expected_confidence_min {expected_min}. "
+        f"reason={pickup_outcome.reason!r}"
     )
 
-    # 5. Per-signal floor checks. WAI's public contract surfaces the signal
-    # breakdown in the rendered reason string (per Step 4 Q5: signals dict
-    # lives on _MatchOutcome internally; WhereAmIResult exposes the rendered
-    # form). For each documented minimum, parse the rendered .2f value out
-    # of the reason string and assert >= the floor.
-    #
-    # Reason format from _render_reason:
-    #   "intersection conf=0.79 [breadcrumb_match=1.00, on_target_road=1.00, ...]"
+    # 2. Per-signal floors (TOML: expected_signals_minimum). Read directly
+    # from the structured signals dict on MatchOutcome - no string parsing.
     expected_signals_minimum = fixture["expected_signals_minimum"]
     for signal_name, floor_val in expected_signals_minimum.items():
-        actual_val = _parse_signal_from_reason(result.reason, signal_name)
+        actual_val = pickup_outcome.signals.get(signal_name) if pickup_outcome.signals else None
         assert actual_val is not None, (
-            f"S31 expected signal {signal_name!r} not found in reason: "
-            f"{result.reason!r}"
+            f"S31 expected signal {signal_name!r} not found in signals dict: "
+            f"{pickup_outcome.signals!r}"
         )
         assert actual_val >= floor_val, (
             f"S31 signal {signal_name}: {actual_val:.2f} below floor "
-            f"{floor_val}. Reason: {result.reason}"
+            f"{floor_val}. signals={pickup_outcome.signals!r}"
         )
 
-    # 6. on_target_road must be True (Settemont matches)
-    assert result.on_target_road is True
+    # 3. on_target_road must be at full strength (Settemont matches)
+    on_target_road = (
+        pickup_outcome.signals.get("on_target_road", 0.0)
+        if pickup_outcome.signals else 0.0
+    )
+    assert on_target_road >= 1.0, (
+        f"S31 on_target_road={on_target_road} below 1.0; "
+        f"signals={pickup_outcome.signals!r}"
+    )
 
-    # 7. The cluster used in the result is the one we constructed
-    assert result.cluster is cluster
+    # 4. The cluster used in the result is the one we constructed
+    assert diagnostics.cluster is cluster
+
+    # NOTE: TOML fixture fields expected_status and expected_pudo_type have
+    # no direct analog in the naked-list contract. expected_pudo_type maps
+    # to pickup_match.location_type ("pickup") which we already asserted via
+    # the next() filter. expected_status was a WhereAmIResult string and is
+    # left unused by this rewrite. Future TOML cleanup is out of Cut B2 scope.
 
 
-def _parse_signal_from_reason(reason: str, signal_name: str) -> float | None:
-    """Extract a signal's rendered value from a _render_reason string.
-
-    Reason format: "intersection conf=0.79 [breadcrumb_match=1.00, ...]"
-
-    Returns the float value of `signal_name` (e.g., 1.00 for breadcrumb_match
-    in the example) or None if the signal isn't in the reason string.
-
-    Used by forensic replay tests to assert against fixture-documented
-    floor values without coupling to the internal _MatchOutcome.signals dict.
-    """
-    # Find the bracketed signals block
-    open_bracket = reason.find("[")
-    close_bracket = reason.rfind("]")
-    if open_bracket == -1 or close_bracket == -1:
-        return None
-    signals_block = reason[open_bracket + 1:close_bracket]
-
-    # Walk comma-separated tokens of the form "name=value"
-    for token in signals_block.split(","):
-        token = token.strip()
-        if "=" not in token:
-            continue
-        name, _, value = token.partition("=")
-        if name.strip() == signal_name:
-            try:
-                return float(value.strip())
-            except ValueError:
-                return None
-    return None

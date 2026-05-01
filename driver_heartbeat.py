@@ -134,7 +134,6 @@ def _assemble_offer(state_row):
         accepted_at=accepted_at,
         pickup=pickup_spec,
         dropoff=dropoff_spec,
-        secondary_dropoff=None,  # B-strict-pragmatic: stacks not assembled in 6c
     )
 
 

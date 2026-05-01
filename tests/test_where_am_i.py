@@ -501,12 +501,12 @@ def test_signal_adjacent_road_match_normalizes_via_road_names_match():
 
 # =============================================================================
 # =============================================================================
-# Step 5.3 plumbing tests — _MatchOutcome, _weighted_confidence,
+# Step 5.3 plumbing tests — MatchOutcome, _weighted_confidence,
 # _render_reason, _validate_target
 # =============================================================================
 
 from where_am_i import (
-    _MatchOutcome,
+    MatchOutcome,
     _weighted_confidence,
     _render_reason,
     _validate_target,
@@ -521,7 +521,7 @@ import dataclasses
 
 class TestMatchOutcome:
     def test_construction_with_all_fields(self):
-        outcome = _MatchOutcome(
+        outcome = MatchOutcome(
             matched=True,
             confidence=0.78,
             corrected_lat=29.6246,
@@ -538,7 +538,7 @@ class TestMatchOutcome:
     def test_construction_with_minimal_fields(self):
         # All fields are non-default (consistent with WhereAmIResult style),
         # so "minimal" means populating optionals with None.
-        outcome = _MatchOutcome(
+        outcome = MatchOutcome(
             matched=False,
             confidence=0.0,
             corrected_lat=None,
@@ -553,7 +553,7 @@ class TestMatchOutcome:
 
     def test_frozen(self):
         # Dataclass should be immutable post-construction
-        outcome = _MatchOutcome(
+        outcome = MatchOutcome(
             matched=True, confidence=0.5,
             corrected_lat=None, corrected_lng=None,
             reason="test", pudo_type=None,
@@ -683,12 +683,12 @@ class TestValidateTarget:
 
 
 # =============================================================================
-# Step 5.4 matcher tests — _RoadTopology, _compute_signals, _build_outcome,
+# Step 5.4 matcher tests — RoadTopology, _compute_signals, _build_outcome,
 # _match_<class> functions, _CLASS_DISPATCH
 # =============================================================================
 
 from where_am_i import (
-    _RoadTopology,
+    RoadTopology,
     _compute_signals,
     _build_outcome,
     _match_intersection,
@@ -709,13 +709,13 @@ def _topo(
     last_named_road: str | None = "Settemont Road",
     off_wire_duration_s: int = 0,
     breadcrumb: tuple = ("Settemont Road",),
-) -> _RoadTopology:
-    """Test fixture factory for _RoadTopology with sensible defaults.
+) -> RoadTopology:
+    """Test fixture factory for RoadTopology with sensible defaults.
 
     Defaults represent the canonical Forum Park 7623 topology: on Settemont
     Rd, just arrived, breadcrumb shows the road. Tests override individually.
     """
-    return _RoadTopology(
+    return RoadTopology(
         on_wire=on_wire,
         current_road=current_road,
         last_named_road=last_named_road,
@@ -855,9 +855,9 @@ class TestMatchIntersection:
         assert "intersection skipped: NULL target coords" in outcome.reason
 
     def test_returns_match_outcome(self):
-        # Type check — every matcher returns _MatchOutcome
+        # Type check — every matcher returns MatchOutcome
         outcome = _match_intersection(_cluster(), _topo(), _target())
-        assert isinstance(outcome, _MatchOutcome)
+        assert isinstance(outcome, MatchOutcome)
 
 
 # =============================================================================
@@ -1043,7 +1043,7 @@ class TestClassDispatch:
         for class_name, matcher in _CLASS_DISPATCH.items():
             target = _target(address_class=class_name, named_roads=())
             outcome = matcher(cluster, topo, target)
-            assert isinstance(outcome, _MatchOutcome), (
+            assert isinstance(outcome, MatchOutcome), (
                 f"{class_name} matcher returned {type(outcome)}"
             )
 
@@ -1164,9 +1164,13 @@ def _offer(
     offer_id: str = "test_offer",
     pickup: TargetSpec | None = None,
     dropoff: TargetSpec | None = None,
-    secondary_dropoff: TargetSpec | None = None,
 ) -> Offer:
-    """Build an Offer with sensible defaults."""
+    """Build an Offer with sensible defaults.
+
+    Cut B2: secondary_dropoff parameter removed. Stacked rides are
+    represented as multiple Offers in the queue, not a single Offer with
+    a secondary slot.
+    """
     if pickup is None:
         pickup = _target(named_roads=("Settemont Rd", "Joan St"))
     if dropoff is None:
@@ -1180,7 +1184,6 @@ def _offer(
         accepted_at=DUMMY_ACCEPTED_AT,
         pickup=pickup,
         dropoff=dropoff,
-        secondary_dropoff=secondary_dropoff,
     )
 
 
@@ -1243,203 +1246,25 @@ class TestComputeRoadTopology:
 # TestTargetsForState - 5 tests
 # =============================================================================
 
-class TestTargetsForState:
-    def _make_wai(self):
-        return WhereAmI(_FakeCursor(), _cluster_fn=_fake_cluster_fn(None),
-                        _pivot_fn=_fake_pivot())
-
-    def test_uncommitted_returns_empty(self):
-        # UNCOMMITTED has no current offer in scope; S11 is EXECUTE's job
-        wai = self._make_wai()
-        targets = wai._targets_for_state(_offer(), States.UNCOMMITTED)
-        assert targets == []
-
-    def test_enroute_returns_pickup(self):
-        offer = _offer()
-        wai = self._make_wai()
-        targets = wai._targets_for_state(offer, States.ENROUTE)
-        assert len(targets) == 1
-        assert targets[0][0] is offer.pickup
-        assert targets[0][1] == "pickup"
-
-    def test_in_trip_returns_dropoff(self):
-        offer = _offer()
-        wai = self._make_wai()
-        targets = wai._targets_for_state(offer, States.IN_TRIP)
-        assert len(targets) == 1
-        assert targets[0][0] is offer.dropoff
-        assert targets[0][1] == "dropoff"
-
-    def test_refine_dropoff_returns_dropoff(self):
-        # Synonym ruling (Step 4): REFINE_DROPOFF behaves identically to IN_TRIP
-        offer = _offer()
-        wai = self._make_wai()
-        targets = wai._targets_for_state(offer, States.REFINE_DROPOFF)
-        assert len(targets) == 1
-        assert targets[0][0] is offer.dropoff
-        assert targets[0][1] == "dropoff"
-
-    def test_stacked_returns_both(self):
-        # Both primary and secondary, in priority order
-        secondary = _target(lat=29.7, lng=-95.5, address_class="intersection",
-                            named_roads=("Other St", "Other Ave"))
-        offer = _offer(secondary_dropoff=secondary)
-        wai = self._make_wai()
-        targets = wai._targets_for_state(offer, States.STACKED)
-        assert len(targets) == 2
-        assert targets[0][0] is offer.dropoff   # primary first
-        assert targets[1][0] is secondary       # secondary second
-
-
-# =============================================================================
-# TestMatchCurrentPudo - 4 tests
-# =============================================================================
-
-class TestMatchCurrentPudo:
-    def test_no_match_when_no_targets(self):
-        # UNCOMMITTED returns no targets -> _match_current_pudo returns None
-        cluster = _cluster()
-        cur = _FakeCursor()
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        result = wai._match_current_pudo(cluster, topo, _offer(), States.UNCOMMITTED)
-        assert result is None
-
-    def test_intersection_match_returns_outcome(self):
-        # ENROUTE + intersection target at cluster -> matched outcome
-        cluster = _cluster()
-        cur = _FakeCursor()
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        outcome = wai._match_current_pudo(cluster, topo, _offer(), States.ENROUTE)
-        assert outcome is not None
-        assert outcome.matched is True
-        assert outcome.pudo_type == "pickup"
-
-    def test_stacked_higher_confidence_wins(self):
-        # STACKED with secondary much closer to cluster -> secondary wins
-        cluster = _cluster()
-        primary_far = _target(
-            lat=29.8, lng=-95.3,
-            address_class="number_on_street",
-            named_roads=("Far Road",),
-        )
-        secondary_close = _target(
-            lat=29.6246, lng=-95.5102,
-            address_class="intersection",
-            named_roads=("Settemont Rd", "Joan St"),
-        )
-        offer = _offer(dropoff=primary_far, secondary_dropoff=secondary_close)
-        cur = _FakeCursor()
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        outcome = wai._match_current_pudo(cluster, topo, offer, States.STACKED)
-        assert outcome is not None
-        assert outcome.matched is True
-        # Secondary should have won — high confidence, intersection class
-        assert outcome.confidence > STRONG_MATCH_CONFIDENCE
-
-    def test_unknown_address_class_logs_skip(self, caplog):
-        # If a target has an address_class not in _CLASS_DISPATCH, it's skipped
-        # with a WARN log
-        weird = _target(address_class="unknown_class")
-        offer = _offer(pickup=weird)
-        cluster = _cluster()
-        cur = _FakeCursor()
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        with caplog.at_level(logging.WARNING, logger="where_am_i"):
-            outcome = wai._match_current_pudo(cluster, topo, offer, States.ENROUTE)
-        # All targets skipped -> outcome is None
-        assert outcome is None
-        # WARN log should have fired
-        assert any("unknown address_class" in record.message
-                   for record in caplog.records)
-
-
-# =============================================================================
-# TestMatchGhostCache - 3 tests
-# =============================================================================
-
-class TestMatchGhostCache:
-    def test_no_ghost_returns_none(self):
-        cluster = _cluster()
-        cur = _FakeCursor(ghost_row=None)
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
-        assert result is None
-        # SQL was issued
-        assert "suspected_pudos" in cur.last_query
-        # Driver ID and coords were passed
-        assert cur.last_params[0] == "driver1"
-        assert cur.last_params[1] == cluster.median_lat
-        assert cur.last_params[2] == cluster.median_lng
-
-    def test_active_ghost_returns_at_previous_pudo(self):
-        cluster = _cluster()
-        ghost_row = {
-            "id": 42,
-            "lat": 29.6246,
-            "lng": -95.5102,
-            "offer_id_at_time": "ghost_offer_xyz",
-            "confidence": 0.65,
-            "detected_at": "2026-04-26 12:00:00+00",
-        }
-        cur = _FakeCursor(ghost_row=ghost_row)
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        topo = wai._compute_road_topology("driver1", cluster)
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
-        assert result is not None
-        assert result.status == "at_previous_pudo"
-        assert result.ghost_id == 42
-        assert result.offer_id == "ghost_offer_xyz"
-        assert result.confidence == 0.65
-
-    def test_topology_threaded_into_result(self):
-        # Q2 ruling: topology threaded into ghost result for forensic context
-        cluster = _cluster()
-        ghost_row = {
-            "id": 10,
-            "lat": 29.6246,
-            "lng": -95.5102,
-            "offer_id_at_time": "off1",
-            "confidence": 0.5,
-            "detected_at": "2026-04-26",
-        }
-        cur = _FakeCursor(ghost_row=ghost_row)
-        wai = WhereAmI(
-            cur,
-            _cluster_fn=_fake_cluster_fn(cluster),
-            _pivot_fn=_fake_pivot(on_wire=True, current_road="Settemont Road"),
-        )
-        topo = wai._compute_road_topology("driver1", cluster)
-        result = wai._match_ghost_cache("driver1", cluster, topo, "unknown_stop", cluster_revisit=False)
-        assert result.on_wire is True
-        assert result.current_road == "Settemont Road"
-
-
-# =============================================================================
-# TestEvaluate - 5 tests (the orchestrator end-to-end)
-# =============================================================================
-
 class TestEvaluate:
-    def test_no_cluster_returns_not_at_pudo(self):
+    """Cut B2: queue-aware evaluate() returns list[WAIMatch].
+
+    These tests cover the public Pure-Sensor surface: evaluate() returns
+    a naked match list; evaluate_with_diagnostics() returns the same plus
+    a DiagnosticContext. Per SIMPLIFIED_ARCHITECTURE.md §3 Map-Reduce.
+    """
+
+    def test_no_cluster_returns_empty_matches(self):
         cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(None),
                        _pivot_fn=_fake_pivot())
-        result = wai.evaluate("driver1", _offer(), States.ENROUTE)
-        assert result.status == "not_at_pudo"
-        assert result.cluster is None
+        matches = wai.evaluate("driver1", [_offer()])
+        assert matches == []
 
-    def test_cluster_at_target_returns_at_current_pudo(self):
-        # Forum Park 7623 — full evaluate() path
+    def test_cluster_at_target_returns_pickup_match(self):
+        # Forum Park 7623 — full evaluate() path. Pickup at the canonical
+        # 205m intersection target; default dropoff is far enough away
+        # that only the pickup target should match.
         cluster = _cluster()
         cur = _FakeCursor()
         wai = WhereAmI(
@@ -1451,61 +1276,45 @@ class TestEvaluate:
                 breadcrumb=["Settemont Road", "Fondren Road"],
             ),
         )
-        # Pickup is the canonical 205m intersection target
         pickup = _target(
             lat=29.6246 + 0.00184,
             lng=-95.5102,
             named_roads=("Settemont Rd", "Joan St"),
         )
         offer = _offer(pickup=pickup)
-        result = wai.evaluate("driver1", offer, States.ENROUTE)
-        assert result.status == "at_current_pudo"
-        assert result.pudo_type == "pickup"
-        assert result.confidence > STRONG_MATCH_CONFIDENCE
-        assert result.on_target_road is True
+        matches, diagnostics = wai.evaluate_with_diagnostics("driver1", [offer])
+        # Single decisive winner per §3 step 3d Reduce
+        assert len(matches) == 1
+        assert matches[0].offer_id == offer.offer_id
+        assert matches[0].location_type == "pickup"
+        assert matches[0].confidence > STRONG_MATCH_CONFIDENCE
         # Default _FakeCursor.fetchall() returns [] -> no recent_clusters ->
         # cluster_revisit must be False on the standard "first arrival" case.
-        # (sub-step 1b.3 Q2: tighten standard case to assert full state.)
-        assert result.cluster_revisit is False
+        assert diagnostics.cluster_revisit is False
 
-    def test_cluster_no_offer_returns_at_unknown_pudo(self):
-        # cluster + UNCOMMITTED + no ghost -> at_unknown_pudo
+    def test_empty_queue_returns_empty_matches(self):
+        # Empty queue (driver idle, no offers) -> Map step generates zero
+        # candidates -> empty matches. Diagnostics still carries the cluster
+        # per §3 step 8 (cluster data logged independently of WAI outcome).
         cluster = _cluster()
-        cur = _FakeCursor(ghost_row=None)
+        cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
-        assert result.status == "at_unknown_pudo"
-        assert result.cluster is not None
-        assert result.confidence == 0.0
+        matches, diagnostics = wai.evaluate_with_diagnostics("driver1", [])
+        assert matches == []
+        assert diagnostics.cluster is cluster
 
-    def test_uncommitted_falls_through(self):
-        # Even with an offer, UNCOMMITTED state has no targets
-        # (S11 is EXECUTE's job). Cluster falls through to ghost / unknown.
+    def test_far_targets_return_empty_matches(self):
+        # Cluster + queue with offer whose targets are nowhere near the
+        # cluster -> all candidates filter out -> empty matches.
         cluster = _cluster()
-        cur = _FakeCursor(ghost_row=None)
+        cur = _FakeCursor()
         wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
                        _pivot_fn=_fake_pivot())
-        result = wai.evaluate("driver1", _offer(), States.UNCOMMITTED)
-        assert result.status == "at_unknown_pudo"
-
-    def test_off_ride_with_ghost_match(self):
-        # No current offer + ghost present -> at_previous_pudo
-        cluster = _cluster()
-        ghost_row = {
-            "id": 99,
-            "lat": 29.6246,
-            "lng": -95.5102,
-            "offer_id_at_time": "old_offer",
-            "confidence": 0.55,
-            "detected_at": "2026-04-26",
-        }
-        cur = _FakeCursor(ghost_row=ghost_row)
-        wai = WhereAmI(cur, _cluster_fn=_fake_cluster_fn(cluster),
-                       _pivot_fn=_fake_pivot())
-        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
-        assert result.status == "at_previous_pudo"
-        assert result.ghost_id == 99
+        far_target = _target(lat=30.0, lng=-96.0, named_roads=("Nowhere Blvd",))
+        offer = _offer(pickup=far_target, dropoff=far_target)
+        matches = wai.evaluate("driver1", [offer])
+        assert matches == []
 
 
 # =============================================================================
@@ -1721,16 +1530,20 @@ class TestComputeClusterRevisit:
 # =============================================================================
 
 class TestEvaluateClusterRevisit:
-    """Verify cluster_revisit is correctly threaded from helper through evaluate()
-    into all three result-building paths (at_current_pudo, at_unknown_pudo,
-    at_previous_pudo) and correctly suppressed when no offer/cluster anchors it.
+    """Cut B2: cluster_revisit lives on DiagnosticContext, not on the match.
+
+    Verifies the Memory Eye lookback behavior:
+      - empty queue -> no lookback fetch, cluster_revisit=False
+      - non-empty queue -> _recent_clusters_fn called with min(accepted_at)
+      - cluster_revisit propagates to diagnostics regardless of match outcome
     """
 
-    def test_evaluate_no_offer_cluster_revisit_false(self):
-        """current_offer=None -> cluster_revisit=False unconditionally (Q2 ride-scoped)."""
+    def test_empty_queue_revisit_false(self):
+        """Empty queue -> Memory Eye skipped, cluster_revisit unconditionally False."""
         cluster = _cluster()
-        cur = _FakeCursor(ghost_row=None)
-        # Even injecting a Houston Loop list, no offer means Step 3.5 doesn't fire.
+        cur = _FakeCursor()
+        # Even injecting a Houston Loop list, an empty queue means Step 3.5
+        # doesn't fire — cluster_revisit is workload-scoped, not driver-scoped.
         houston_loop = [
             _cluster_at(0.0, 0.001, latest_offset_s=10),
             _cluster_at(0.005, 0.005, latest_offset_s=20),
@@ -1742,23 +1555,23 @@ class TestEvaluateClusterRevisit:
             _pivot_fn=_fake_pivot(),
             _recent_clusters_fn=_fake_recent_clusters_fn(houston_loop),
         )
-        result = wai.evaluate("driver1", None, States.UNCOMMITTED)
-        assert result.cluster_revisit is False
+        _, diagnostics = wai.evaluate_with_diagnostics("driver1", [])
+        assert diagnostics.cluster_revisit is False
 
-    def test_evaluate_no_cluster_cluster_revisit_false(self):
-        """_cluster_fn returns None -> not_at_pudo path -> cluster_revisit=False."""
+    def test_no_cluster_revisit_false(self):
+        """_cluster_fn returns None -> diagnostics.cluster=None, revisit=False."""
         cur = _FakeCursor()
         wai = WhereAmI(
             cur,
             _cluster_fn=_fake_cluster_fn(None),
             _pivot_fn=_fake_pivot(),
         )
-        result = wai.evaluate("driver1", _offer(), States.ENROUTE)
-        assert result.status == "not_at_pudo"
-        assert result.cluster_revisit is False
+        _, diagnostics = wai.evaluate_with_diagnostics("driver1", [_offer()])
+        assert diagnostics.cluster is None
+        assert diagnostics.cluster_revisit is False
 
-    def test_evaluate_with_offer_no_history_revisit_false(self):
-        """offer + cluster + history=[active] only -> revisit False (history len 0)."""
+    def test_offer_no_history_revisit_false(self):
+        """Single-offer queue + history without Houston Loop -> revisit False."""
         cluster = _cluster()
         cur = _FakeCursor()
         wai = WhereAmI(
@@ -1767,21 +1580,14 @@ class TestEvaluateClusterRevisit:
             _pivot_fn=_fake_pivot(),
             _recent_clusters_fn=_fake_recent_clusters_fn([cluster]),
         )
-        # Offer has targets far from cluster -> no current PUDO match ->
-        # falls through to at_unknown_pudo where cluster_revisit observable.
-        far_pickup = _target(lat=30.0, lng=-96.0)
+        far_pickup = _target(lat=30.0, lng=-96.0, named_roads=("Nowhere Blvd",))
         offer = _offer(pickup=far_pickup, dropoff=far_pickup)
-        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
-        assert result.cluster_revisit is False
+        _, diagnostics = wai.evaluate_with_diagnostics("driver1", [offer])
+        assert diagnostics.cluster_revisit is False
 
-    def test_evaluate_with_offer_houston_loop_revisit_true(self):
-        """offer + cluster + Houston Loop history -> revisit True."""
-        # active matches the default _cluster() at canonical Forum Park coords.
+    def test_offer_houston_loop_revisit_true(self):
+        """Single-offer queue + Houston Loop history -> revisit True."""
         active = _cluster()
-        # Build Houston Loop relative to active's actual coords:
-        # _cluster() default: median_lat=29.6246, median_lng=-95.5102.
-        # near: shift lng by 0.001 -> ~97m
-        # far:  shift both by 0.005 -> ~786m
         near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
         far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
         history = [near, far, active]
@@ -1793,23 +1599,25 @@ class TestEvaluateClusterRevisit:
             _pivot_fn=_fake_pivot(),
             _recent_clusters_fn=_fake_recent_clusters_fn(history),
         )
-        # Pickup far away -> no match -> at_unknown_pudo where revisit visible.
-        far_pickup = _target(lat=30.0, lng=-96.0)
+        far_pickup = _target(lat=30.0, lng=-96.0, named_roads=("Nowhere Blvd",))
         offer = _offer(pickup=far_pickup, dropoff=far_pickup)
-        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
-        assert result.cluster_revisit is True
+        _, diagnostics = wai.evaluate_with_diagnostics("driver1", [offer])
+        assert diagnostics.cluster_revisit is True
 
-    def test_evaluate_recent_clusters_fn_called_with_offer_accepted_at(self):
-        """Verify Step 3.5 forwards offer.accepted_at as accepted_at_anchor."""
+    def test_recent_clusters_fn_called_with_min_accepted_at(self):
+        """Memory Eye anchors on min(accepted_at) across the queue.
+
+        Two assertions: single-offer (trivial) and multi-offer (proves min).
+        Cut B2's Memory Eye extension of Amendment 1's Offer-Anchor Lookback.
+        """
+        from dataclasses import replace as _dc_replace
+
         cluster = _cluster()
-        captured = []
+        captured: list = []
 
         def _capturing_rc_fn(driver_id, cur, accepted_at_anchor=None, **kwargs):
-            captured.append({
-                "driver_id": driver_id,
-                "accepted_at_anchor": accepted_at_anchor,
-            })
-            return [cluster]  # no Houston Loop, just observable call
+            captured.append(accepted_at_anchor)
+            return [cluster]
 
         cur = _FakeCursor()
         wai = WhereAmI(
@@ -1818,63 +1626,42 @@ class TestEvaluateClusterRevisit:
             _pivot_fn=_fake_pivot(),
             _recent_clusters_fn=_capturing_rc_fn,
         )
+
+        # Single-offer queue: anchor is trivially that offer's accepted_at.
         offer = _offer()
-        wai.evaluate("driver1", offer, States.ENROUTE)
-        assert len(captured) == 1
-        assert captured[0]["driver_id"] == "driver1"
-        assert captured[0]["accepted_at_anchor"] == offer.accepted_at
+        wai.evaluate_with_diagnostics("driver1", [offer])
+        assert captured[-1] == offer.accepted_at
 
-    def test_evaluate_at_unknown_pudo_carries_cluster_revisit(self):
-        """Step 6 path (at_unknown_pudo): cluster_revisit reflects helper output."""
+        # Multi-offer queue: anchor is the min (oldest accepted_at).
+        oldest = _dc_replace(
+            offer, offer_id="oldest",
+            accepted_at=DUMMY_ACCEPTED_AT - timedelta(hours=2),
+        )
+        middle = offer
+        newest = _dc_replace(
+            offer, offer_id="newest",
+            accepted_at=DUMMY_ACCEPTED_AT + timedelta(hours=1),
+        )
+        # Pass in non-sorted order to prove min() handles ordering.
+        wai.evaluate_with_diagnostics("driver1", [newest, middle, oldest])
+        assert captured[-1] == oldest.accepted_at
+
+    def test_diagnostics_carry_cluster_revisit_when_no_match(self):
+        """Far targets -> empty matches, but diagnostics still reports revisit."""
         active = _cluster()
         near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
         far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
         history = [near, far, active]
 
-        cur = _FakeCursor(ghost_row=None)  # no ghost match
+        cur = _FakeCursor()
         wai = WhereAmI(
             cur,
             _cluster_fn=_fake_cluster_fn(active),
             _pivot_fn=_fake_pivot(),
             _recent_clusters_fn=_fake_recent_clusters_fn(history),
         )
-        far_pickup = _target(lat=30.0, lng=-96.0)
+        far_pickup = _target(lat=30.0, lng=-96.0, named_roads=("Nowhere Blvd",))
         offer = _offer(pickup=far_pickup, dropoff=far_pickup)
-        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
-        assert result.status == "at_unknown_pudo"
-        assert result.cluster_revisit is True
-
-    def test_evaluate_ghost_match_carries_cluster_revisit(self):
-        """Step 5 path (at_previous_pudo): cluster_revisit reflects helper output."""
-        active = _cluster()
-        near = _cluster_at(29.6246, -95.5102 + 0.001, latest_offset_s=10)
-        far = _cluster_at(29.6246 + 0.005, -95.5102 + 0.005, latest_offset_s=20)
-        history = [near, far, active]
-
-        ghost_row = {
-            "id": 42,
-            "lat": 29.6246,
-            "lng": -95.5102,
-            "offer_id_at_time": "old_offer_xyz",
-            "confidence": 0.65,
-            "detected_at": "2026-04-26",
-        }
-        cur = _FakeCursor(ghost_row=ghost_row)
-        wai = WhereAmI(
-            cur,
-            _cluster_fn=_fake_cluster_fn(active),
-            _pivot_fn=_fake_pivot(),
-            _recent_clusters_fn=_fake_recent_clusters_fn(history),
-        )
-        far_pickup = _target(lat=30.0, lng=-96.0)
-        offer = _offer(pickup=far_pickup, dropoff=far_pickup)
-        # UNCOMMITTED -> _match_current_pudo returns None (no targets), falls
-        # through to Step 5 where ghost fires. ENROUTE would attempt intersection
-        # match against far_pickup whose default named_roads ("Settemont Rd",
-        # "Joan St") still match _fake_pivot's default current_road/breadcrumb,
-        # producing a false-positive at_current_pudo before Step 5 can run.
-        result = wai.evaluate("driver1", offer, States.UNCOMMITTED)
-        assert result.status == "at_previous_pudo"
-        assert result.ghost_id == 42
-        assert result.cluster_revisit is True
-
+        matches, diagnostics = wai.evaluate_with_diagnostics("driver1", [offer])
+        assert matches == []
+        assert diagnostics.cluster_revisit is True

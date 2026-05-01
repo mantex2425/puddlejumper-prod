@@ -6,16 +6,17 @@ No sm_transition calls, no suspected_pudos INSERTs, no Discord pings,
 no offer_history mutations. PLAN consumer (pudo_planner.py, Phase E)
 owns all writes derived from this module's output.
 
-Public surface (Phase D Step 5.5+):
-    WhereAmI(cur)             - instantiate with a psycopg cursor
-    WhereAmI.evaluate(...)    - returns WhereAmIResult on every heartbeat
+Public surface (Cut B2, Sprint A):
+    WhereAmI(cur)                          - instantiate with a psycopg cursor
+    WhereAmI.evaluate(driver_id, queue)    - returns list[WAIMatch]
+    WhereAmI.evaluate_with_diagnostics(...) - returns (list[WAIMatch], DiagnosticContext)
 
 Algorithm: see WHERE_AM_I_PROPOSAL_v2.md sections 4 and 5.
 
 Module structure:
     - Constants and confidence weights (locked in Steps 1-3)
     - Section A: signal library (this file as of Step 5.2)
-    - Section B: plumbing - _MatchOutcome, _weighted_confidence,
+    - Section B: plumbing - MatchOutcome, _weighted_confidence,
       _render_reason, _validate_target (Step 5.3)
     - Section C: per-class matchers and _CLASS_DISPATCH (Step 5.4)
     - Section D: WhereAmI class with evaluate() and helpers (Step 5.5)
@@ -353,11 +354,11 @@ def _signal_off_wire_pivot(
       - 1.0 from 30s onward (within recency window enforced by pivot_context's
         own backward-scan window, ~300s)
 
-    Signature note: takes the four fields directly rather than a _RoadTopology
-    object. _RoadTopology is defined in Section D (Step 5.5); Section A
+    Signature note: takes the four fields directly rather than a RoadTopology
+    object. RoadTopology is defined in Section D (Step 5.5); Section A
     deliberately has no dependency on it so signal tests don't need the
     topology-construction machinery. Section C matchers will assemble the
-    arguments from _RoadTopology.
+    arguments from RoadTopology.
     """
     if on_wire:
         return 0.0
@@ -389,9 +390,9 @@ def _signal_off_wire_pivot(
 # and the WhereAmI orchestrator (Section D). All private to this module —
 # tests import them as "special friends" per Gemini Q6.
 #
-# _MatchOutcome is the contract between matchers and evaluate(): every
+# MatchOutcome is the contract between matchers and evaluate(): every
 # matcher returns one. evaluate() reads the fields directly to assemble
-# the final WhereAmIResult.
+# the final MatchOutcome.
 #
 # Field ordering follows Gemini Step 5.3 Q1 ruling: verdict first
 # (matched, confidence), then geography (corrected coords), then
@@ -402,12 +403,12 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class _MatchOutcome:
+class MatchOutcome:
     """Internal carrier between per-class matchers and evaluate().
 
     Every _match_<class> function returns one of these. evaluate()
     consumes the fields directly when assembling the final
-    WhereAmIResult. Frozen because the structure is immutable post-
+    MatchOutcome. Frozen because the structure is immutable post-
     construction; mutability would invite subtle bugs in the
     STACKED tie-break path (Q3) where multiple outcomes are
     compared by confidence.
@@ -433,7 +434,7 @@ class _MatchOutcome:
     # --- Metadata (None for fail-closed outcomes) -------------------------
     # Per Gemini Q5: stashing the per-signal score breakdown on the
     # outcome lets evaluate() preserve the dominant-signal forensic trail
-    # all the way through to the WhereAmIResult.
+    # all the way through to the MatchOutcome.
     signals: Optional[dict[str, float]]
 
 
@@ -457,7 +458,7 @@ def _render_reason(
     signals: dict[str, float],
     confidence: float,
 ) -> str:
-    """Human-readable summary used in WhereAmIResult.reason and
+    """Human-readable summary used in MatchOutcome.reason and
     [WAI matcher=...] debug log lines.
 
     Format (Gemini Q2 lock — .2f precision):
@@ -472,11 +473,11 @@ def _render_reason(
     return f"{class_name} conf={confidence:.2f} [{parts}]"
 
 
-def _validate_target(target, class_name: str) -> Optional[_MatchOutcome]:
+def _validate_target(target, class_name: str) -> Optional[MatchOutcome]:
     """Fail-closed guard against unusable targets.
 
     Returns None if `target` is usable (matcher should proceed to
-    compute signals). Returns a fail-closed _MatchOutcome if the
+    compute signals). Returns a fail-closed MatchOutcome if the
     target has NULL coords — happens in production when triangulation
     failed (S27 from the canonical scenarios doc).
 
@@ -491,7 +492,7 @@ def _validate_target(target, class_name: str) -> Optional[_MatchOutcome]:
     and on_target_road signals).
     """
     if target.lat is None or target.lng is None:
-        return _MatchOutcome(
+        return MatchOutcome(
             matched=False,
             confidence=0.0,
             corrected_lat=None,
@@ -516,21 +517,21 @@ def _validate_target(target, class_name: str) -> Optional[_MatchOutcome]:
 #   2. Compute the 6 signals via _compute_signals helper
 #   3. Sum signals * class-specific weights via _weighted_confidence
 #   4. Render reason string via _render_reason
-#   5. Build _MatchOutcome
+#   5. Build MatchOutcome
 #
 # Class-specific behavior is entirely in (a) which proximity threshold gets
 # passed to _compute_signals and (b) which _CONFIDENCE_WEIGHTS row applies.
 # Per Gemini Step 3 ratification: the weights table is the only "knob"; all
 # matchers share the same orchestration shape.
 #
-# _RoadTopology is brought forward from Section D (Gemini Step 5.4 Q1
+# RoadTopology is brought forward from Section D (Gemini Step 5.4 Q1
 # ruling). It's a frozen dataclass with the topology fields the matchers
 # need. Section D's _compute_road_topology adapter constructs instances
 # from get_pivot_context() output; tests construct them directly.
 
 
 @dataclass(frozen=True)
-class _RoadTopology:
+class RoadTopology:
     """Snapshot of the driver's road-network context at a single heartbeat.
 
     Constructed in production by _compute_road_topology (Section D) from
@@ -560,7 +561,7 @@ class _RoadTopology:
 
 def _compute_signals(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
     threshold_m: float,
 ) -> dict[str, float]:
@@ -605,8 +606,8 @@ def _build_outcome(
     class_name: str,
     signals: dict[str, float],
     confidence: float,
-) -> _MatchOutcome:
-    """Assemble a _MatchOutcome from computed signals + confidence.
+) -> MatchOutcome:
+    """Assemble a MatchOutcome from computed signals + confidence.
 
     Common tail of every matcher. The matched flag is True iff confidence
     clears MIN_REPORT_THRESHOLD (Step 1 Q4 lock); below that, the matcher
@@ -614,7 +615,7 @@ def _build_outcome(
     ghost-match or at_unknown_pudo.
     """
     reason = _render_reason(class_name, signals, confidence)
-    return _MatchOutcome(
+    return MatchOutcome(
         matched=confidence >= MIN_REPORT_THRESHOLD,
         confidence=confidence,
         corrected_lat=cluster.median_lat,
@@ -628,9 +629,9 @@ def _build_outcome(
 
 def _match_intersection(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
-) -> _MatchOutcome:
+) -> MatchOutcome:
     """Match an intersection-class target ("Joan St & Settemont Rd")."""
     if (skip := _validate_target(target, "intersection")) is not None:
         return skip
@@ -649,9 +650,9 @@ def _match_intersection(
 
 def _match_single_road(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
-) -> _MatchOutcome:
+) -> MatchOutcome:
     """Match a single_road target ("fondren rd")."""
     if (skip := _validate_target(target, "single_road")) is not None:
         return skip
@@ -670,9 +671,9 @@ def _match_single_road(
 
 def _match_number_on_street(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
-) -> _MatchOutcome:
+) -> MatchOutcome:
     """Match a number_on_street target ("1234 Main St").
 
     Tightest proximity threshold of any class (50m) because Google's
@@ -695,9 +696,9 @@ def _match_number_on_street(
 
 def _match_apartment_complex(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
-) -> _MatchOutcome:
+) -> MatchOutcome:
     """Match an apartment_complex target.
 
     Generous proximity threshold (300m) because Google often pins the
@@ -722,9 +723,9 @@ def _match_apartment_complex(
 
 def _match_poi_stub(
     cluster: Cluster,
-    topo: _RoadTopology,
+    topo: RoadTopology,
     target,
-) -> _MatchOutcome:
+) -> MatchOutcome:
     """Stub for poi-class targets (airports, named businesses).
 
     Per Step 1 Q4 lock and Gemini Step 5.4 Q3 ratification: returns
@@ -741,7 +742,7 @@ def _match_poi_stub(
         "falling through to ghost / at_unknown_pudo",
         getattr(target, "address", None),
     )
-    return _MatchOutcome(
+    return MatchOutcome(
         matched=False,
         confidence=0.0,
         corrected_lat=None,
@@ -792,7 +793,7 @@ from datetime import datetime, timezone
 from cluster_detection import detect_cluster, get_recent_clusters
 from adjacency import get_adjacent_roads_for_cluster
 from pivot_context import get_pivot_context
-from pudo_types import WhereAmIResult, States
+from pudo_types import WAIMatch, WAI_CONFIDENCE_THRESHOLD
 
 
 # Ghost cache SELECT — read-only per Q12. Phase A schema:
@@ -908,6 +909,44 @@ def _compute_cluster_revisit(
     return False
 
 
+@dataclass(frozen=True)
+class DiagnosticContext:
+    """Forensic context returned by evaluate_with_diagnostics().
+
+    Carries everything the wiring layer needs for pudo_decision_context
+    inserts and forensic replay tests (e.g. _replay_S31), while keeping
+    the naked-list contract pure for business logic per CANONICAL_RULES
+    Section XIV.A.
+
+    Fields:
+        cluster              The cluster that triggered evaluation, or
+                             None if no cluster was detected. Per §3 step 8,
+                             populated independently of match outcome so
+                             forensic logging never silently drops rows.
+        topology             Road topology snapshot (on_wire, current_road,
+                             breadcrumb, etc.) or None if no cluster.
+        cluster_revisit      True if the cluster centroid is at a location
+                             revisited within the queue's accepted_at-
+                             anchored lookback window (Memory Eye / Houston
+                             Loop signal).
+        stop_context         Stop Atlas classification ("unknown_stop" stub
+                             until v1.1).
+        per_target_outcomes  Every (offer_id, location_type, MatchOutcome)
+                             evaluated this heartbeat. The wiring layer
+                             projects these into pudo_decision_context's
+                             per-target rows.
+
+    No timestamp field: per CANONICAL_RULES Section II (Postgres owns the
+    clock), the evaluated_at column is populated at INSERT time via NOW().
+    Python clock is never the canonical timestamp.
+    """
+    cluster: "Optional[Cluster]"
+    topology: "Optional[RoadTopology]"
+    cluster_revisit: bool
+    stop_context: str
+    per_target_outcomes: list  # list[tuple[str, str, MatchOutcome]]
+
+
 class WhereAmI:
     """Continuous location awareness primitive.
 
@@ -919,7 +958,8 @@ class WhereAmI:
       WhereAmI(cur, _cluster_fn=fake, ...)       # tests with injected deps
 
     Public surface:
-      evaluate(driver_id, current_offer, state) -> WhereAmIResult
+      evaluate(driver_id, queue) -> list[WAIMatch]
+      evaluate_with_diagnostics(driver_id, queue) -> (list[WAIMatch], DiagnosticContext)
     """
 
     def __init__(
@@ -958,77 +998,150 @@ class WhereAmI:
     def evaluate(
         self,
         driver_id: str,
-        current_offer,
-        state: str,
-    ) -> WhereAmIResult:
-        """Compute current location awareness. Pure read.
+        queue: list,
+    ) -> list[WAIMatch]:
+        """Pure Sensor: returns naked match list per the §3 Map-Reduce contract.
 
-        Returns exactly one WhereAmIResult per call. Never raises for
-        normal flow; only DB connection errors propagate (Q6 lock:
-        bubble errors, don't catch — silent degradation is worse than
-        a loud failure in commercial code).
+        Thin wrapper around _evaluate() that discards the DiagnosticContext.
+        Use evaluate_with_diagnostics() for forensic logging and replay tests.
 
-        Algorithm: RFC §4 hierarchical matching. See module docstring.
+        Per CANONICAL_RULES Section XIV.A and SIMPLIFIED_ARCHITECTURE.md §10
+        A8: this is the only legitimate path from cluster to PUDO match.
         """
-        # --- Step 1: Cluster check -----------------------------------------
+        matches, _ = self._evaluate(driver_id, queue)
+        return matches
+
+    def evaluate_with_diagnostics(
+        self,
+        driver_id: str,
+        queue: list,
+    ) -> tuple[list[WAIMatch], "DiagnosticContext"]:
+        """Forensic counterpart to evaluate().
+
+        Returns (matches, diagnostics) for the heartbeat handler's
+        pudo_decision_context insert and for forensic replay tests
+        (e.g. _replay_S31). The DiagnosticContext carries the cluster,
+        topology, cluster_revisit flag, stop context, and per-target
+        outcomes — everything pudo_decision_context's logging surface
+        needs to record what WAI saw on this heartbeat.
+
+        Per SIMPLIFIED_ARCHITECTURE.md §3 step 8: cluster data MUST be
+        logged independently of WAI outcome. DiagnosticContext.cluster is
+        populated even when no targets match, so forensic logging never
+        silently drops cluster rows.
+        """
+        return self._evaluate(driver_id, queue)
+
+    def _evaluate(
+        self,
+        driver_id: str,
+        queue: list,
+    ) -> tuple[list[WAIMatch], "DiagnosticContext"]:
+        """Internal: §3 Map-Reduce algorithm. Single source of truth.
+
+        Map     for each offer in queue, generate (pickup, "pickup") and
+                (dropoff, "dropoff") target candidates. Two TargetSpecs
+                per offer. Empty queue -> empty Map.
+
+        Filter  per-class matchers apply their own proximity radii
+                (INTERSECTION_RADIUS_M etc.) per §3 step 3b.
+
+        Evaluate run Signal Economics on each surviving candidate via
+                _CLASS_DISPATCH. Per §3 step 3c.
+
+        Reduce  return all candidates whose confidence is exactly equal
+                to the maximum and clears WAI_CONFIDENCE_THRESHOLD.
+                Ties at exact float equality are returned together for
+                §5 disambiguation downstream. Per §3 steps 3d-3e.
+
+        Memory Eye: cluster-history lookback anchors on the oldest
+        accepted_at across the queue (Cut B2 extension of Step 6
+        Amendment 1's Offer-Anchor Lookback). Empty queue -> no lookback
+        fetch, cluster_revisit=False.
+        """
+        # Step 1: Cluster check
         cluster = self._cluster_fn(driver_id, self.cur)
         if cluster is None:
-            return self._not_at_pudo(reason="no cluster detected")
+            return [], DiagnosticContext(
+                cluster=None,
+                topology=None,
+                cluster_revisit=False,
+                stop_context="unknown_stop",
+                per_target_outcomes=[],
+            )
 
-        # --- Step 2: Topology (single pivot_context call, reused below) ----
+        # Step 2: Topology (single pivot_context call, reused in Evaluate)
         topo = self._compute_road_topology(driver_id, cluster)
 
-        # --- Step 3: Stop context — STUB for v1.0 (Stop Atlas v1.1) -------
+        # Step 3: Stop context (Stop Atlas v1.1 stub)
         stop_context = "unknown_stop"
 
-        # --- Step 3.5: Cluster history topology (v2.6 amendment) ----------
-        # Compute cluster_revisit only when an active offer anchors the
-        # lookback window (Q2 ratification). Without an offer there's no
-        # "current ride" for round-trip semantics; cluster_revisit is
-        # ride-scoped, not driver-scoped.
-        if current_offer is not None:
+        # Step 3.5: Memory Eye — cluster history lookback. Anchor on
+        # min(accepted_at) across the queue. Empty queue -> skip.
+        if queue:
+            accepted_at_anchor = min(offer.accepted_at for offer in queue)
             recent_clusters = self._recent_clusters_fn(
                 driver_id, self.cur,
-                accepted_at_anchor=current_offer.accepted_at,
+                accepted_at_anchor=accepted_at_anchor,
             )
             cluster_revisit = _compute_cluster_revisit(cluster, recent_clusters)
         else:
             cluster_revisit = False
 
-        # --- Step 4: Current-ride PUDO matching ---------------------------
-        if current_offer is not None:
-            current_outcome = self._match_current_pudo(
-                cluster, topo, current_offer, state,
-            )
-            if current_outcome is not None and current_outcome.matched:
-                return self._build_current_result(
-                    outcome=current_outcome,
-                    topo=topo,
-                    stop_context=stop_context,
-                    cluster=cluster,
-                    offer=current_offer,
-                    state=state,
-                    cluster_revisit=cluster_revisit,
+        # Step 4 (Map): generate (target, location_type, offer_id) candidates.
+        candidates = []
+        for offer in queue:
+            candidates.append((offer.pickup, "pickup", offer.offer_id))
+            candidates.append((offer.dropoff, "dropoff", offer.offer_id))
+
+        # Step 5 (Evaluate): run per-class matcher against each candidate.
+        # Defensive logging on unknown address_class — alerts to upstream
+        # geocoding drift without polluting the match logic.
+        per_target_outcomes = []
+        for target, location_type, offer_id in candidates:
+            matcher = _CLASS_DISPATCH.get(target.address_class)
+            if matcher is None:
+                log.warning(
+                    "[WAI] unknown address_class=%r for offer_id=%r — skipping",
+                    target.address_class, offer_id,
                 )
+                continue
+            outcome = matcher(cluster, topo, target)
+            per_target_outcomes.append((offer_id, location_type, outcome))
 
-        # --- Step 5: Ghost cache READ (Q12 lock: read-only) ---------------
-        ghost_result = self._match_ghost_cache(
-            driver_id, cluster, topo, stop_context, cluster_revisit,
+        # Step 6 (Reduce): filter by matched + threshold, then ties at max.
+        above_threshold = [
+            (offer_id, location_type, outcome)
+            for offer_id, location_type, outcome in per_target_outcomes
+            if outcome.matched and outcome.confidence >= WAI_CONFIDENCE_THRESHOLD
+        ]
+
+        matches: list[WAIMatch] = []
+        if above_threshold:
+            max_confidence = max(o.confidence for _, _, o in above_threshold)
+            for offer_id, location_type, outcome in above_threshold:
+                if outcome.confidence == max_confidence:
+                    matches.append(WAIMatch(
+                        offer_id=offer_id,
+                        location_type=location_type,
+                        confidence=outcome.confidence,
+                    ))
+
+        diagnostics = DiagnosticContext(
+            cluster=cluster,
+            topology=topo,
+            cluster_revisit=cluster_revisit,
+            stop_context=stop_context,
+            per_target_outcomes=per_target_outcomes,
         )
-        if ghost_result is not None:
-            return ghost_result
-
-        # --- Step 6: Cluster exists, no offer or ghost explains it --------
-        # Per Q12: WAI does NOT INSERT here. PLAN consumer (Phase E)
-        # decides whether to persist a suspect into suspected_pudos.
-        return self._at_unknown_pudo(cluster, topo, stop_context, cluster_revisit)
+        return matches, diagnostics
 
     # =========================================================================
     # Topology adapter
     # =========================================================================
 
-    def _compute_road_topology(self, driver_id: str, cluster) -> _RoadTopology:
-        """Map pivot_context.get_pivot_context() output onto _RoadTopology.
+    def _compute_road_topology(self, driver_id: str, cluster) -> RoadTopology:
+        """Map pivot_context.get_pivot_context() output onto RoadTopology.
 
         Per Q7: all topology comes from a single backward heartbeat_log
         scan inside pivot_context — no additional queries here. The
@@ -1059,7 +1172,7 @@ class WhereAmI:
 
         breadcrumb_raw = ctx.get("breadcrumb") or ()
         # pivot_context returns a list of segment dicts ({road_name, entered_at,
-        # exited_at}); _RoadTopology.breadcrumb is typed tuple[str, ...] and all
+        # exited_at}); RoadTopology.breadcrumb is typed tuple[str, ...] and all
         # downstream signal consumers assume road-name strings. Project the
         # road_name field here, filter out any segments missing it.
         breadcrumb = tuple(
@@ -1072,7 +1185,7 @@ class WhereAmI:
         # adjacency.get_adjacent_roads_for_cluster contract.
         adjacent_roads = self._adjacency_fn(self.cur, cluster)
 
-        return _RoadTopology(
+        return RoadTopology(
             on_wire=on_wire,
             current_road=ctx.get("current_road"),
             last_named_road=ctx.get("last_named_road"),
@@ -1084,270 +1197,3 @@ class WhereAmI:
     # =========================================================================
     # Current-ride PUDO matching (state-aware)
     # =========================================================================
-
-    def _match_current_pudo(
-        self,
-        cluster: Cluster,
-        topo: _RoadTopology,
-        offer,
-        state: str,
-    ) -> Optional[_MatchOutcome]:
-        """Select target(s) by state, dispatch to class matcher, return best.
-
-        Q3 STACKED tie-break: test both primary and secondary, return
-        whichever has higher confidence; primary wins on tie because
-        targets list is in priority order and max() is stable.
-
-        Returns None if no targets apply to this state (e.g., UNCOMMITTED).
-        """
-        targets = self._targets_for_state(offer, state)
-        if not targets:
-            return None
-
-        outcomes = []
-        for target, pudo_type in targets:
-            matcher = _CLASS_DISPATCH.get(target.address_class)
-            if matcher is None:
-                log.warning(
-                    "[WAI] unknown address_class=%r for target — skipping",
-                    target.address_class,
-                )
-                continue
-            outcome = matcher(cluster, topo, target)
-            outcomes.append((outcome, target, pudo_type))
-
-        if not outcomes:
-            return None
-
-        # Q3: best confidence wins; primary breaks ties via stable max().
-        # outcomes is in priority order: primary first, secondary second.
-        best_triple = max(outcomes, key=lambda triple: triple[0].confidence)
-        best_outcome, best_target, best_pudo_type = best_triple
-
-        # Re-emit the outcome with pudo_type and target_address populated.
-        # The matcher itself can't know pudo_type; that's our job here.
-        return _MatchOutcome(
-            matched=best_outcome.matched,
-            confidence=best_outcome.confidence,
-            corrected_lat=best_outcome.corrected_lat,
-            corrected_lng=best_outcome.corrected_lng,
-            reason=best_outcome.reason,
-            pudo_type=best_pudo_type,
-            target_address=getattr(best_target, "address", None),
-            signals=best_outcome.signals,
-        )
-
-    def _targets_for_state(
-        self,
-        offer,
-        state: str,
-    ) -> list:
-        """Return [(target, pudo_type), ...] in priority order.
-
-        State -> target mapping (Step 4 lock + Step 5 inspection):
-          UNCOMMITTED:    []  (no current offer; S11 promotion is EXECUTE's job)
-          ENROUTE:        [(pickup, "pickup")]
-          IN_TRIP:        [(dropoff, "dropoff")]
-          REFINE_DROPOFF: [(dropoff, "dropoff")]  (synonym of IN_TRIP)
-          STACKED:        [(primary_dropoff, "dropoff"),
-                           (secondary_dropoff, "dropoff")]
-
-        Per Step 4 fact-check: in STACKED state, offer.dropoff IS the primary
-        (the one currently being completed) and offer.secondary_dropoff is
-        the queued one. Both are tested per Q3 ruling.
-
-        REFINE_PICKUP intentionally absent — verdict label, not a state.
-        """
-        if state == States.UNCOMMITTED:
-            # WAI cannot match against current PUDOs (no active offer in scope).
-            # S11 (declined-offer scan) is owned by EXECUTE layer.
-            return []
-        if state == States.ENROUTE:
-            return [(offer.pickup, "pickup")]
-        if state in (States.IN_TRIP, States.REFINE_DROPOFF):
-            return [(offer.dropoff, "dropoff")]
-        if state == States.STACKED:
-            targets = [(offer.dropoff, "dropoff")]
-            if offer.secondary_dropoff is not None:
-                targets.append((offer.secondary_dropoff, "dropoff"))
-            return targets
-        return []
-
-    # =========================================================================
-    # Ghost cache READ (the only SQL in WAI)
-    # =========================================================================
-
-    def _match_ghost_cache(
-        self,
-        driver_id: str,
-        cluster: Cluster,
-        topo: _RoadTopology,
-        stop_context: str,
-        cluster_revisit: bool,
-    ) -> Optional[WhereAmIResult]:
-        """READ-ONLY ghost-cache lookup (Q12).
-
-        Returns at_previous_pudo if an unresolved suspect within 50m of the
-        cluster median exists. Returns None if no ghost.
-
-        Topology is threaded through (Q2) so the result describes the CURRENT
-        moment alongside the historical evidence — useful for forensics.
-        """
-        self.cur.execute(_GHOST_CACHE_SQL, (
-            driver_id,
-            cluster.median_lat,
-            cluster.median_lng,
-            GHOST_MATCH_RADIUS_M,
-        ))
-        row = self.cur.fetchone()
-        if row is None:
-            return None
-
-        # Dict access per production audit (Step 5.7.1): the original Q1
-        # ruling (tuple unpacking) was based on a faulty assumption that
-        # production used default tuple cursors. The Step 5.7 live-PG smoke
-        # audit revealed that EVERY production caller of WAI's dependencies
-        # (pickup_confirm.py, geo.py, etc.) uses psycopg2.extras.RealDictCursor.
-        # detect_cluster already requires this — see cluster_detection.py:154
-        # `row["n"]`. WAI must follow the same convention or it crashes on
-        # the first real ghost match. The original Q1 reasoning (perf via
-        # tuple unpacking) is moot when the cursor type isn't tuple anyway.
-        ghost_id = row["id"]
-        lat = row["lat"]
-        lng = row["lng"]
-        offer_id_at_time = row["offer_id_at_time"]
-        confidence = row["confidence"]
-        detected_at = row["detected_at"]
-
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug(
-                "[WAI ghost_match] ghost_id=%s offer=%s detected=%s "
-                "ghost_coords=(%.6f, %.6f) cluster=(%.6f, %.6f) conf=%.2f",
-                ghost_id, offer_id_at_time, detected_at,
-                lat, lng, cluster.median_lat, cluster.median_lng, float(confidence),
-            )
-
-        return WhereAmIResult(
-            status="at_previous_pudo",
-            pudo_type=None,
-            offer_id=offer_id_at_time,
-            corrected_lat=cluster.median_lat,
-            corrected_lng=cluster.median_lng,
-            on_wire=topo.on_wire,
-            current_road=topo.current_road,
-            on_target_road=False,
-            off_wire_duration_s=topo.off_wire_duration_s,
-            stop_context=stop_context,
-            confidence=float(confidence),
-            reason=f"ghost_match id={ghost_id} offer={offer_id_at_time}",
-            target_address=None,
-            ghost_id=int(ghost_id),
-            cluster=cluster,
-            cluster_revisit=cluster_revisit,
-        )
-
-    # =========================================================================
-    # Result builders
-    # =========================================================================
-
-    def _not_at_pudo(self, reason: str) -> WhereAmIResult:
-        """Construct a not_at_pudo result with neutral defaults."""
-        return WhereAmIResult(
-            status="not_at_pudo",
-            pudo_type=None,
-            offer_id=None,
-            corrected_lat=None,
-            corrected_lng=None,
-            on_wire=False,
-            current_road=None,
-            on_target_road=False,
-            off_wire_duration_s=0,
-            stop_context="not_stopped",
-            confidence=0.0,
-            reason=reason,
-            target_address=None,
-            ghost_id=None,
-            cluster=None,
-            cluster_revisit=False,
-        )
-
-    def _at_unknown_pudo(
-        self,
-        cluster: Cluster,
-        topo: _RoadTopology,
-        stop_context: str,
-        cluster_revisit: bool,
-    ) -> WhereAmIResult:
-        """Cluster exists, no offer matches, no ghost matches."""
-        return WhereAmIResult(
-            status="at_unknown_pudo",
-            pudo_type=None,
-            offer_id=None,
-            corrected_lat=cluster.median_lat,
-            corrected_lng=cluster.median_lng,
-            on_wire=topo.on_wire,
-            current_road=topo.current_road,
-            on_target_road=False,
-            off_wire_duration_s=topo.off_wire_duration_s,
-            stop_context=stop_context,
-            confidence=0.0,
-            reason="cluster detected but no offer or ghost match",
-            target_address=None,
-            ghost_id=None,
-            cluster=cluster,
-            cluster_revisit=cluster_revisit,
-        )
-
-    def _build_current_result(
-        self,
-        outcome: _MatchOutcome,
-        topo: _RoadTopology,
-        stop_context: str,
-        cluster: Cluster,
-        offer,
-        state: str,
-        cluster_revisit: bool,
-    ) -> WhereAmIResult:
-        """Assemble at_current_pudo result from a winning matcher outcome.
-
-        offer_id resolution: for non-STACKED states, offer.offer_id is
-        unambiguous. For STACKED, offer.offer_id is the secondary's ID
-        (per canonical pointer rule); when the primary wins the match,
-        the offer_id reported here is still the secondary's. This is a
-        known limitation: TargetSpec doesn't carry the primary offer_id,
-        and per the Offer docstring, WAI does not query offer_history.
-        Phase F can address this if downstream consumers need primary
-        attribution; for now, target_address (which IS captured) is the
-        unambiguous identifier.
-
-        on_target_road in the result reflects the matched outcome's
-        signal value: 1.0 if the matcher saw on_target_road=1.0 in its
-        signal computation, else False. Without the matcher exposing
-        signals dict (already present per Step 4 Q5), we'd have to
-        recompute; with it, we can read.
-        """
-        # Pull on_target_road from the outcome's signals dict if present
-        on_target_road_signal = (
-            outcome.signals.get("on_target_road", 0.0)
-            if outcome.signals is not None
-            else 0.0
-        )
-
-        return WhereAmIResult(
-            status="at_current_pudo",
-            pudo_type=outcome.pudo_type,
-            offer_id=getattr(offer, "offer_id", None),
-            corrected_lat=outcome.corrected_lat,
-            corrected_lng=outcome.corrected_lng,
-            on_wire=topo.on_wire,
-            current_road=topo.current_road,
-            on_target_road=on_target_road_signal >= 1.0,
-            off_wire_duration_s=topo.off_wire_duration_s,
-            stop_context=stop_context,
-            confidence=outcome.confidence,
-            reason=outcome.reason,
-            target_address=outcome.target_address,
-            ghost_id=None,
-            cluster=cluster,
-            cluster_revisit=cluster_revisit,
-        )

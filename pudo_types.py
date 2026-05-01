@@ -100,24 +100,23 @@ class TargetSpec:
 class Offer:
     """The current ride context handed to WhereAmI.evaluate().
 
-    secondary_dropoff is non-None only when the driver has STACKED a second
-    ride. Per canonical rule, current_offer_id is a live pointer to the
-    currently active offer; in STACKED state current_offer_id is the secondary
-    and the primary dropoff (the one being completed) is in `dropoff` here.
-    Caller (driver_heartbeat.py / decisions.router) is responsible for
-    assembling this struct correctly per state — WAI does not query
-    offer_history.
+    Per the queue-aware Cut B2 contract (Sprint A, 2026-04-30): an Offer
+    represents a single ride leg with a pickup and a dropoff. The "stacked
+    rides" concept is deprecated; multi-ride scenarios are represented as
+    a list[Offer] passed to WhereAmI.evaluate(), with one Offer per leg.
+    Caller (driver_heartbeat.py / decisions.router) assembles the queue;
+    WAI does not query offer_history.
 
     accepted_at (v2.6 amendment, sub-step 1b.1): the offer-acceptance
     timestamp from app_private.offer_history.accepted_at. Anchors the
     cluster-history lookback window in WAI's cluster_revisit topology
-    check per Step 6 Amendment 1. UTC, timezone-aware.
+    check per Step 6 Amendment 1 (Cut B2 extension: anchor =
+    min(accepted_at) across the queue). UTC, timezone-aware.
     """
     offer_id: str
     accepted_at: datetime
     pickup: TargetSpec
     dropoff: TargetSpec
-    secondary_dropoff: Optional[TargetSpec] = None
 
 
 # ============================================================================
