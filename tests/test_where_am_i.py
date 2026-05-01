@@ -1058,7 +1058,7 @@ class TestClassDispatch:
 # =============================================================================
 
 from where_am_i import WhereAmI
-from pudo_types import Offer, States
+from pudo_types import Offer
 import datetime
 
 
