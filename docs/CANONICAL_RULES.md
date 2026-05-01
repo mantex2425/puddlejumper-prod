@@ -5,6 +5,40 @@
 
 ---
 
+## ⚠️ DEPRECATION NOTICE (2026-04-30 — Sprint A)
+
+The simplified architecture pivot ratified 2026-04-30 morning is in active
+implementation. Several sections of this document reference state-machine
+constructs that are being demolished in Cuts B1–B3 of the WAI signature
+refactor:
+
+- **Section III "Logic Rules"** — `check_convergence` state machine is dying
+- **Section VIII "4-Box Controller"** — file assignments under PLAN/EXECUTE
+  are stale (PudoPlanner being deleted; `sm_transition()` going away)
+- **Section IX "Enforcement Layers"** — `valid_state_transitions` and
+  `enforce_state_transition_trigger` die with the state machine
+- **Section X "Implicit Cancellation"** — S04/S11/S12 vocabulary is legacy;
+  the principle ("GPS is always the truth") is preserved by §4 Case D in
+  SIMPLIFIED_ARCHITECTURE.md
+- **Section XI "State Levels"** — UNCOMMITTED/ENROUTE/IN_TRIP/STACKED are
+  collapsing to a 1-bit `current_offer_id` memory
+- **Section XII "ABORT Guard"** — ABORT verdict is gone; Case D + §8
+  Triangulation Filter handle the equivalent scenarios
+
+While the demolition is in progress, **`docs/SIMPLIFIED_ARCHITECTURE.md` is
+the authoritative source on conflict.** These sections will be rewritten
+cleanly after Cut B3 lands. Section VIII's separation-of-concerns *frame*
+(Monitor/Diagnose/Plan/Execute) survives; only the file assignments need
+revision.
+
+The 4-box discipline question to ask before any code (Section VIII end)
+remains operative regardless of file-assignment drift.
+
+Sections I, II, IV, V, VI (post-trim), VII, XIII (post-amendment), and the
+new Section XIV are fully current.
+
+---
+
 ## I. COORDINATE RULES (STRICT)
 
 ### Mandatory Functions
@@ -62,20 +96,17 @@ All coordinates come from:
 
 ---
 
-## VI. CURRENT_OFFER_ID — LIVE POINTER
+## VI. CURRENT_OFFER_ID — 1-BIT MEMORY
 
-`current_offer_id` is a **live pointer**, not a history field.
+`current_offer_id` is the system's **only memory** of which offer the driver is currently driving.
 
-- Always points to the **currently active offer** — the one the driver is working RIGHT NOW
-- When a stack is accepted, `current_offer_id` immediately advances to the secondary offer
-- In STACKED state: `current_offer_id` = secondary offer, `dropoff_lat/lng` = primary dropoff (the one being completed)
-- The atomic swap does NOT need to find the secondary offer — it **IS** `current_offer_id`
-- The swap's only job: load coords for `current_offer_id` and transition state
-- **NEVER** query for "the next offer" — read `current_offer_id` directly
+- Either NULL (no active ride) or set (ride in progress)
+- Per the simplified architecture, the four legacy states (UNCOMMITTED, ENROUTE, IN_TRIP, STACKED) collapse to this single field
+- Set on `fire_pickup` (a successful pickup observation transitions NULL → matched_id)
+- Cleared on `fire_dropoff` (a successful dropoff observation transitions matched_id → NULL)
+- Read by the heartbeat handler at the start of every heartbeat to interpret WAI's match list per §4 Cases A-G
 
-### Corollary
-
-To find the PRIMARY offer during a STACKED ride (for audit purposes), query `offer_history` for `actual_pickup_at IS NOT NULL AND actual_dropoff_at IS NULL` — **NOT** `current_offer_id`.
+The atomic swap concept is dead. There is no "next offer" lookup. There is no STACKED state. When two offers match in the same heartbeat (the §5.2 hot-swap case), the heartbeat handler processes them sequentially within that single heartbeat: dropoff first (clears `current_offer_id` to NULL), then pickup (sets `current_offer_id` to the new offer's ID).
 
 ---
 
@@ -219,6 +250,72 @@ These components remain in Python and never migrate to Postgres:
 - **`check_convergence()`** — pure Python math, no DB writes
 - **Firebase auth** — external service
 - **WAI evaluation, PudoPlanner dispatch** — pure logic, no DB writes
+
+---
+
+## XIV. SIMPLIFIED ARCHITECTURE (Sprint A — 2026-04-30)
+
+These rules emerged from the 2026-04-30 architecture pivot and the WAI signature refactor (Cuts B1-B3 in progress). They are canonical going forward.
+
+### A. The Naked-List Contract (Encapsulation Firewall)
+
+`WhereAmI.evaluate()` is a Pure Sensor. It returns `list[WAIMatch]` and nothing else.
+
+- A `WAIMatch` has exactly three fields: `offer_id`, `location_type` ("pickup" | "dropoff"), `confidence`
+- **No coordinates** in the return type — the heartbeat handler reads coords from the cluster object and offer queue directly
+- **No topology** in the return type — internal to confidence computation; not exposed
+- **No status labels** in the return type — the handler derives meaning from the match list plus `current_offer_id`
+
+The naked list is the contract. Code that bypasses WAI to infer PUDOs from raw cluster proximity violates the architecture (per SIMPLIFIED_ARCHITECTURE.md §10 A8). No fast-path heuristics like "if cluster within 30m of dropoff geocode, fire dropoff" outside `evaluate()`.
+
+### B. Dispatch Purity
+
+`dispatch.py` is a pure function: `dispatch(matches, current_offer_id, queue_offer_ids) -> list[Action]`.
+
+- No DB reads. No DB writes. No GPS access. No file I/O. No side effects of any kind.
+- Implements §4 Cases A-G and §5 disambiguation rules directly. The doc and the function stay synchronized.
+- The heartbeat handler executes the action list. The dispatcher decides what to do; the handler does it.
+
+### C. WAI Confidence Threshold
+
+`WAI_CONFIDENCE_THRESHOLD = 0.40` is canonical (defined in `pudo_types.py`). 
+
+- WAI returns only matches whose confidence clears this floor
+- All test scenarios assert `confidence_min`, never exact `confidence ==` (real-world matches sit at threshold-edge per §10 A1's evening empirical state)
+- Tuning this value is matcher-calibration scope, not architecture-amendment scope
+
+### D. Production-Ready Standard
+
+PuddleJumper targets public release. Every proposal must be production-ready code, not MVP/skeleton/proof-of-concept.
+
+- No phased minimal slices ("ship a small piece first")
+- No "we can fill this in later"
+- Solo developer constraint: respect time by proposing complete solutions
+- Auto Nail It must work for every PUDO without human intervention; manual Nail It exists in dev builds only
+
+### E. Terminal-Paste Safety
+
+Multi-line markdown content is unsafe to paste directly to bash. Two failure modes:
+
+1. Lines starting with `> ` (markdown blockquotes) are interpreted as bash redirect operators and can truncate files
+2. Bare lines like `1.` or `Floor` become empty filenames when pasted
+
+**Mandatory pattern:** scp from `/mnt/user-data/outputs/` to the VM. Never raw paste multi-line content. For small inline content, route through `> /tmp/file.txt && cat /tmp/file.txt`.
+
+### F. Patch Script Discipline
+
+Code edits land via Python `str.replace` scripts, never `sed`-based patches.
+
+- Every patch script is **idempotent** (re-running it on an already-patched file is a no-op, exit 0)
+- Pre-modification check: every anchor must appear exactly once (exit 3 on missing or duplicated)
+- Exit codes are disciplined: 0 = success or no-op, 2 = target missing, 3 = anchor problem, 6 = write failure
+- Adding a required parameter to a method signature requires inventorying ALL direct invocation sites in `tests/` BEFORE patching (the L-6 corollary, ratified 2026-04-27)
+
+### G. Coordinate and Time Canonicalization
+
+(Cross-reference Sections I and II — these remain canonical.)
+
+For new Sprint A code: when in doubt, route through `app_private.coords_to_*` (lat-first ordering) and `(NOW() AT TIME ZONE 'UTC')`. Any direct `ST_MakePoint` or local-time SQL is a code-review blocker.
 
 ---
 
