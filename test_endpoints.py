@@ -200,8 +200,9 @@ def reset_driver():
         """, (driver_id,))
         counts["decision_log"] = cur.rowcount
 
-        # 4. driver_trip_state — clear current_offer_id (don't delete the row;
-        #    let it sit at default UNCOMMITTED state for next test cycle).
+        # 4. driver_trip_state — clear current_offer_id + heartbeat
+        #    (don't delete the row; the upserted shell is fine for the
+        #    next test cycle and clearing avoids ON CONFLICT churn).
         cur.execute("""
             UPDATE app_private.driver_trip_state
             SET current_offer_id = NULL,
@@ -239,7 +240,6 @@ def inspect_test_state():
         "offer_history_rows":  <int>  // test_harness only
         "decision_log_rows":   <int>  // test_harness only
         "current_offer_id":    <str|null>,
-        "state":               <str>,
         "heartbeat_age_sec":   <int|null>
       }
     """
@@ -276,7 +276,7 @@ def inspect_test_state():
         decision_rows = cur.fetchone()["n"]
 
         cur.execute("""
-            SELECT current_offer_id, state, heartbeat_at,
+            SELECT current_offer_id, heartbeat_at,
                    EXTRACT(EPOCH FROM (NOW() - heartbeat_at))::integer AS hb_age
             FROM app_private.driver_trip_state
             WHERE driver_id = %s
@@ -292,7 +292,6 @@ def inspect_test_state():
                 str(dts["current_offer_id"])
                 if dts and dts["current_offer_id"] else None
             ),
-            "state": dts["state"] if dts else "UNCOMMITTED",
             "heartbeat_age_sec": dts["hb_age"] if dts else None,
         }), 200
 
