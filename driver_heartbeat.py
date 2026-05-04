@@ -52,7 +52,7 @@ from dispatch import (
     FirePickup, FireDropoff,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
-from pudo_types import Offer
+from pudo_types import Offer, TargetSpec
 from bead_on_wire import classify_address
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
@@ -67,46 +67,115 @@ log = logging.getLogger(__name__)
 def _bucket_to_target_spec(address_text, lat, lng):
     """Classify an address string and convert to TargetSpec. None on garbage.
 
-    classify_address (from bead_on_wire) is the canonical address parser;
-    it returns 5 buckets: intersection, street_number, single_road, poi,
-    garbage. Garbage classification means we cannot build a TargetSpec, so
-    the offer is unevaluatable and the queue is empty for this heartbeat.
+    Mirrors the working reference in smoke_test_wai_24h.py:_build_target_spec.
+
+    Pipeline:
+      1. classify_address(text) -> {"bucket": str, "parts": dict}
+         (single positional arg; coords are NOT passed to the parser)
+      2. Switch on bucket; construct TargetSpec with proper address_class
+         and named_roads per the §5.1 matching rule.
+      3. Return None for "garbage" bucket or any unrecognized result.
+
+    bucket -> address_class mapping (per pudo_types.TargetSpec.address_class
+    Literal):
+      "intersection"   -> "intersection"     named_roads=(road_a, road_b)
+      "street_number"  -> "number_on_street" named_roads=(road,)
+      "single_road"    -> "single_road"      named_roads=(road,)
+      "poi"            -> "poi"              named_roads=()
+      "garbage" or _   -> None
     """
     if not address_text or lat is None or lng is None:
         return None
     try:
-        spec = classify_address(address_text, float(lat), float(lng))
+        classification = classify_address(address_text)
     except Exception as e:
         log.warning("[heartbeat] classify_address failed for %r: %s",
                     address_text, e)
         return None
-    if spec is None or getattr(spec, 'address_class', None) == 'garbage':
+    if not classification:
         return None
-    return spec
+
+    bucket = classification.get("bucket")
+    parts = classification.get("parts", {})
+
+    if bucket == "intersection":
+        return TargetSpec(
+            lat=float(lat), lng=float(lng),
+            address_class="intersection",
+            named_roads=(parts.get("road_a", ""), parts.get("road_b", "")),
+        )
+    if bucket == "street_number":
+        return TargetSpec(
+            lat=float(lat), lng=float(lng),
+            address_class="number_on_street",
+            named_roads=(parts.get("road", ""),),
+        )
+    if bucket == "single_road":
+        return TargetSpec(
+            lat=float(lat), lng=float(lng),
+            address_class="single_road",
+            named_roads=(parts.get("road", ""),),
+        )
+    if bucket == "poi":
+        return TargetSpec(
+            lat=float(lat), lng=float(lng),
+            address_class="poi",
+            named_roads=(),
+        )
+    # "garbage" or any unrecognized bucket -> unevaluatable
+    return None
 
 
 # =============================================================================
 # LOAD: project driver_trip_state into the §3 Map-Reduce queue contract
 # =============================================================================
 
+# ─── GC window constants (Andrew's "Houston Tax") ─────────────────────────────
+# Window per offer = (pickup_minutes + trip_minutes) * BUFFER, clamped.
+# Rationale: real-world rides drift past Uber's estimates due to traffic,
+# missed turns, and pickup delays. The buffer keeps WAI's "Peripheral Vision"
+# alive for offers the driver might still be working. Clamps protect against
+# (a) zero-duration outliers collapsing the window, (b) airport-class outliers
+# making old offers immortal.
+GC_BUFFER_MULT = 1.5
+GC_MIN_MINUTES = 15
+GC_MAX_MINUTES = 240
+# Fallback when offer_history has NULL minutes (legacy rows or missing data).
+# Conservative defaults: 15min pickup + 30min trip = 45min raw, * 1.5 = 67.5min,
+# clamped to 67min — long enough to cover most rides without going stale.
+GC_NULL_PICKUP_MIN = 15
+GC_NULL_TRIP_MIN = 30
+
+
 def _project_queue(driver_id, cur):
-    """Project driver_trip_state into a synthetic 1-offer queue.
+    """Project the driver's Workload Queue per SIMPLIFIED_ARCHITECTURE.md §3 + §6.
 
-    Per CANONICAL_RULES Section VI, current_offer_id is the system's only
-    memory of active work. The §3 queue is the dispatcher-side projection
-    of that 1-bit memory: empty list when no active ride, one-element
-    list when a ride is active.
+    Returns ALL offers the driver has SEEN (any verdict — ACCEPT, DECLINE, etc.)
+    that have not been completed (`actual_dropoff_at IS NULL`) and have not been
+    garbage-collected (within the per-offer "Houston Tax" window: minutes since
+    `created_at` < (pickup_minutes + trip_minutes) * GC_BUFFER_MULT, clamped).
 
-    Returns: (queue: list[Offer],
-              current_offer_id: Optional[str],
-              state_at_eval: str)
+    Why all-seen vs. ACCEPT-only:
+      A driver routinely arrives at the pickup of a declined offer (already
+      heading that way for a different ride; previous ride canceled and they
+      were already mid-stream). WAI must be able to discover that PUDO via
+      Case B (FirePickup against a queue containing the seen offer).
 
-    state_at_eval is read here once (forensic only) and threaded to
-    _log_decision_context. The new handler never writes state.
+    Why per-offer GC windows:
+      A 5-minute errand and a 90-minute airport run have very different
+      "is this offer still relevant?" timescales. A global cutoff would
+      either drop the airport run too early or keep the errand alive
+      far past its useful life.
 
-    The dispatcher's §5.2 hot-swap branch is dormant under this projection
-    (it requires len(queue) == 2). It remains tested and ready; activation
-    awaits multi-offer infrastructure (separate ratification cycle).
+    Returns:
+        queue: list[Offer]                  — all live, in-window offers
+        current_offer_id: Optional[str]     — `driver_trip_state.current_offer_id`
+                                              (still the 1-bit memory of which
+                                              offer FirePickup most recently
+                                              fired against; threaded to
+                                              dispatch for §4 case resolution)
+        state_at_eval: str                  — forensic only; threaded to
+                                              _log_decision_context
     """
     cur.execute("""
         SELECT current_offer_id, state
@@ -114,62 +183,84 @@ def _project_queue(driver_id, cur):
         WHERE driver_id = %s
     """, (driver_id,))
     row = cur.fetchone()
-    if not row:
-        # Fresh driver, no row yet — no active offer, default state vocabulary
-        # for the forensic INSERT.
-        return [], None, 'UNCOMMITTED'
-
-    state_at_eval = row['state']
-    current_offer_id_val = row['current_offer_id']
-    if not current_offer_id_val:
-        return [], None, state_at_eval
-
-    current_offer_id = str(current_offer_id_val)
-
-    # Hydrate the one active offer from offer_history.
-    cur.execute("""
-        SELECT id, pickup_address, dropoff_address,
-               pickup_lat, pickup_lng,
-               dropoff_lat, dropoff_lng,
-               accepted_at
-        FROM app_private.offer_history
-        WHERE id = %s
-    """, (int(current_offer_id),))
-    o = cur.fetchone()
-    if not o:
-        # Memory points at a phantom offer — log as data corruption,
-        # treat as empty queue (dispatch will Case A on next eval).
-        log.error("[heartbeat] current_offer_id=%s not in offer_history",
-                  current_offer_id)
-        return [], current_offer_id, state_at_eval
-
-    pickup_spec = _bucket_to_target_spec(
-        o['pickup_address'], o['pickup_lat'], o['pickup_lng'])
-    dropoff_spec = _bucket_to_target_spec(
-        o['dropoff_address'], o['dropoff_lat'], o['dropoff_lng'])
-    if pickup_spec is None or dropoff_spec is None:
-        log.warning(
-            "[heartbeat] offer %s has unbuildable geocode "
-            "(pickup_ok=%s dropoff_ok=%s) — queue empty for this heartbeat",
-            current_offer_id, pickup_spec is not None, dropoff_spec is not None,
+    if row:
+        state_at_eval = row['state']
+        current_offer_id = (
+            str(row['current_offer_id']) if row['current_offer_id'] else None
         )
-        return [], current_offer_id, state_at_eval
+    else:
+        # Fresh driver, no row yet.
+        state_at_eval = 'UNCOMMITTED'
+        current_offer_id = None
 
-    accepted_at = o['accepted_at']
-    if accepted_at is None:
-        # offer_history has no accepted_at (rare; usually NULL only for
-        # very old rows). WAI's Memory Eye uses min(accepted_at) as anchor;
-        # missing anchor disables cluster_revisit but doesn't break eval.
-        log.warning("[heartbeat] offer %s has NULL accepted_at",
-                    current_offer_id)
+    # Workload Queue: all seen, not-completed, in-window offers.
+    #
+    # Per-offer GC window (in minutes):
+    #   raw_min   = COALESCE(pickup_minutes, GC_NULL_PICKUP_MIN)
+    #             + COALESCE(trip_minutes,   GC_NULL_TRIP_MIN)
+    #   window_min = LEAST(GREATEST(raw_min * GC_BUFFER_MULT,
+    #                               GC_MIN_MINUTES),
+    #                      GC_MAX_MINUTES)
+    #   live      = (NOW() - created_at) < window_min minutes
+    cur.execute("""
+        SELECT
+            id, pickup_address, dropoff_address,
+            pickup_lat, pickup_lng,
+            dropoff_lat, dropoff_lng,
+            created_at,
+            COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
+        FROM app_private.offer_history
+        WHERE decision_log_id IN (
+            SELECT id FROM app_private.decision_log WHERE driver_id = %s
+        )
+          AND actual_dropoff_at IS NULL
+          AND created_at + (
+                LEAST(
+                    GREATEST(
+                        (COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s)) * %s,
+                        %s
+                    ),
+                    %s
+                ) * INTERVAL '1 minute'
+              ) > NOW()
+        ORDER BY created_at DESC
+    """, (
+        GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
+        driver_id,                                # FK lookup
+        GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # WHERE coalesces (must duplicate;
+                                                  #   PG can't reuse SELECT alias here)
+        GC_BUFFER_MULT,
+        GC_MIN_MINUTES,
+        GC_MAX_MINUTES,
+    ))
 
-    offer = Offer(
-        offer_id=str(o['id']),
-        accepted_at=accepted_at,
-        pickup=pickup_spec,
-        dropoff=dropoff_spec,
-    )
-    return [offer], current_offer_id, state_at_eval
+    queue = []
+    for o in cur.fetchall():
+        pickup_spec = _bucket_to_target_spec(
+            o['pickup_address'], o['pickup_lat'], o['pickup_lng'])
+        dropoff_spec = _bucket_to_target_spec(
+            o['dropoff_address'], o['dropoff_lat'], o['dropoff_lng'])
+        if pickup_spec is None or dropoff_spec is None:
+            log.warning(
+                "[heartbeat] offer %s has unbuildable geocode "
+                "(pickup_ok=%s dropoff_ok=%s) — excluded from queue",
+                o['id'], pickup_spec is not None, dropoff_spec is not None,
+            )
+            continue
+        # Offer.accepted_at semantic mapping: offer_history.created_at is the
+        # row-creation moment (also the offer-seen moment for declined/other
+        # verdicts). For ACCEPT verdicts it's effectively the accepted-at
+        # timestamp because the row is inserted at decision time. Single
+        # column does double duty for the Memory Eye anchor in
+        # where_am_i.py:1080 (min(accepted_at) across queue).
+        queue.append(Offer(
+            offer_id=str(o['id']),
+            accepted_at=o['created_at'],
+            pickup=pickup_spec,
+            dropoff=dropoff_spec,
+        ))
+
+    return queue, current_offer_id, state_at_eval
 
 
 # =============================================================================
@@ -338,7 +429,42 @@ def _log_decision_context(
 # Orchestrator: the Quarterback
 # =============================================================================
 
-@driver_heartbeat_bp.route('/api/v1/driver/heartbeat', methods=['POST'])
+def _voice_for_actions(executed_actions):
+    """Map an executed-action list to a single voice utterance, or None.
+
+    Voice is suppressed unless a STATE-CHANGING action ran. This is the
+    natural rate limiter: FirePickup / FireDropoff fire once per state
+    transition, never per heartbeat. Detection-only actions
+    (LogAmbiguousMatch, LogNoMatch, LogPickupRematch) never voice — they
+    surface via /driver/status.last_3_dispatch_actions for forensic review.
+
+    Priority handles the implicit-cancel pair: when both
+    FireDropoff(outcome="canceled") and FirePickup execute on the same
+    heartbeat, the cancel string wins and suppresses the redundant
+    "Pickup confirmed".
+
+    Returns None if no executed action warrants a voice utterance.
+    """
+    # 1. Implicit cancel — paired FireDropoff(canceled) + FirePickup
+    for action in executed_actions:
+        if isinstance(action, FireDropoff) and action.outcome == "canceled":
+            return "Implicit cancel, new ride starting"
+    # 2. Pickup missed (Case F)
+    for action in executed_actions:
+        if isinstance(action, FireDropoff) and action.outcome == "pickup_missed":
+            return "Dropoff confirmed, pickup was missed"
+    # 3. Normal dropoff
+    for action in executed_actions:
+        if isinstance(action, FireDropoff) and action.outcome is None:
+            return "Dropoff confirmed"
+    # 4. Standalone pickup
+    for action in executed_actions:
+        if isinstance(action, FirePickup):
+            return "Pickup confirmed"
+    return None
+
+
+@driver_heartbeat_bp.route('/driver/heartbeat', methods=['POST'])
 @require_firebase_auth
 def post_heartbeat():
     driver_id = verify_and_get_user_id(request)
@@ -346,9 +472,9 @@ def post_heartbeat():
 
     current_lat = body.get('lat')
     current_lng = body.get('lng')
-    speed_mph = body.get('speedMph')
-    gps_accuracy_m = body.get('gpsAccuracyM')
-    cumulative_miles = body.get('cumulativeMiles')
+    speed_mph = body.get('speed_mph')
+    gps_accuracy_m = body.get('gps_accuracy_m')
+    cumulative_miles = body.get('cumulative_miles')
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -377,6 +503,32 @@ def post_heartbeat():
         "received_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }), driver_id))
 
+    # ── HEARTBEAT_LOG (flight recorder for cluster detection) ───────
+    # cluster_detection.detect_cluster + pivot_context + bead_on_wire
+    # all read FROM app_private.heartbeat_log. The Sprint A rewrite
+    # dropped Patch 00567's INSERT along with the deprecated state-
+    # machine fields (armed, target_type, dist_to_target_m,
+    # stopped_seconds) but kept the table's consumers — cluster
+    # detection went blind and WAI short-circuited on cluster=None.
+    #
+    # Sprint A's Option H1 doesn't compute the dropped fields; they
+    # stay NULL (schema permits). Same transaction as the UPDATE
+    # above — atomic frame. Defensive try/except matches the
+    # _log_decision_context pattern: heartbeat_log is forensic, its
+    # failure must not break the live heartbeat.
+    try:
+        cur.execute("""
+            INSERT INTO app_private.heartbeat_log
+              (driver_id, lat, lng, speed_mph, gps_accuracy_m,
+               state, current_offer_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            driver_id, current_lat, current_lng, speed_mph, gps_accuracy_m,
+            state_at_eval, current_offer_id,
+        ))
+    except Exception as e:
+        log.warning("[heartbeat] heartbeat_log INSERT failed (non-fatal): %s", e)
+
     # ── DIAGNOSE ─────────────────────────────────────────────────────
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(driver_id, queue)
@@ -386,14 +538,16 @@ def post_heartbeat():
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster
-    dispatch_executed = False
+    executed_actions: list = []
     dispatch_error_msg = None
     for action in actions:
         executed, err = _execute_action(action, cur, conn, driver_id, cluster)
-        dispatch_executed = dispatch_executed or executed
+        if executed:
+            executed_actions.append(action)
         if err:
             dispatch_error_msg = err
             break  # halt on first error; LOG still records the attempt
+    dispatch_executed = bool(executed_actions)
 
     # ── LOG ──────────────────────────────────────────────────────────
     try:
@@ -410,4 +564,9 @@ def post_heartbeat():
         log.exception("[heartbeat] pudo_decision_context INSERT failed: %s", e)
 
     conn.commit()
-    return jsonify({"ok": True}), 200
+
+    response = {"ok": True}
+    voice = _voice_for_actions(executed_actions)
+    if voice is not None:
+        response["voice"] = voice
+    return jsonify(response), 200# rebuild 1777679926
