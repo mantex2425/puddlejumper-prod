@@ -22,19 +22,15 @@ def get_driver_status():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # ── Current state ─────────────────────────────────────────────
+        # ── Current state (1-bit memory: current_offer_id) ────────────
         cur.execute("""
             SELECT
-                state,
                 current_offer_id,
                 pickup_lat, pickup_lng,
                 dropoff_lat, dropoff_lng,
                 potential_cancellation,
                 heartbeat,
-                heartbeat_at,
-                EXTRACT(EPOCH FROM (
-                    NOW() - state_updated_at
-                ))::integer AS seconds_in_state
+                heartbeat_at
             FROM app_private.driver_trip_state
             WHERE driver_id = %s
         """, (driver_id,))
@@ -94,20 +90,6 @@ def get_driver_status():
         """, (driver_id,))
         recent_offers = cur.fetchall()
 
-        # ── Last 5 state transitions ──────────────────────────────────
-        cur.execute("""
-            SELECT
-                from_state, to_state, trigger_event,
-                EXTRACT(EPOCH FROM (
-                    NOW() - logged_at
-                ))::integer AS seconds_ago
-            FROM app_private.driver_trip_state_log
-            WHERE driver_id = %s
-            ORDER BY logged_at DESC
-            LIMIT 5
-        """, (driver_id,))
-        state_log = cur.fetchall()
-
         # ── Last 3 planner dispatch actions (Cut B3 observability) ──
         cur.execute("""
             SELECT
@@ -118,7 +100,7 @@ def get_driver_status():
                 cluster_size,
                 dispatch_executed,
                 dispatch_error,
-                state_at_eval,
+                current_offer_id_at_eval,
                 wai_status,
                 wai_pudo_type,
                 wai_target_address,
@@ -139,27 +121,18 @@ def get_driver_status():
             try: return float(val) if val is not None else None
             except: return None
 
-        # Enroute watchdog remaining (900s = 15min max)
-        enroute_remaining = None
-        if state_row and state_row["state"] == "ENROUTE":
-            elapsed = state_row["seconds_in_state"] or 0
-            enroute_remaining = max(0, 900 - elapsed)
-
         return jsonify({
-            # State machine
-            "driver_state":                  state_row["state"] if state_row else "UNCOMMITTED",
-            "state_duration_sec":            state_row["seconds_in_state"] if state_row else 0,
+            # 1-bit memory (offer_id is the post-demolition state surface)
             "offer_id":                      state_row["current_offer_id"] if state_row else None,
             "potential_cancellation":        state_row["potential_cancellation"] if state_row else False,
-            "enroute_watchdog_remaining_sec": enroute_remaining,
 
             # Auto Nail It — from Android heartbeat
             "armed":                    hb.get("armed"),
-            "target_type":              hb.get("target_type", "pickup" if state_row and state_row["state"] in ("UNCOMMITTED","ENROUTE") else "dropoff"),
+            "target_type":              hb.get("target_type", "pickup" if not state_row or not state_row["current_offer_id"] else "dropoff"),
             "dist_to_target_m":         hb.get("dist_to_target_m"),
             "confidence_radius_m":      f(ld["confidence_radius"]) if ld else None,
             "cumulative_miles":         hb.get("cumulative_miles"),
-            "expected_trip_miles":      f(ld["last_trip_miles"]) if ld and state_row and state_row["state"] != "UNCOMMITTED" else None,
+            "expected_trip_miles":      f(ld["last_trip_miles"]) if ld and state_row and state_row["current_offer_id"] else None,
             "odometer_floor":           f(ld["odometer_floor"]) if ld else None,
             "stopped_seconds":          hb.get("stopped_seconds"),
             "required_stopped_seconds": hb.get("required_stopped_seconds"),
@@ -200,14 +173,6 @@ def get_driver_status():
                 "seconds_ago":           o["seconds_ago"],
             } for o in recent_offers],
 
-            # State log
-            "state_log": [{
-                "from_state":  t["from_state"],
-                "to_state":    t["to_state"],
-                "trigger":     t["trigger_event"],
-                "seconds_ago": t["seconds_ago"],
-            } for t in state_log],
-
             # Cut B3 planner pipeline — synthetic 1-offer queue (Option α)
             "planner_queue": (
                 [state_row["current_offer_id"]]
@@ -234,7 +199,7 @@ def get_driver_status():
                 "cluster_size":       a["cluster_size"],
                 "dispatch_executed":  a["dispatch_executed"],
                 "dispatch_error":     a["dispatch_error"],
-                "state_at_eval":      a["state_at_eval"],
+                "current_offer_id_at_eval": a["current_offer_id_at_eval"],
                 "wai_status":         a["wai_status"],
                 "wai_pudo_type":      a["wai_pudo_type"],
                 "wai_target_address": a["wai_target_address"],
