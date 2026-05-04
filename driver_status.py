@@ -108,6 +108,33 @@ def get_driver_status():
         """, (driver_id,))
         state_log = cur.fetchall()
 
+        # ── Last 3 planner dispatch actions (Cut B3 observability) ──
+        cur.execute("""
+            SELECT
+                planner_action,
+                primary_offer_id,
+                cluster_lat,
+                cluster_lng,
+                cluster_size,
+                dispatch_executed,
+                dispatch_error,
+                state_at_eval,
+                wai_status,
+                wai_pudo_type,
+                wai_target_address,
+                wai_reason,
+                wai_confidence,
+                planner_reason,
+                EXTRACT(EPOCH FROM (
+                    NOW() - created_at
+                ))::integer AS seconds_ago
+            FROM app_private.pudo_decision_context
+            WHERE driver_id = %s
+            ORDER BY created_at DESC
+            LIMIT 3
+        """, (driver_id,))
+        last_3_dispatch_actions = cur.fetchall()
+
         def f(val):
             try: return float(val) if val is not None else None
             except: return None
@@ -180,6 +207,42 @@ def get_driver_status():
                 "trigger":     t["trigger_event"],
                 "seconds_ago": t["seconds_ago"],
             } for t in state_log],
+
+            # Cut B3 planner pipeline — synthetic 1-offer queue (Option α)
+            "planner_queue": (
+                [state_row["current_offer_id"]]
+                if state_row and state_row["current_offer_id"]
+                else []
+            ),
+
+            # Latest WAI evaluation (lifted from newest pudo_decision_context row)
+            "last_wai_evaluation": {
+                "wai_status":         last_3_dispatch_actions[0]["wai_status"]         if last_3_dispatch_actions else None,
+                "wai_pudo_type":      last_3_dispatch_actions[0]["wai_pudo_type"]      if last_3_dispatch_actions else None,
+                "wai_target_address": last_3_dispatch_actions[0]["wai_target_address"] if last_3_dispatch_actions else None,
+                "wai_reason":         last_3_dispatch_actions[0]["wai_reason"]         if last_3_dispatch_actions else None,
+                "wai_confidence":     f(last_3_dispatch_actions[0]["wai_confidence"])  if last_3_dispatch_actions else None,
+                "seconds_ago":        last_3_dispatch_actions[0]["seconds_ago"]        if last_3_dispatch_actions else None,
+            },
+
+            # Last 3 planner actions (forensic visibility into Auto Nail It)
+            "last_3_dispatch_actions": [{
+                "planner_action":     a["planner_action"],
+                "primary_offer_id":   a["primary_offer_id"],
+                "cluster_lat":        f(a["cluster_lat"]),
+                "cluster_lng":        f(a["cluster_lng"]),
+                "cluster_size":       a["cluster_size"],
+                "dispatch_executed":  a["dispatch_executed"],
+                "dispatch_error":     a["dispatch_error"],
+                "state_at_eval":      a["state_at_eval"],
+                "wai_status":         a["wai_status"],
+                "wai_pudo_type":      a["wai_pudo_type"],
+                "wai_target_address": a["wai_target_address"],
+                "wai_reason":         a["wai_reason"],
+                "wai_confidence":     f(a["wai_confidence"]),
+                "planner_reason":     a["planner_reason"],
+                "seconds_ago":        a["seconds_ago"],
+            } for a in last_3_dispatch_actions],
 
             "server_time": datetime.datetime.now().isoformat(),
         }), 200
