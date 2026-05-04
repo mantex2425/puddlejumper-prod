@@ -14,14 +14,15 @@ Job:
      geocoded coords, not arc-band triangulation output).
   4. Log the shadow market signal into pickup_market_signals (feeds
      get_price_radar via community_offers later in lifecycle).
-  5. Fire the DriverStateMachine.transition() for offer_accepted /
-     offer_declined / offer_cancelled_implicit on behalf of PLAN.
 
-4-box classification: PLAN (business logic + state machine handoff).
-  - Reads ep and driver_state (Plan-legitimate)
+State-machine handoff removed in demolition 2026-05-04. Pickup/dropoff
+coordinates now land via heartbeat-time FirePickup / FireDropoff actions
+in driver_heartbeat.py._execute_action. See docs/RIDE_LIFECYCLE.md.
+
+4-box classification: PLAN (business logic).
+  - Reads ep (Plan-legitimate)
   - Writes to pickup_market_signals directly (pre-existing 4-box
     violation; FIXME flagged for post-bead refactor)
-  - Handoff to EXECUTE via DriverStateMachine.transition()
 
 Removed in the arc-band nuke (2026-04-22):
   - triangulate_pickup / triangulate_dropoff calls (arc-band math)
@@ -33,12 +34,9 @@ Removed in the arc-band nuke (2026-04-22):
 
 import logging
 import traceback
-import sys as _sys, os as _os
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(__file__)))
-from state_machine import DriverStateMachine
 
 
-def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision_log_id):
+def enrich_with_triangulation(cur, conn, uid, ep, result, decision_log_id):
     """
     Validate geocode, assign confidence tier, log shadow signal, fire state
     machine transition. Never raises. Enriches result in-place. Returns result.
@@ -158,84 +156,9 @@ def enrich_with_triangulation(cur, conn, uid, ep, result, driver_state, decision
                 f"accepted: {_accepted}"
             )
 
-            # ── State machine handoff (PLAN → EXECUTE) ─────────────────
-            _verdict       = result["verdict"]
-            _current_state = driver_state["state"]
-            _dropoff_lat   = final_dropoff_lat if is_validated else None
-            _dropoff_lng   = final_dropoff_lng if is_validated else None
-            _dropoff_h3    = None
-            if _dropoff_lat and _dropoff_lng:
-                cur.execute(
-                    "SELECT app_private.safe_h3(%s, %s)::text AS h3",
-                    (_dropoff_lat, _dropoff_lng)
-                )
-                _dh = cur.fetchone()
-                _dropoff_h3 = _dh["h3"] if (_dh and _dh.get("h3")) else None
-
-            if _verdict == "ACCEPT" and _current_state in ("UNCOMMITTED", "ENROUTE"):
-                DriverStateMachine.transition(
-                    uid, "offer_accepted", cur, conn,
-                    offer_id=str(decision_log_id) if decision_log_id else None,
-                    pickup_lat=final_pickup_lat, pickup_lng=final_pickup_lng,
-                    pickup_h3=pickup_h3,
-                    dropoff_lat=_dropoff_lat, dropoff_lng=_dropoff_lng,
-                    dropoff_h3=_dropoff_h3,
-                )
-                # Arc-band polyline pre-cache removed with routes_api.py.
-            elif _verdict == "ACCEPT" and _current_state in ("IN_TRIP", "REFINE_DROPOFF"):
-                # REFINE_DROPOFF remains here pending Phase 3 nuke.
-                DriverStateMachine.transition(
-                    uid, "offer_accepted", cur, conn,
-                    offer_id=str(decision_log_id) if decision_log_id else None,
-                    pickup_lat=final_pickup_lat, pickup_lng=final_pickup_lng,
-                    pickup_h3=pickup_h3,
-                )
-            elif _verdict != "ACCEPT" and _current_state == "ENROUTE":
-                DriverStateMachine.transition(
-                    uid, "offer_cancelled_implicit", cur, conn,
-                    clear_coords=True,
-                )
-            elif _verdict != "ACCEPT" and _current_state == "STACKED":
-                # Secondary cancelled — demote to IN_TRIP on primary's dropoff
-                try:
-                    cur.execute("""
-                        SELECT oh.decision_log_id,
-                               oh.dropoff_lat, oh.dropoff_lng, oh.dropoff_h3
-                        FROM app_private.offer_history oh
-                        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
-                        WHERE dl.driver_id = %s
-                          AND oh.actual_pickup_at IS NOT NULL
-                          AND oh.actual_dropoff_at IS NULL
-                        ORDER BY oh.actual_pickup_at DESC
-                        LIMIT 1
-                    """, (uid,))
-                    _primary = cur.fetchone()
-                    if _primary:
-                        DriverStateMachine.transition(
-                            uid, "offer_declined", cur, conn,
-                            offer_id=str(_primary["decision_log_id"]),
-                            dropoff_lat=_primary["dropoff_lat"],
-                            dropoff_lng=_primary["dropoff_lng"],
-                            dropoff_h3=_primary["dropoff_h3"],
-                        )
-                        logging.warning(
-                            f"[S04-STACKED] Secondary cancelled — demoted to IN_TRIP "
-                            f"on primary offer={_primary['decision_log_id']}"
-                        )
-                    else:
-                        DriverStateMachine.transition(
-                            uid, "manual_reset", cur, conn,
-                            clear_coords=True,
-                        )
-                        logging.warning("[S04-STACKED] Secondary cancelled, no active primary — full reset")
-                except Exception as _sc_err:
-                    logging.warning(f"[S04-STACKED] Secondary cancel handling failed: {_sc_err}")
-                    try: conn.rollback()
-                    except: pass
-            else:
-                logging.info(
-                    f"[SM] No transition fired: verdict={_verdict} state={_current_state}"
-                )
+            # State-machine handoff removed in demolition 2026-05-04.
+            # Coordinates land via heartbeat-time _execute_action. The
+            # offer-decision path no longer mutates driver_trip_state.
 
     except Exception as tri_err:
         logging.error(

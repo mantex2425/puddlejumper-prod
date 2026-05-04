@@ -159,7 +159,6 @@ def simulate_test_suite():
 # ── Pipeline sub-modules ──────────────────────────────────────────────
 from .engine                 import run_decision_engine
 from .logger                 import log_decision, patch_decision_log
-from .state_enricher         import enrich_with_state
 from .triangulation_enricher import enrich_with_triangulation
 
 
@@ -293,12 +292,33 @@ def make_decision():
             try:    conn.rollback()
             except: pass
 
-        # ── Stage 4: Driver state + S04 (never fails) ─────────────────
-        result, driver_state = enrich_with_state(cur, conn, uid, ep, result)
+        # ── Stage 4: 1-bit memory snapshot for API shape ──────────────
+        # Replaces legacy state-machine read + S04 dispatch (demolition
+        # 2026-05-04). The new architecture has only NULL or set; we
+        # synthesize the legacy enum values Android still reads.
+        # See docs/RIDE_LIFECYCLE.md §1.
+        try:
+            cur.execute(
+                "SELECT current_offer_id "
+                "FROM app_private.driver_trip_state "
+                "WHERE driver_id = %s",
+                (uid,)
+            )
+            _row = cur.fetchone()
+            result["driverState"] = (
+                "IN_TRIP"
+                if (_row and _row.get("current_offer_id"))
+                else "UNCOMMITTED"
+            )
+        except Exception as _state_err:
+            logging.warning(f"[STATE] driverState lookup failed: {_state_err}")
+            result["driverState"] = "UNCOMMITTED"
+            try:    conn.rollback()
+            except: pass
 
         # ── Stage 5: Triangulation + shadow (never fails) ─────────────
         result = enrich_with_triangulation(
-            cur, conn, uid, ep, result, driver_state, decision_log_id
+            cur, conn, uid, ep, result, decision_log_id
         )
 
         # ── Stage 5b: Price Radar shadow (never fails) ─────────────────
