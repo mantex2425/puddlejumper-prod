@@ -16,4 +16,11 @@ gcloud run deploy puddlejumper-api \
   --vpc-connector puddle-bridge \
   --vpc-egress private-ranges-only \
   --min-instances=1 \
-  --no-cpu-throttling \
+  --no-cpu-throttling
+
+# 3. Force traffic to the new revision.
+# Cloud Run pins traffic to specific named revisions once any manual route
+# has been applied; subsequent deploys do NOT auto-route to LATEST until
+# we explicitly request it. This restores the auto-promote behavior.
+gcloud run services update-traffic puddlejumper-api \
+  --region=us-central1 --to-latest
