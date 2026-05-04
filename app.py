@@ -36,6 +36,7 @@ from superpower_geo import superpower_geo_bp
 from decisions import decisions_bp
 from driver_status import driver_status_bp
 from driver_heartbeat import driver_heartbeat_bp
+from test_endpoints import test_endpoints_bp
 from pickup_confirm import pickup_confirm_bp
 from dropoff_confirm import dropoff_confirm_bp
 from driver_state_reset import driver_state_reset_bp
@@ -60,6 +61,7 @@ app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
 app.register_blueprint(driver_status_bp, url_prefix='/api/v1')
 app.register_blueprint(driver_heartbeat_bp, url_prefix='/api/v1')
+app.register_blueprint(test_endpoints_bp, url_prefix='/api/v1')
 app.register_blueprint(pickup_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(dropoff_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(driver_state_reset_bp, url_prefix='/api/v1')
