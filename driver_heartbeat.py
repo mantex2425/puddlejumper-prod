@@ -267,7 +267,8 @@ def _project_queue(driver_id, cur):
 # EXECUTE: map a dispatch Action to its DB side effect
 # =============================================================================
 
-def _execute_action(action, cur, conn, driver_id, cluster):
+def _execute_action(action, cur, conn, driver_id, cluster=None,
+                    fallback_lat=None, fallback_lng=None):
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
@@ -287,35 +288,157 @@ def _execute_action(action, cur, conn, driver_id, cluster):
       error is set if the action raised; the orchestrator halts the chain
       on first error so the LOG step still records what happened.
     """
-    cluster_lat = cluster.median_lat if cluster else None
-    cluster_lng = cluster.median_lng if cluster else None
+    nail_lat = cluster.median_lat if cluster else fallback_lat
+    nail_lng = cluster.median_lng if cluster else fallback_lng
 
     try:
         if isinstance(action, FirePickup):
-            if cluster_lat is None or cluster_lng is None:
-                # Should not happen — dispatch only emits FirePickup when
-                # WAI matched, which requires a cluster. Defensive guard.
-                return False, "fire_pickup_without_cluster"
+            if nail_lat is None or nail_lng is None:
+                # Defensive guard — heartbeat path supplies cluster, manual
+                # path supplies fallback_lat/lng; one of them must resolve.
+                return False, "fire_pickup_without_coords"
             write_nailed_position(cur, driver_id, 'pickup',
-                                  cluster_lat, cluster_lng, 0)
+                                  nail_lat, nail_lng, 0)
             cur.execute("""
                 UPDATE app_private.driver_trip_state
                 SET current_offer_id = %s
                 WHERE driver_id = %s
             """, (action.offer_id, driver_id))
+
+            # pickup_market_signals: actual_pickup_* + nail_it elevation
+            cur.execute("""
+                UPDATE app_private.pickup_market_signals
+                SET actual_pickup_lat     = %s,
+                    actual_pickup_lng     = %s,
+                    actual_pickup_h3      = app_private.coords_to_h3(%s, %s)::text,
+                    actual_pickup_at      = NOW(),
+                    data_source           = 'nail_it',
+                    offer_status          = 'completed'
+                WHERE offer_id = %s::integer
+            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+
+            # offer_history: actual_pickup_* + classification + source
+            cur.execute("""
+                UPDATE app_private.offer_history
+                SET actual_pickup_lat     = %s,
+                    actual_pickup_lng     = %s,
+                    actual_pickup_h3      = app_private.coords_to_h3(%s, %s)::text,
+                    actual_pickup_at      = NOW(),
+                    pickup_classification = 'auto',
+                    pickup_data_source    = 'nail_it'
+                WHERE decision_log_id = %s::integer
+            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+
+            # community_offers: radar feed (NOT EXISTS guarded for idempotency)
+            cur.execute("""
+                INSERT INTO public.community_offers (
+                    created_at, day_of_year, day_of_week, hour_of_day,
+                    platform, metroplex_id,
+                    pickup_h3, dropoff_h3,
+                    actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                    fare, trip_miles,
+                    dollars_per_mile, effective_hourly_rate,
+                    data_source, geog
+                )
+                SELECT
+                    NOW(),
+                    EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    'uber', 1,
+                    pms.pickup_h3, dl.dropoff_h3_index,
+                    pms.actual_pickup_lat, pms.actual_pickup_lng, pms.actual_pickup_h3,
+                    dl.fare, dl.trip_miles,
+                    pms.dollars_per_mile, pms.hourly_rate_offered,
+                    'nail_it',
+                    app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
+                FROM app_private.pickup_market_signals pms
+                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                WHERE pms.offer_id = %s::integer
+                  AND pms.actual_pickup_lat IS NOT NULL
+                  AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.community_offers co
+                      WHERE co.actual_pickup_lat = pms.actual_pickup_lat
+                        AND co.actual_pickup_lng = pms.actual_pickup_lng
+                        AND co.data_source = 'nail_it'
+                  )
+            """, (action.offer_id,))
+
             log.info("[heartbeat] FirePickup offer=%s", action.offer_id)
             return True, None
 
         if isinstance(action, FireDropoff):
-            if cluster_lat is None or cluster_lng is None:
-                return False, "fire_dropoff_without_cluster"
+            if nail_lat is None or nail_lng is None:
+                return False, "fire_dropoff_without_coords"
             write_nailed_position(cur, driver_id, 'dropoff',
-                                  cluster_lat, cluster_lng, 0)
+                                  nail_lat, nail_lng, 0)
             cur.execute("""
                 UPDATE app_private.driver_trip_state
                 SET current_offer_id = NULL
                 WHERE driver_id = %s
             """, (driver_id,))
+
+            # pms: data_source elevation (no actual_dropoff_* columns on pms)
+            cur.execute("""
+                UPDATE app_private.pickup_market_signals
+                SET data_source  = 'nail_it',
+                    offer_status = 'completed'
+                WHERE offer_id = %s::integer
+            """, (action.offer_id,))
+
+            # offer_history: actual_dropoff_* + classification
+            cur.execute("""
+                UPDATE app_private.offer_history
+                SET actual_dropoff_lat     = %s,
+                    actual_dropoff_lng     = %s,
+                    actual_dropoff_h3      = app_private.coords_to_h3(%s, %s)::text,
+                    actual_dropoff_at      = NOW(),
+                    dropoff_classification = 'auto'
+                WHERE decision_log_id = %s::integer
+            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+
+            # community_offers failsafe — NOT EXISTS guarded; no-ops if
+            # FirePickup already published. Only writes for Case F
+            # pickup_missed dropoffs that have an earlier-stamped
+            # pms.actual_pickup row from some other source.
+            cur.execute("""
+                INSERT INTO public.community_offers (
+                    created_at, day_of_year, day_of_week, hour_of_day,
+                    platform, metroplex_id,
+                    pickup_h3, dropoff_h3,
+                    actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                    fare, trip_miles,
+                    dollars_per_mile, effective_hourly_rate,
+                    data_source, geog
+                )
+                SELECT
+                    NOW(),
+                    EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    'uber', 1,
+                    pms.pickup_h3, dl.dropoff_h3_index,
+                    pms.actual_pickup_lat, pms.actual_pickup_lng,
+                    app_private.coords_to_h3(pms.actual_pickup_lat, pms.actual_pickup_lng)::text,
+                    dl.fare, dl.trip_miles,
+                    pms.dollars_per_mile, pms.hourly_rate_offered,
+                    'nail_it',
+                    app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
+                FROM app_private.pickup_market_signals pms
+                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                WHERE pms.offer_id = %s::integer
+                  AND pms.data_source = 'nail_it'
+                  AND pms.actual_pickup_lat IS NOT NULL
+                  AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.community_offers co
+                      WHERE co.actual_pickup_lat = pms.actual_pickup_lat
+                        AND co.actual_pickup_lng = pms.actual_pickup_lng
+                        AND co.data_source = 'nail_it'
+                  )
+            """, (action.offer_id,))
+
             sev_map = {None: logging.INFO,
                        "canceled": logging.INFO,
                        "pickup_missed": logging.WARNING}

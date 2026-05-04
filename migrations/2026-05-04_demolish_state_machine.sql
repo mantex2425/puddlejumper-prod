@@ -65,6 +65,12 @@ DROP TABLE IF EXISTS app_private.valid_state_transitions CASCADE;
 DROP TABLE IF EXISTS app_private.suspected_pudos CASCADE;  -- partitions cascade
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 3b. Contest event subsystem — fully demolished alongside check_convergence
+-- ─────────────────────────────────────────────────────────────────────────────
+
+DROP TABLE IF EXISTS app_private.contest_events CASCADE;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 4. driver_trip_state column changes
 --    Drop the CHECK constraint first (otherwise the column drop may complain)
 --    Then drop the legacy state column and its updated_at companion

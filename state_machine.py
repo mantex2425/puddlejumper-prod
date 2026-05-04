@@ -75,8 +75,6 @@ def _default_state() -> dict:
     }
 
 
-from nail_it_core import clear_buffer as _clear_stop_buffer
-
 class DriverStateMachine:
 
     @staticmethod
@@ -162,26 +160,6 @@ class DriverStateMachine:
             conn.commit()
 
             if result['success']:
-                # ── Defensive stop-buffer clear on trip-cycle boundaries ──
-                # Fires on entry to UNCOMMITTED (trip end / cancel / watchdog
-                # reset / manual reset) and exit from UNCOMMITTED (offer
-                # accepted). Idempotent — second call is a no-op. Does NOT
-                # fire mid-trip (IN_TRIP/STACKED/REFINE_DROPOFF transitions
-                # that don't touch UNCOMMITTED are untouched).
-                if 'UNCOMMITTED' in (result.get('from_state'), result.get('to_state')):
-                    try:
-                        _old_size = _clear_stop_buffer(driver_id)
-                        if _old_size > 0:
-                            logger.info(
-                                f"[BUFFER] Cleared on UNCOMMITTED for driver "
-                                f"{driver_id} — {_old_size} stops discarded"
-                            )
-                    except Exception as _e:
-                        logger.warning(
-                            f"[BUFFER] Clear failed (non-fatal) during "
-                            f"{result.get('from_state')}->{result.get('to_state')}: {_e}"
-                        )
-
                 _notify_discord(result['from_state'], result['to_state'], trigger)
             else:
                 logger.warning(

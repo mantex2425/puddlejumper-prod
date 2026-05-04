@@ -245,7 +245,27 @@ BEGIN
   END IF;
 END $$;
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 11. contest_events table: must be gone (demolished alongside check_convergence)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+DO $$
+DECLARE
+  exists_flag boolean;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'app_private' AND table_name = 'contest_events'
+  ) INTO exists_flag;
+
+  IF NOT exists_flag THEN
+    RAISE NOTICE 'OK  : contest_events table removed';
+  ELSE
+    RAISE EXCEPTION 'FAIL: contest_events table still present';
+  END IF;
+END $$;
+
 \echo '═══════════════════════════════════════════════════════════════════════'
-\echo ' VERIFICATION COMPLETE — all 10 assertions passed'
+\echo ' VERIFICATION COMPLETE — all 11 assertions passed'
 \echo ' Safe to redeploy application code (Step 5 of runbook)'
 \echo '═══════════════════════════════════════════════════════════════════════'
