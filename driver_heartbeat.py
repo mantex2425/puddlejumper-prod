@@ -4,7 +4,7 @@
 #
 # Pipeline:
 #
-#   LOAD       Read current_offer_id + state from driver_trip_state.
+#   LOAD       Read current_offer_id from driver_trip_state.
 #              Project current_offer_id into a synthetic 1-offer queue
 #              (Option α; per CANONICAL_RULES Section VI's "1-bit memory").
 #
@@ -29,13 +29,6 @@
 #              data logged from DiagnosticContext.cluster regardless of
 #              match outcome).
 #
-# State column policy (Option IV, ratified Sprint A): the new handler
-# never writes driver_trip_state.state. Per enforce_state_transition()
-# branch 2, UPDATEs that don't change state pass without GUC requirement.
-# The state column becomes a stale forensic surface read by the
-# pudo_decision_context.state_at_eval INSERT and the /driver/status
-# endpoint. Schema demolition deferred to a future cut.
-
 import json
 import datetime
 import logging
@@ -170,27 +163,25 @@ def _project_queue(driver_id, cur):
     Returns:
         queue: list[Offer]                  — all live, in-window offers
         current_offer_id: Optional[str]     — `driver_trip_state.current_offer_id`
-                                              (still the 1-bit memory of which
+                                              (the 1-bit memory of which
                                               offer FirePickup most recently
                                               fired against; threaded to
-                                              dispatch for §4 case resolution)
-        state_at_eval: str                  — forensic only; threaded to
-                                              _log_decision_context
+                                              dispatch for §4 case resolution
+                                              AND snapshotted into
+                                              pudo_decision_context.current_offer_id_at_eval)
     """
     cur.execute("""
-        SELECT current_offer_id, state
+        SELECT current_offer_id
         FROM app_private.driver_trip_state
         WHERE driver_id = %s
     """, (driver_id,))
     row = cur.fetchone()
     if row:
-        state_at_eval = row['state']
         current_offer_id = (
             str(row['current_offer_id']) if row['current_offer_id'] else None
         )
     else:
         # Fresh driver, no row yet.
-        state_at_eval = 'UNCOMMITTED'
         current_offer_id = None
 
     # Workload Queue: all seen, not-completed, in-window offers.
@@ -260,7 +251,7 @@ def _project_queue(driver_id, cur):
             dropoff=dropoff_spec,
         ))
 
-    return queue, current_offer_id, state_at_eval
+    return queue, current_offer_id
 
 
 # =============================================================================
@@ -479,7 +470,7 @@ def _execute_action(action, cur, conn, driver_id, cluster=None,
 def _log_decision_context(
     cur, driver_id, body,
     current_lat, current_lng, speed_mph, gps_accuracy_m,
-    current_offer_id, state_at_eval,
+    current_offer_id,
     diagnostics, matches, actions,
     dispatch_executed, dispatch_error_msg,
 ):
@@ -512,7 +503,7 @@ def _log_decision_context(
     cur.execute(
         """
         INSERT INTO app_private.pudo_decision_context (
-            driver_id, state_at_eval, current_offer_id,
+            driver_id, current_offer_id_at_eval, current_offer_id,
             lat, lng, speed_mph, heading, gps_accuracy_m, gps_age_s,
             wai_pudo_type, wai_offer_id, wai_confidence,
             wai_cluster_revisit,
@@ -530,7 +521,7 @@ def _log_decision_context(
         )
         """,
         (
-            driver_id, state_at_eval, current_offer_id,
+            driver_id, current_offer_id, current_offer_id,
             current_lat, current_lng, speed_mph,
             body.get('heading'), gps_accuracy_m, body.get('gpsAgeSec'),
             top_match.location_type if top_match else None,
@@ -603,7 +594,7 @@ def post_heartbeat():
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     # ── LOAD ─────────────────────────────────────────────────────────
-    queue, current_offer_id, state_at_eval = _project_queue(driver_id, cur)
+    queue, current_offer_id = _project_queue(driver_id, cur)
     queue_offer_ids = {o.offer_id for o in queue}
 
     # ── HEARTBEAT (preserve API contract for /driver/status) ─────────
@@ -643,11 +634,11 @@ def post_heartbeat():
         cur.execute("""
             INSERT INTO app_private.heartbeat_log
               (driver_id, lat, lng, speed_mph, gps_accuracy_m,
-               state, current_offer_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+               current_offer_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (
             driver_id, current_lat, current_lng, speed_mph, gps_accuracy_m,
-            state_at_eval, current_offer_id,
+            current_offer_id,
         ))
     except Exception as e:
         log.warning("[heartbeat] heartbeat_log INSERT failed (non-fatal): %s", e)
@@ -677,7 +668,7 @@ def post_heartbeat():
         _log_decision_context(
             cur, driver_id, body,
             current_lat, current_lng, speed_mph, gps_accuracy_m,
-            current_offer_id, state_at_eval,
+            current_offer_id,
             diagnostics, matches, actions,
             dispatch_executed, dispatch_error_msg,
         )
