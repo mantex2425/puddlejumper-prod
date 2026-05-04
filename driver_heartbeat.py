@@ -60,8 +60,6 @@ log = logging.getLogger(__name__)
 def _bucket_to_target_spec(address_text, lat, lng):
     """Classify an address string and convert to TargetSpec. None on garbage.
 
-    Mirrors the working reference in smoke_test_wai_24h.py:_build_target_spec.
-
     Pipeline:
       1. classify_address(text) -> {"bucket": str, "parts": dict}
          (single positional arg; coords are NOT passed to the parser)

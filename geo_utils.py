@@ -4,13 +4,14 @@ geo_utils.py — Geocoding infrastructure (Google API + result cache).
 SCOPE: Infrastructure module. OUTSIDE the 4-box framework.
 
 The 4-box framework (MONITOR/DIAGNOSE/PLAN/EXECUTE) governs ride
-lifecycle state — the state machine, driver_trip_state, the
-pickup→nailed→dropoff invariants that sm_transition() protects.
+lifecycle state — driver_trip_state.current_offer_id (the 1-bit memory),
+and the pickup→nailed→dropoff invariants that _execute_action in
+driver_heartbeat enforces.
 
 This module handles a side-car cache: a performance/cost optimization
 for Google Geocoding API calls. No ride-lifecycle invariants apply.
-Cache writes here are not state machine transitions and do not flow
-through sm_transition(). That is deliberate and correct.
+Cache writes here are not lifecycle transitions and do not flow
+through _execute_action. That is deliberate and correct.
 
 DO NOT add business logic or ride-state mutations here. If a future
 function would affect driver_trip_state, offer_history, or the

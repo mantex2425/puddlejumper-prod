@@ -10,8 +10,9 @@ NB: deliberately NOT named `types.py` — that shadows Python's stdlib `types`
 module and would silently break anything in the codebase doing `import types`.
 
 Box discipline (per canonical rules):
-  Only DIAGNOSE and PLAN see these. EXECUTE writes via sm_transition, which
-  has its own argument set; it does not import from here.
+  Only DIAGNOSE and PLAN see these. EXECUTE writes via _execute_action
+  in driver_heartbeat (post-demolition), which has its own argument set
+  and does not import from here.
 
 Phase D scope (2026-04):
   - WhereAmIResult is consumed by Phase D shadow-mode logging only.
