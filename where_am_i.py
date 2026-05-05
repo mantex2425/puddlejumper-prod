@@ -50,6 +50,12 @@ APARTMENT_RADIUS_M = 300.0
 # Ghost-cache match radius (Step 1 Q8)
 GHOST_MATCH_RADIUS_M = 50.0
 
+# Patch 2a (Phase 2c.2, 2026-05-05): caller-internal radius for
+# _signal_poi_match. Independent of poi_service.DEFAULT_RADIUS_M
+# (which governs cache-lookup radius) -- gives the matcher its own
+# threshold to filter POIs before computing co-reference scores.
+POI_RADIUS_M = 100.0
+
 # Cluster history topology — Houston Loop revisit gate (v2.6 amendment, sub-step 1b.2)
 # L-10 category 1 provenance: production-data-grounded structural noise floor.
 # Houston GPS multipath wobble in the rideshare heartbeat stream produces
@@ -454,6 +460,13 @@ class MatchOutcome:
     # outcome lets evaluate() preserve the dominant-signal forensic trail
     # all the way through to the MatchOutcome.
     signals: Optional[dict[str, float]]
+
+    # --- POI co-reference (Patch 2a infra shell, populated by Patch 2c) ---
+    # Both default None so existing tests + production constructions
+    # are unaffected. Patch 2c lands _signal_poi_match logic and
+    # extends _build_outcome to populate these.
+    poi_match: Optional[float] = None
+    poi_witness: Optional[str] = None
 
 
 def _weighted_confidence(
