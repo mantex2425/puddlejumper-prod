@@ -49,7 +49,7 @@ def confirm_dropoff():
         from dispatch import FireDropoff
         action = FireDropoff(offer_id=str(offer_id), outcome=None)
         executed, err = _execute_action(
-            action, cur, conn, driver_id,
+            action, cur, conn, driver_id, queue,
             cluster=None,
             fallback_lat=actual_lat, fallback_lng=actual_lng,
         )

@@ -46,6 +46,7 @@ from dispatch import (
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
 from pudo_types import Offer, TargetSpec
+from driver_queue import DriverQueue
 from bead_on_wire import classify_address
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
@@ -121,142 +122,20 @@ def _bucket_to_target_spec(address_text, lat, lng):
 # LOAD: project driver_trip_state into the §3 Map-Reduce queue contract
 # =============================================================================
 
-# ─── GC window constants (Andrew's "Houston Tax") ─────────────────────────────
-# Window per offer = (pickup_minutes + trip_minutes) * BUFFER, clamped.
-# Rationale: real-world rides drift past Uber's estimates due to traffic,
-# missed turns, and pickup delays. The buffer keeps WAI's "Peripheral Vision"
-# alive for offers the driver might still be working. Clamps protect against
-# (a) zero-duration outliers collapsing the window, (b) airport-class outliers
-# making old offers immortal.
-GC_BUFFER_MULT = 1.5
-GC_MIN_MINUTES = 15
-GC_MAX_MINUTES = 240
-# Fallback when offer_history has NULL minutes (legacy rows or missing data).
-# Conservative defaults: 15min pickup + 30min trip = 45min raw, * 1.5 = 67.5min,
-# clamped to 67min — long enough to cover most rides without going stale.
-GC_NULL_PICKUP_MIN = 15
-GC_NULL_TRIP_MIN = 30
+# GC constants moved to driver_queue.py in sub-commit 1c.1.1 and the
+# canonical Houston Tax (1.25) lives there. _project_queue was deleted
+# in sub-commit 1c.2 — its sole reader. See driver_queue.GC_BUFFER_MULT.
 
 
-def _project_queue(driver_id, cur):
-    """Project the driver's Workload Queue per SIMPLIFIED_ARCHITECTURE.md §3 + §6.
-
-    Returns ALL offers the driver has SEEN (any verdict — ACCEPT, DECLINE, etc.)
-    that have not been completed (`actual_dropoff_at IS NULL`) and have not been
-    garbage-collected (within the per-offer "Houston Tax" window: minutes since
-    `created_at` < (pickup_minutes + trip_minutes) * GC_BUFFER_MULT, clamped).
-
-    Why all-seen vs. ACCEPT-only:
-      A driver routinely arrives at the pickup of a declined offer (already
-      heading that way for a different ride; previous ride canceled and they
-      were already mid-stream). WAI must be able to discover that PUDO via
-      Case B (FirePickup against a queue containing the seen offer).
-
-    Why per-offer GC windows:
-      A 5-minute errand and a 90-minute airport run have very different
-      "is this offer still relevant?" timescales. A global cutoff would
-      either drop the airport run too early or keep the errand alive
-      far past its useful life.
-
-    Returns:
-        queue: list[Offer]                  — all live, in-window offers
-        current_offer_id: Optional[str]     — `driver_trip_state.current_offer_id`
-                                              (the 1-bit memory of which
-                                              offer FirePickup most recently
-                                              fired against; threaded to
-                                              dispatch for §4 case resolution
-                                              AND snapshotted into
-                                              pudo_decision_context.current_offer_id_at_eval)
-    """
-    cur.execute("""
-        SELECT current_offer_id
-        FROM app_private.driver_trip_state
-        WHERE driver_id = %s
-    """, (driver_id,))
-    row = cur.fetchone()
-    if row:
-        current_offer_id = (
-            str(row['current_offer_id']) if row['current_offer_id'] else None
-        )
-    else:
-        # Fresh driver, no row yet.
-        current_offer_id = None
-
-    # Workload Queue: all seen, not-completed, in-window offers.
-    #
-    # Per-offer GC window (in minutes):
-    #   raw_min   = COALESCE(pickup_minutes, GC_NULL_PICKUP_MIN)
-    #             + COALESCE(trip_minutes,   GC_NULL_TRIP_MIN)
-    #   window_min = LEAST(GREATEST(raw_min * GC_BUFFER_MULT,
-    #                               GC_MIN_MINUTES),
-    #                      GC_MAX_MINUTES)
-    #   live      = (NOW() - created_at) < window_min minutes
-    cur.execute("""
-        SELECT
-            id, pickup_address, dropoff_address,
-            pickup_lat, pickup_lng,
-            dropoff_lat, dropoff_lng,
-            created_at,
-            COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
-        FROM app_private.offer_history
-        WHERE decision_log_id IN (
-            SELECT id FROM app_private.decision_log WHERE driver_id = %s
-        )
-          AND actual_dropoff_at IS NULL
-          AND created_at + (
-                LEAST(
-                    GREATEST(
-                        (COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s)) * %s,
-                        %s
-                    ),
-                    %s
-                ) * INTERVAL '1 minute'
-              ) > NOW()
-        ORDER BY created_at DESC
-    """, (
-        GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
-        driver_id,                                # FK lookup
-        GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # WHERE coalesces (must duplicate;
-                                                  #   PG can't reuse SELECT alias here)
-        GC_BUFFER_MULT,
-        GC_MIN_MINUTES,
-        GC_MAX_MINUTES,
-    ))
-
-    queue = []
-    for o in cur.fetchall():
-        pickup_spec = _bucket_to_target_spec(
-            o['pickup_address'], o['pickup_lat'], o['pickup_lng'])
-        dropoff_spec = _bucket_to_target_spec(
-            o['dropoff_address'], o['dropoff_lat'], o['dropoff_lng'])
-        if pickup_spec is None or dropoff_spec is None:
-            log.warning(
-                "[heartbeat] offer %s has unbuildable geocode "
-                "(pickup_ok=%s dropoff_ok=%s) — excluded from queue",
-                o['id'], pickup_spec is not None, dropoff_spec is not None,
-            )
-            continue
-        # Offer.accepted_at semantic mapping: offer_history.created_at is the
-        # row-creation moment (also the offer-seen moment for declined/other
-        # verdicts). For ACCEPT verdicts it's effectively the accepted-at
-        # timestamp because the row is inserted at decision time. Single
-        # column does double duty for the Memory Eye anchor in
-        # where_am_i.py:1080 (min(accepted_at) across queue).
-        queue.append(Offer(
-            offer_id=str(o['id']),
-            accepted_at=o['created_at'],
-            pickup=pickup_spec,
-            dropoff=dropoff_spec,
-        ))
-
-    return queue, current_offer_id
+# _project_queue was deleted in sub-commit 1c.2.
+# Replaced by driver_queue.DriverQueue.snapshot() in the orchestrator.
 
 
 # =============================================================================
 # EXECUTE: map a dispatch Action to its DB side effect
 # =============================================================================
 
-def _execute_action(action, cur, conn, driver_id, cluster=None,
+def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     fallback_lat=None, fallback_lng=None):
     """Map a dispatch Action to its DB side effect.
 
@@ -288,11 +167,7 @@ def _execute_action(action, cur, conn, driver_id, cluster=None,
                 return False, "fire_pickup_without_coords"
             write_nailed_position(cur, driver_id, 'pickup',
                                   nail_lat, nail_lng, 0)
-            cur.execute("""
-                UPDATE app_private.driver_trip_state
-                SET current_offer_id = %s
-                WHERE driver_id = %s
-            """, (action.offer_id, driver_id))
+            queue.bind(action.offer_id, cur)
 
             # pickup_market_signals: actual_pickup_* + nail_it elevation
             cur.execute("""
@@ -362,11 +237,7 @@ def _execute_action(action, cur, conn, driver_id, cluster=None,
                 return False, "fire_dropoff_without_coords"
             write_nailed_position(cur, driver_id, 'dropoff',
                                   nail_lat, nail_lng, 0)
-            cur.execute("""
-                UPDATE app_private.driver_trip_state
-                SET current_offer_id = NULL
-                WHERE driver_id = %s
-            """, (driver_id,))
+            queue.unbind(cur)
 
             # pms: data_source elevation (no actual_dropoff_* columns on pms)
             cur.execute("""
@@ -656,8 +527,16 @@ def post_heartbeat():
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     # ── LOAD ─────────────────────────────────────────────────────────
-    queue, current_offer_id = _project_queue(driver_id, cur)
-    queue_offer_ids = {o.offer_id for o in queue}
+    # DriverQueue.snapshot() applies the L-19 invariant on read: if
+    # bound_offer_id points outside the projected queue (e.g. seed_offer
+    # priming wrote the pointer but no live offer_history row exists),
+    # snap.bound_offer_id is None and a WARNING tagged INVARIANT_VIOLATION
+    # is logged. Heartbeat continues with the self-healed value, and
+    # FirePickup/FireDropoff naturally overwrite the DB pointer.
+    queue = DriverQueue(driver_id, target_spec_builder=_bucket_to_target_spec)
+    snap = queue.snapshot(cur)
+    current_offer_id = snap.bound_offer_id
+    queue_offer_ids = set(snap.offer_ids)
 
     # ── HEARTBEAT (preserve API contract for /driver/status) ─────────
     # Per Option H1 (ratified Sprint A): keep GPS/motion fields with real
@@ -707,7 +586,7 @@ def post_heartbeat():
 
     # ── DIAGNOSE ─────────────────────────────────────────────────────
     wai = WhereAmI(cur)
-    matches, diagnostics = wai.evaluate_with_diagnostics(driver_id, queue)
+    matches, diagnostics = wai.evaluate_with_diagnostics(driver_id, snap.offers)
 
     # ── DECIDE ───────────────────────────────────────────────────────
     actions = dispatch(matches, current_offer_id, queue_offer_ids)
@@ -717,7 +596,7 @@ def post_heartbeat():
     executed_actions: list = []
     dispatch_error_msg = None
     for action in actions:
-        executed, err = _execute_action(action, cur, conn, driver_id, cluster)
+        executed, err = _execute_action(action, cur, conn, driver_id, queue, cluster)
         if executed:
             executed_actions.append(action)
         if err:
