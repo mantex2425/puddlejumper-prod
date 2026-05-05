@@ -52,6 +52,10 @@ Answer directly. Explain choices only when asked or when the choice has tradeoff
 
 2. **Bare lines like "Floor", "Single", "1."** are interpreted by bash as commands and create empty files with those names in the working directory. (~12 garbage files cleaned up via targeted `rm` after a forensic doc paste.)
 
+3. **Markdown link rendering corrupts displayed filenames.** When chat UI renders text containing `filename.md`, `module.py`, or similar, it linkifies them visually as `[filename.md](http://filename.md)`. Copying the rendered text pastes the link syntax literally — bash sees `[`, `]`, `(`, `)`, `:` as metacharacters. Filenames "work" (no syntax error) but land at wrong paths on disk. (`HANDOFF_REGRESSION_RESOLVED_2026-05-05.md` corruption episode, 2026-05-05.)
+
+**Mitigation:** copy commands from inside triple-backtick code fences (rendering disabled). After any file create/rename, verify with `ls` on the parent directory. If a command's error message doesn't quite match the corruption pattern observed, suspect the chat-display layer rendering pasted output back as markdown — request a screenshot of the actual terminal before adding more defensive shell tactics.
+
 **Mandatory transfer pattern:**
 
 - For new files: `scp` from `/mnt/user-data/outputs/` to VM
@@ -128,6 +132,10 @@ These are the active discipline gates from Phase D and Phase E:
 | L-9 corollary refinement | REPL probes for boundary fixtures must converge to `< 1e-10`. Default 80 iterations |
 | L-10 | Gate threshold provenance categorized (cat-1 production-data-grounded / cat-2 theoretical-with-shadow-mode / cat-3 paranoia, NOT ALLOWED) |
 | L-11 | Doc-currency check at session-open and session-close (lightweight version through launch) |
+| L-19 | Priming `current_offer_id` without a fresh `offer_history` row creates inconsistent state the matcher reads as empty queue. Use `/api/v1/test/seed_offer` or equivalent that writes both tables atomically |
+| L-20 | Before bisecting code on "X broke after deploy Y", run the existing integration harness (Bruno) against deploy Y. A 60-second pass eliminates a 5-hour bisect; correlation with deploy timing is not causation |
+| L-21 | Forensic columns in `pudo_decision_context` are diagnostic legend. Pattern of which columns populate vs NULL localizes failures to subsystems within minutes (Phase 1B restoration validated 2026-05-05) |
+| L-22 | Chat-rendered output is not ground truth for terminal state. When persistent character corruption survives multiple defensive workarounds AND tool errors don't quite match the apparent corruption, suspect the display layer — request a screenshot before more shell tactics. See Paste Safety hazard #3 |
 
 L-8 (live-PG smoke) reactivates after launch.
 
