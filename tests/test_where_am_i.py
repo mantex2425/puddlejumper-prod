@@ -1665,3 +1665,121 @@ class TestEvaluateClusterRevisit:
         matches, diagnostics = wai.evaluate_with_diagnostics("driver1", [offer])
         assert matches == []
         assert diagnostics.cluster_revisit is True
+
+
+
+# ============================================================================
+# Phase 1A: transit-class adjacency gate tests
+# (Operation Strip Mall, 2026-05-04)
+# ============================================================================
+
+def test_signal_adjacent_road_match_transit_gate_blocks_tertiary():
+    """McKeever Rd traffic light regression (offer 8336, 2026-05-04).
+
+    Driver on tertiary road (OSM tag_id 109, mapped to 'transit' class)
+    must NOT receive adjacency rescue toward a target road that happens
+    to be within ADJACENCY_BUFFER_M (150m). Without the gate, the
+    pre-2026-05-04 behavior fired wai_confidence ~0.41 at a McKeever
+    traffic light because Sienna Pkwy ran 32m away.
+    """
+    from where_am_i import _signal_adjacent_road_match
+    # adjacent_roads contains the target — pre-gate this would return 1.0
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Sienna Pkwy",),
+        target_road_names=("Sienna Pkwy",),
+        current_road_class="transit",
+    )
+    assert result == 0.0, (
+        f"Transit gate failed: tertiary-road driver should not match "
+        f"target via adjacency. Got {result}, expected 0.0."
+    )
+
+
+def test_signal_adjacent_road_match_transit_gate_blocks_secondary():
+    """Driver on secondary road (tag_id 108) — same gate applies.
+
+    Generalization of the tertiary case: any 'transit' class
+    (motorway/trunk/primary/secondary/tertiary) suppresses adjacency.
+    """
+    from where_am_i import _signal_adjacent_road_match
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Westheimer Rd",),
+        target_road_names=("Westheimer Rd",),
+        current_road_class="transit",
+    )
+    assert result == 0.0
+
+
+def test_signal_adjacent_road_match_transit_gate_blocks_motorway():
+    """Driver on motorway (tag_id 101) — gate covers the full transit range.
+
+    Worst-case false positive scenario: driver is on a freeway, a parallel
+    surface street with the target name passes within 150m. Adjacency
+    must not rescue — the driver is in transit on a different class of
+    road entirely.
+    """
+    from where_am_i import _signal_adjacent_road_match
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Some Surface Rd",),
+        target_road_names=("Some Surface Rd",),
+        current_road_class="transit",
+    )
+    assert result == 0.0
+
+
+def test_signal_adjacent_road_match_residential_allows_adjacency():
+    """Bees Passage Road (tag_id 110, 'residential' class) preserved.
+
+    The strip-mall frontage road case from offer 8336 ride 1 actual
+    dropoff: driver snapped to Bees Passage (residential), Sienna Pkwy
+    32m away. Pre-gate this fired with conf 0.42; post-gate it must
+    still fire because residential class is the legitimate frontage-road
+    case. The gate is class-specific, not blanket.
+    """
+    from where_am_i import _signal_adjacent_road_match
+    result = _signal_adjacent_road_match(
+        adjacent_roads=("Sienna Pkwy",),
+        target_road_names=("Sienna Pkwy",),
+        current_road_class="residential",
+    )
+    assert result == 1.0, (
+        f"Residential-class adjacency should still fire. Got {result}, "
+        f"expected 1.0."
+    )
+
+
+def test_signal_adjacent_road_match_off_wire_allows_adjacency():
+    """Off-wire / NULL class — original Planet Fitness use case preserved.
+
+    `FORENSIC_2026_04_27_HOUSTON_SHIFT.md` Case B: driver in a strip-mall
+    parking lot is off-wire (no road snap within 40m), pivot_context
+    returns current_road=None and current_road_class=None. Adjacency
+    rescue is the WHOLE POINT of this signal for this case — it must
+    NOT be suppressed.
+    """
+    from where_am_i import _signal_adjacent_road_match
+
+    # NULL (off-wire) — no class set
+    result_null = _signal_adjacent_road_match(
+        adjacent_roads=("Hollister Rd",),
+        target_road_names=("Hollister Rd",),
+        current_road_class=None,
+    )
+    assert result_null == 1.0, "NULL class must allow adjacency"
+
+    # Explicit 'off_wire' class (snapped to a parking-lot service road,
+    # tag_id 112/113/117)
+    result_off_wire = _signal_adjacent_road_match(
+        adjacent_roads=("Hollister Rd",),
+        target_road_names=("Hollister Rd",),
+        current_road_class="off_wire",
+    )
+    assert result_off_wire == 1.0, "off_wire class must allow adjacency"
+
+    # 'unknown' class — fail-open
+    result_unknown = _signal_adjacent_road_match(
+        adjacent_roads=("Hollister Rd",),
+        target_road_names=("Hollister Rd",),
+        current_road_class="unknown",
+    )
+    assert result_unknown == 1.0, "unknown class must allow adjacency"

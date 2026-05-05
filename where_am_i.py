@@ -303,6 +303,7 @@ def _signal_on_target_road(
 def _signal_adjacent_road_match(
     adjacent_roads: tuple[str, ...],
     target_road_names: tuple[str, ...],
+    current_road_class: Optional[str] = None,
 ) -> float:
     """Is any of the target's named roads in the cluster's adjacent-roads
     whitelist?
@@ -316,17 +317,34 @@ def _signal_adjacent_road_match(
     Solves the Planet Fitness / strip-mall back-entrance / hospital
     parking-lot cases where on_target_road is 0 because the snap missed.
 
-    Step function (boolean by nature):
-      - any target_road in adjacent_roads:   1.0
-      - adjacent_roads is empty:             0.0
-      - target_road_names is empty:          0.0
-      - no overlap:                          0.0
+    TRANSIT GATE (Phase 1A, 2026-05-04 — Operation Strip Mall):
+    adjacency rescue is suppressed when current_road_class is 'transit'
+    (motorway / motorway_link / trunk / trunk_link / primary /
+    primary_link / secondary / tertiary — OSM tag_id 101-109).
 
-    Reuses pivot_context._road_names_match for canonical normalization
-    (same comparison style as on_target_road, breadcrumb_match,
-    off_wire_pivot — three other signals already use it). Ensures
-    "Westheimer Rd" vs "Westheimer Road" don't false-negative.
+    Rationale: a driver on a tertiary road is in transit-mode, not
+    "near a destination, off-wire". The McKeever-Sienna case
+    (offer 8336, ride 1, 2026-05-04) produced a false-positive dropoff
+    cluster at a McKeever Rd traffic light because Sienna Pkwy ran 32m
+    away. Adjacency was designed for off-wire cases (parking lots,
+    residential side streets); applying it to transit roads
+    misclassifies "stuck in traffic near the dropoff" as "arrived at
+    the dropoff."
+
+    Step function (boolean by nature):
+      - current_road_class == 'transit':     0.0  (gated, regardless of overlap)
+      - any target_road in adjacent_roads:  1.0
+      - adjacent_roads is empty:            0.0
+      - target_road_names is empty:         0.0
+      - no overlap:                         0.0
+
+    Reuses pivot_context._road_names_match for canonical normalization.
     """
+    # Transit gate: driver is on a primary/secondary/tertiary road,
+    # adjacency rescue does not apply.
+    if current_road_class == 'transit':
+        return 0.0
+
     if not adjacent_roads or not target_road_names:
         return 0.0
     for adjacent_road in adjacent_roads:
@@ -557,6 +575,7 @@ class RoadTopology:
     off_wire_duration_s: int            # 0 when on_wire; else seconds since pivot
     breadcrumb: tuple[str, ...]         # raw road names, recent -> older
     adjacent_roads: tuple[str, ...] = ()  # named roads within ADJACENCY_BUFFER_M of cluster centroid
+    current_road_class: Optional[str] = None  # OSM-derived class: 'transit'|'residential'|'off_wire'|'unknown'|None
 
 
 def _compute_signals(
@@ -596,6 +615,7 @@ def _compute_signals(
         ),
         "adjacent_road_match": _signal_adjacent_road_match(
             topo.adjacent_roads, target.named_roads,
+            current_road_class=topo.current_road_class,
         ),
     }
 
@@ -1192,6 +1212,7 @@ class WhereAmI:
             off_wire_duration_s=off_wire_duration_s,
             breadcrumb=breadcrumb,
             adjacent_roads=adjacent_roads,
+            current_road_class=ctx.get("current_road_class"),
         )
 
     # =========================================================================

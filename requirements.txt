@@ -23,3 +23,4 @@ anthropic==0.75.0
 geopy==2.4.1
 flask-cors==4.0.0
 pytz
+rapidfuzz==3.10.1

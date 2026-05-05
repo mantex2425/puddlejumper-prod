@@ -154,6 +154,7 @@ def get_pivot_context(driver_id: str, cur,
     """
     if not driver_id:
         return {"on_wire": False, "current_road": None,
+                "current_road_class": None,
                 "last_named_road": None, "pivot_time": None,
                 "breadcrumb": []}
 
@@ -183,28 +184,38 @@ def get_pivot_context(driver_id: str, cur,
                 SELECT
                     r.logged_at,
                     r.lat, r.lng,
-                    (
-                        SELECT hw.name
-                        FROM routing.houston_ways hw
-                        WHERE hw.name IS NOT NULL
-                          AND hw.length_m < 20000
-                          AND ST_DWithin(
-                            hw.the_geom::geography,
-                            app_private.coords_to_point(r.lat, r.lng)::geography,
-                            40
-                          )
-                        ORDER BY hw.the_geom <-> app_private.coords_to_point(r.lat, r.lng)
-                        LIMIT 1
-                    ) AS road_name
+                    snap.road_name,
+                    snap.road_class
                 FROM recent r
+                LEFT JOIN LATERAL (
+                    SELECT
+                        hw.name AS road_name,
+                        CASE
+                          WHEN hw.tag_id BETWEEN 101 AND 109 THEN 'transit'
+                          WHEN hw.tag_id IN (110, 111, 114)  THEN 'residential'
+                          WHEN hw.tag_id IN (112, 113, 117)  THEN 'off_wire'
+                          ELSE 'unknown'
+                        END AS road_class
+                    FROM routing.houston_ways hw
+                    WHERE hw.name IS NOT NULL
+                      AND hw.length_m < 20000
+                      AND ST_DWithin(
+                        hw.the_geom::geography,
+                        app_private.coords_to_point(r.lat, r.lng)::geography,
+                        40
+                      )
+                    ORDER BY hw.the_geom <-> app_private.coords_to_point(r.lat, r.lng)
+                    LIMIT 1
+                ) snap ON true
             )
-            SELECT logged_at, road_name FROM snapped
+            SELECT logged_at, road_name, road_class FROM snapped
             ORDER BY logged_at DESC;
         """, params_tuple)
         rows = cur.fetchall()
 
         if not rows:
             return {"on_wire": False, "current_road": None,
+                    "current_road_class": None,
                     "last_named_road": None, "pivot_time": None,
                     "breadcrumb": []}
 
@@ -212,6 +223,7 @@ def get_pivot_context(driver_id: str, cur,
         current = rows[0]
         on_wire = current["road_name"] is not None
         current_road = current["road_name"]
+        current_road_class = current.get("road_class")  # None when off-wire snap returned NULL
 
         # Build breadcrumb of recent named-road segments (for re-route cases
         # where the relevant road is not the most recent named road — e.g.,
@@ -228,6 +240,7 @@ def get_pivot_context(driver_id: str, cur,
             return {
                 "on_wire": True,
                 "current_road": current_road,
+                "current_road_class": current_road_class,
                 "last_named_road": current_road,
                 "pivot_time": None,
                 "breadcrumb": breadcrumb,
@@ -249,6 +262,7 @@ def get_pivot_context(driver_id: str, cur,
         return {
             "on_wire": False,
             "current_road": None,
+            "current_road_class": None,
             "last_named_road": last_named_road,
             "pivot_time": pivot_time,
             "breadcrumb": breadcrumb,
@@ -256,6 +270,7 @@ def get_pivot_context(driver_id: str, cur,
     except Exception as e:
         logging.warning(f"[PIVOT] get_pivot_context failed: {e}")
         return {"on_wire": False, "current_road": None,
+                "current_road_class": None,
                 "last_named_road": None, "pivot_time": None,
                 "breadcrumb": []}
 
