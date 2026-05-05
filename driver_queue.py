@@ -18,9 +18,12 @@ hint, the next bind() or unbind() writes the corrected pointer. See
 L-19 in SESSION_PROTOCOL.md for the failure mode this invariant
 addresses.
 
-Module owns the canonical `Offer` dataclass. Other modules (heartbeat,
-replay, scenarios) import it from here — DriverQueue is the Workload
-Manager, Offer is the Work Item, they belong together.
+Module imports the canonical `Offer` dataclass from pudo_types — the
+Source of Truth for shared data shapes. DriverQueue is the Workload
+Manager; Offer is the Work Item. Consumers may import Offer from
+pudo_types directly or transitively via driver_queue (re-exported
+for convenience and for backward compatibility with sub-commit 1a
+callers).
 
 Architecture: TargetSpec construction is injected via a builder callable
 supplied at DriverQueue construction time. This keeps the queue module
@@ -46,16 +49,25 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from pudo_types import Offer
+
 log = logging.getLogger(__name__)
 
-# GC-window tuning constants. Lifted verbatim from driver_heartbeat to
-# preserve behavior across the encapsulation boundary. After Commit 1's
-# caller-migration step, driver_heartbeat imports these from here rather
-# than duplicating them.
-GC_NULL_PICKUP_MIN = 5    # Default pickup_minutes when offer_history.pickup_minutes IS NULL
-GC_NULL_TRIP_MIN = 15     # Default trip_minutes when offer_history.trip_minutes IS NULL
-GC_BUFFER_MULT = 3.0      # Multiplier on raw_min for the "Houston Tax" cushion
-GC_MIN_MINUTES = 30       # Floor: even a 1-minute errand stays live for this long
+# GC-window tuning constants. Reconciled to canonical Houston Tax values
+# in sub-commit 1c.1.1; previously drifted from driver_heartbeat's
+# production-validated values despite a (now-removed) docstring claiming
+# they were lifted verbatim. After Commit 1's caller-migration step,
+# driver_heartbeat imports these from here rather than duplicating them.
+GC_NULL_PICKUP_MIN = 15   # Default pickup_minutes when offer_history.pickup_minutes IS NULL
+GC_NULL_TRIP_MIN = 30     # Default trip_minutes when offer_history.trip_minutes IS NULL
+# Houston Tax: 25% dynamic buffer on (pickup_minutes + trip_minutes) sized
+# to keep an offer live in the queue while the driver waits out real
+# Houston-area traffic (Sienna Pkwy, McKeever Rd, the Arcola crawl).
+# Tuned from production driving data; not arbitrary. If retuning, log the
+# rationale in CANONICAL_RULES.md or the relevant phase closeout — this
+# value drives queue retention semantics, not just a magic constant.
+GC_BUFFER_MULT = 1.25
+GC_MIN_MINUTES = 15       # Floor: even a 1-minute errand stays live for this long
 GC_MAX_MINUTES = 240      # Ceiling: cap the airport-run window to 4 hours
 
 
@@ -76,25 +88,16 @@ TargetSpecBuilder = Callable[[Optional[str], Optional[float], Optional[float]], 
 
 
 # =============================================================================
-# Offer — the Work Item
+# Offer — the Work Item (imported from pudo_types)
 # =============================================================================
-
-@dataclass(frozen=True)
-class Offer:
-    """A queue-eligible offer projected from offer_history.
-
-    Fields:
-        offer_id:     str — offer_history.id, stringified
-        accepted_at:  datetime — offer_history.created_at (the row-creation
-                      moment, which serves as the "offer-seen" anchor for
-                      the Memory Eye in where_am_i.py regardless of verdict)
-        pickup:       TargetSpec — built by the injected builder
-        dropoff:      TargetSpec — built by the injected builder
-    """
-    offer_id: str
-    accepted_at: object  # datetime; not annotated to avoid datetime import
-    pickup: object       # TargetSpec
-    dropoff: object      # TargetSpec
+#
+# Offer is imported at module-top from pudo_types, the Source of Truth
+# for shared data shapes (per project convention). The dataclass has
+# fields: offer_id (str), accepted_at (datetime), pickup (TargetSpec),
+# dropoff (TargetSpec). The accepted_at field is sourced from
+# offer_history.created_at — the row-creation moment, which serves as
+# the "offer-seen" anchor for the Memory Eye in where_am_i.py
+# regardless of verdict. See pudo_types.Offer for the full docstring.
 
 
 # =============================================================================
