@@ -156,3 +156,81 @@ L-8 (live-PG smoke) reactivates after launch.
 
 - This document evolves. When a new protocol rule is identified (like the paste-safety rules from 2026-04-27/28), it gets added here.
 - This document is **not** a place for architectural decisions. Those go in `CANONICAL_RULES.md` (eternal) or specific decision docs (referenced in `INDEX.md`).
+
+# Note to future Claude — using `{ ... } > /tmp/file && cat /tmp/file` for recon
+
+## The pattern
+
+Throughout Phase 2c recon, I used this repeatedly to gather diagnostic info from Andrew's VM in one round-trip:
+
+```bash
+{
+  echo "=== section 1 ==="
+  grep -n "pattern" file.py
+  echo ""
+  echo "=== section 2 ==="
+  sed -n '120,140p' file.py
+} > /tmp/recon_step3.txt
+cat /tmp/recon_step3.txt
+```
+
+It worked well. Andrew runs one command, pastes one block of output back, I get structured multi-section recon in a single turn. Saves 5-10 round trips per recon pass. Use this freely — it scales the value of each Andrew↔Claude exchange.
+
+## Why the curly-brace group
+
+`{ cmd1; cmd2; cmd3; } > file` redirects ALL stdout from the entire group to one file. The alternative — `cmd1 > file && cmd2 >> file && cmd3 >> file` — works but is ugly, error-prone, and one mistake (single `>` instead of `>>`) loses prior output. The brace group is cleaner and atomic from a redirection standpoint.
+
+The trailing `&& cat /tmp/recon_step3.txt` runs the cat only if the redirected group succeeded. If any command in the group fails hard (set -e behavior), cat doesn't run on broken output. Most of the time this is paranoia — `grep` returning no matches still exits cleanly enough — but the `&&` is cheap insurance.
+
+`/tmp/recon_step*.txt` as the path: ephemeral, no commit risk, no clutter in the repo. **Important:** this is `/tmp/` (Linux ephemeral) — different from `~/puddlejumper-prod/tmp/` (the project apply-script subdir per the recent_updates rule in memory). The recon files belong in `/tmp/`; apply scripts belong in `~/puddlejumper-prod/tmp/`.
+
+## How to structure the recon block
+
+Three rules I followed without thinking about it but should be explicit:
+
+1. **Echo a section header before each command** — `echo "=== imports block ==="` before the actual `grep`/`sed`. When the output comes back as one wall of text, headers are the only way to find which section answered which question.
+2. **Empty `echo ""` between sections** for readability when Andrew pastes it back to me.
+3. **Pipe to `head -N` or `tail -N`** on each grep/find call. A `grep -rn pattern --include="*.py"` against a large repo can return thousands of lines. The recon goal is structural understanding, not exhaustive listing — first 20-50 hits per query is plenty.
+
+## The L-22 paste-safety issue
+
+L-22 says: chat-rendered output is not ground truth for terminal state. When a chat UI renders text containing things like `filename.md`, `module.py`, or URLs, it linkifies them visually as `[filename.md](http://filename.md)` — and when Andrew copies that rendered output back to paste into the next message, the link syntax can leak into the paste.
+
+**This bit me at least twice in this conversation.** Andrew's pasted output had `[fix.py](http://fix.py)` mixed into the script body, `python3 -m pytest tests/test_bead_on_[wire.py](http://wire.py)` in the command line, and `bead_on_[wire.py](http://wire.py)` in the file path. Each time, the actual terminal state was fine — only the chat-display-then-paste-back round trip mangled it.
+
+### How `{ ... } > /tmp/file && cat` interacts with L-22
+
+The `cat` step is what triggers L-22 most often. When Andrew runs `cat /tmp/recon_step3.txt`, the chat client receives the file contents, renders them with linkification, and that rendered version is what Andrew sees. If he later copies that to paste back into chat, the linkification can stick to the copy.
+
+**The mitigation isn't to avoid the pattern.** The pattern is genuinely useful and the alternative (5-10 individual commands) is worse. The mitigations are:
+
+1. **Don't include the recon output in path-like strings I'll need to manipulate later.** If a recon step produces a list of filenames like `bead_on_wire.py`, I should not also paste those filenames into command-line examples in the same response — Andrew might copy from either spot, and one of them will be linkified. Keep filenames in code blocks (triple backticks) where rendering is suppressed, and keep recon output to plain text I just need to read.
+    
+2. **When Andrew pastes back, treat anything that looks like `[name.py](http://name.py)` as a chat-display artifact, not a real terminal token.** Read past it. Do not try to use the corruption as a clue for "what is on disk" — it's purely a display layer issue.
+    
+3. **For the apply scripts themselves** (the substantive output): always deliver via `create_file` → `present_files` → `scp`. Never paste multi-line script content in chat for Andrew to copy. The recon pattern is OK because the output is short and read-only; the apply scripts are larger and execution-critical, so they get the file-handoff treatment.
+    
+4. **When sanity-checking my own reasoning against pasted recon output**, the test is: does the meaningful content of the paste tell me what I need? The fact that filenames render with brackets and URLs is irrelevant noise. If I get distracted by the brackets and start trying to debug them, I'm reading the display layer instead of the data.
+    
+5. **One specific anti-pattern to avoid:** running `tee /tmp/file` AND `cat /tmp/file` in the same command. That doubles the output (Andrew sees the live tee output AND the cat playback) and makes it look like the script ran twice. Pick one — `>` plus `cat` for redirected-then-displayed, OR just `tee` for live-and-saved. Andrew hit this once in the audit script and I had to flag the duplication. Stick to the `{ ... } > /tmp/file && cat /tmp/file` pattern; don't mix in tee.
+    
+
+## When to use it vs. when not to
+
+**Use the recon-block pattern when:**
+
+- Multiple related questions answered by short, read-only commands (grep/sed/wc/ls)
+- You need structural understanding before authoring code
+- The total output is bounded (under ~300 lines paste-back)
+- You'd otherwise be doing 3+ separate commands in sequence
+
+**Don't use it when:**
+
+- The output will be huge (use `head -N` to bound, or split across multiple chats)
+- One of the commands MIGHT mutate state — keep mutating commands separate so Andrew can review before running each
+- The commands need different working directories — run them separately so Andrew sees each prompt
+- A single command would suffice — don't pad with ceremony for a one-line query
+
+## TL;DR for future self
+
+`{ ... } > /tmp/recon_stepN.txt && cat /tmp/recon_stepN.txt` is the right shape for multi-question recon. Use section headers liberally, bound output with `head`/`tail`, keep recon files in `/tmp/` not the project tmp dir. The L-22 paste-back corruption is real but unavoidable at the chat UI layer — read past `[name.py](http://name.py)` artifacts and trust the actual content. Always deliver substantial code via `create_file`/`scp`, never via chat-paste. Don't combine `tee` and `cat` in the same command.
