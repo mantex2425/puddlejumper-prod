@@ -25,10 +25,15 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Optional
 
+from rapidfuzz import fuzz
+
+from bead_on_wire import _AIRLINE_AIRPORT_TOKENS, detect_branded_token
 from cluster_detection import Cluster
 from pivot_context import _road_names_match
+from poi_service import POI
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +60,16 @@ GHOST_MATCH_RADIUS_M = 50.0
 # (which governs cache-lookup radius) -- gives the matcher its own
 # threshold to filter POIs before computing co-reference scores.
 POI_RADIUS_M = 100.0
+
+# Patch 2b (Phase 2c.2, 2026-05-05): _signal_poi_match Option B
+# noise-gate KEY. Matches leading street number (e.g. "7623 Forum
+# Park Dr" but not "Forum Park Dr"). Per the 2026-05-05 audit (2101
+# offers), street-number presence is the disambiguator that actually
+# correlates with real-address-vs-road-name distinction. R4's old
+# global 0.2 multiplier was demolished because 96.5% of branded
+# matches lacked street number; Option B uses presence as a gate KEY
+# only, not a continuous score component.
+_STREET_NUMBER_RE = re.compile(r"^\s*\d+\b")
 
 # Cluster history topology — Houston Loop revisit gate (v2.6 amendment, sub-step 1b.2)
 # L-10 category 1 provenance: production-data-grounded structural noise floor.
@@ -421,6 +436,117 @@ def _signal_off_wire_pivot(
 # Field ordering follows Gemini Step 5.3 Q1 ruling: verdict first
 # (matched, confidence), then geography (corrected coords), then
 # context (reason, attribution), then metadata (signals).
+
+
+def _signal_poi_match(
+    pois: list,
+    target_address: str,
+) -> tuple[float, Optional[str]]:
+    """3-headed POI co-reference signal with Option B noise-gate.
+
+    Heads:
+      1. Fuzzy: rapidfuzz.fuzz.partial_ratio between each POI name and
+         the target address. Continuous [0, 1.0]. Witness:
+         "fuzzy:{poi_name}" of the highest-scoring POI.
+      2. Branded co-reference: detect_branded_token applied to both
+         target and each POI name; both must produce the same token
+         to fire. Binary 1.0. Witness: "branded:{token}".
+      3. Airport-type co-reference: target address contains an
+         airline/airport token AND any near-POI has substring
+         "airport" in its types list. Binary 0.9 (capped below
+         Head 2 because the POI-side anchor is type-based not
+         name-based). Witness: "airport_type:{token}".
+
+    Final score = max(head1, head2, head3). Witness from winning head.
+
+    Option B noise-gate (Gemini ratification 2026-05-05):
+      - Head 1 winner: bypass (no token concept; rapidfuzz score is
+        already partial-ratio-grounded).
+      - Head 3 winner: bypass (all tokens in _AIRLINE_AIRPORT_TOKENS
+        verified CLEAN in HIGH_NOISE per 2c.1 audit).
+      - Head 2 winner with HIGH_NOISE token AND no street number in
+        target: cap final score at 0.5.
+      - Otherwise: return signal score unchanged.
+
+    Provenance: production audit 2026-05-05 (2101 offers, 4202
+    address-instances) demolished R4's global 0.2 multiplier
+    (96.5% of real branded matches lacked street number; multiplier
+    locked out R7 floor relaxation). Option B uses street_number as
+    gate KEY only, where data shows it actually disambiguates road-
+    name from address.
+
+    Args:
+        pois: list of POI records (typically from POILookupResult.pois).
+            Distance-prefiltered internally to POI_RADIUS_M (100m).
+        target_address: the offer's address string (pickup or dropoff).
+
+    Returns:
+        (score, witness) tuple. score in [0.0, 1.0]; witness is
+        provenance string or None when score is 0.0.
+    """
+    if not pois or not target_address:
+        return 0.0, None
+
+    # Distance pre-filter -- caller-internal radius independent of cache
+    near_pois = [p for p in pois if p.dist_m <= POI_RADIUS_M]
+    if not near_pois:
+        return 0.0, None
+
+    # Head 1: fuzzy partial-ratio between each near-POI name and target
+    head1_score = 0.0
+    head1_witness: Optional[str] = None
+    for p in near_pois:
+        s = fuzz.partial_ratio(p.name, target_address) / 100.0
+        if s > head1_score:
+            head1_score = s
+            head1_witness = f"fuzzy:{p.name}"
+
+    # Head 2: branded co-reference (token equality on target side and POI side)
+    target_branded = detect_branded_token(target_address)
+    head2_score = 0.0
+    head2_witness: Optional[str] = None
+    head2_token_high_noise = False
+    if target_branded is not None:
+        target_token, target_high_noise = target_branded
+        for p in near_pois:
+            poi_branded = detect_branded_token(p.name)
+            if poi_branded is not None and poi_branded[0] == target_token:
+                head2_score = 1.0
+                head2_witness = f"branded:{target_token}"
+                head2_token_high_noise = target_high_noise
+                break
+
+    # Head 3: airport-type co-reference (target token in airline/airport
+    # set AND any near-POI has 'airport' substring in types)
+    head3_score = 0.0
+    head3_witness: Optional[str] = None
+    if target_branded is not None:
+        target_token, _ = target_branded
+        if target_token in _AIRLINE_AIRPORT_TOKENS:
+            if any("airport" in t for p in near_pois for t in p.types):
+                head3_score = 0.9
+                head3_witness = f"airport_type:{target_token}"
+
+    # Pick winning head by score
+    candidates = [
+        (head1_score, head1_witness, "head1"),
+        (head2_score, head2_witness, "head2"),
+        (head3_score, head3_witness, "head3"),
+    ]
+    winning_score, winning_witness, winning_head = max(
+        candidates, key=lambda c: c[0]
+    )
+
+    if winning_score == 0.0:
+        return 0.0, None
+
+    # Option B noise-gate: only fires when Head 2 wins with HIGH_NOISE
+    # token AND target lacks a leading street number.
+    if winning_head == "head2" and head2_token_high_noise:
+        if _STREET_NUMBER_RE.match(target_address) is None:
+            return min(winning_score, 0.5), winning_witness
+
+    return winning_score, winning_witness
 
 
 from dataclasses import dataclass

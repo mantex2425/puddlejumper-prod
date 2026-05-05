@@ -154,6 +154,22 @@ _EXTENDED_POI_TOKENS = set(POI_TYPE_MAP) | {
 }
 
 
+# Patch 2b (Phase 2c.2, 2026-05-05): airline/airport subset for
+# where_am_i._signal_poi_match Head 3 (airport-type co-reference).
+# All members verified CLEAN in HIGH_NOISE per 2c.1 audit (2101
+# offers, 2026-05-05) -- Head 3 wins always bypass the Option B
+# noise-gate. Subset invariant: _AIRLINE_AIRPORT_TOKENS subset of
+# _EXTENDED_POI_TOKENS (enforced by unit test in Patch 3).
+_AIRLINE_AIRPORT_TOKENS = frozenset({
+    # Airlines (Uber bare-airline drop-offs to IAH/HOU)
+    "united", "southwest airlines", "delta", "american airlines", "spirit",
+    "frontier", "alaska", "jetblue", "lufthansa", "british", "klm",
+    "emirates", "qatar",
+    # Airports / airport components
+    "iah", "hou", "hobby airport", "george bush", "terminal",
+})
+
+
 # ----------------------------------------------------------------------------
 # Compiled word-boundary pattern — single source of truth for both
 # _contains_poi_token and detect_branded_token.
