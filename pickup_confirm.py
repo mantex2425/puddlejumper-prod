@@ -34,20 +34,22 @@ def confirm_pickup():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Resolve current_offer_id — manual nail requires an active ride
-        cur.execute("""
-            SELECT current_offer_id
-            FROM app_private.driver_trip_state
-            WHERE driver_id = %s
-        """, (driver_id,))
-        row = cur.fetchone()
-        if not row or not row.get("current_offer_id"):
+        # Resolve bound_offer_id — manual nail requires an active ride.
+        #
+        # bound_offer_id is a HINT post-Sub-commit 1c (see driver_queue.py).
+        # This site trusts the hint: if the pointer is stale (L-19 class),
+        # the downstream FirePickup execution will fail loudly when it
+        # tries to load the offer's coords from offer_history. That's the
+        # desired behavior for manual nails — better to fail loudly here
+        # than to fire a pickup against an aged-out offer.
+        from driver_queue import DriverQueue
+        queue = DriverQueue(driver_id)
+        offer_id = queue.bound_offer_id(cur)
+        if not offer_id:
             return jsonify({
                 "status": "no_active_ride",
                 "message": "Manual pickup nail requires an active offer",
             }), 404
-
-        offer_id = row["current_offer_id"]
 
         # Build action and route through unified executor
         from driver_heartbeat import _execute_action

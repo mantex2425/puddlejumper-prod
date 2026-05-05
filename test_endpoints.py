@@ -275,6 +275,12 @@ def inspect_test_state():
         """, (driver_id,))
         decision_rows = cur.fetchone()["n"]
 
+        # NOTE: current_offer_id is a HINT post-Sub-commit 1c (see
+        # driver_queue.py / L-19). The /test/inspect endpoint is a
+        # forensic surface — we want to see the raw row state including
+        # any L-19-class staleness, NOT the self-healed snapshot view.
+        # If you want authoritative queue contents instead, call
+        # DriverQueue(driver_id).offer_ids_only(cur) and compare.
         cur.execute("""
             SELECT current_offer_id, heartbeat_at,
                    EXTRACT(EPOCH FROM (NOW() - heartbeat_at))::integer AS hb_age

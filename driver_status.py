@@ -22,7 +22,13 @@ def get_driver_status():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # ── Current state (1-bit memory: current_offer_id) ────────────
+        # ── Current state (HINT post-Sub-commit 1c: bound_offer_id) ────
+        # See driver_queue.py / L-19. This composite SELECT pulls the
+        # bound pointer alongside coords + heartbeat for the UI status
+        # payload; treat current_offer_id as advisory. For authoritative
+        # queue membership, route through DriverQueue.snapshot(). UI
+        # rendering can tolerate brief inconsistency during an L-19-class
+        # self-heal — next status poll converges.
         cur.execute("""
             SELECT
                 current_offer_id,

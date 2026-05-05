@@ -110,7 +110,13 @@ def run_monitor():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # ── Current 1-bit memory state ─────────────────────────
+        # ── Current 1-bit memory state (HINT post-Sub-commit 1c) ──
+        # See driver_queue.py / L-19. This composite SELECT pulls
+        # current_offer_id alongside heartbeat fields for the dashboard
+        # render; treat the value as advisory. For authoritative queue
+        # membership, route through DriverQueue.snapshot(). The IDLE/ACTIVE
+        # display can briefly lag during an L-19-class self-heal but
+        # converges within one heartbeat tick.
         cur.execute("""
             SELECT
                 current_offer_id,
@@ -122,9 +128,10 @@ def run_monitor():
         state_row = cur.fetchone()
 
         # IDLE = no active offer; ACTIVE = pickup fired, dropoff not yet.
-        # Maps cleanly to FirePickup/FireDropoff in driver_heartbeat.py
-        # _execute_action: FirePickup sets current_offer_id, FireDropoff
-        # clears it. The 1-bit memory model is the entire state surface.
+        # Maps to FirePickup/FireDropoff in driver_heartbeat.py: FirePickup
+        # binds current_offer_id (now via DriverQueue.bind), FireDropoff
+        # unbinds (DriverQueue.unbind). The 1-bit memory model is the
+        # entire state surface.
         current_state = "ACTIVE" if (state_row and state_row['current_offer_id']) else "IDLE"
 
         # ── Session stats (last 4 hours) — observability only ──

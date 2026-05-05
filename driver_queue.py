@@ -287,16 +287,46 @@ class DriverQueue:
             WHERE driver_id = %s
         """, (offer_id, self.driver_id))
 
-    def unbind(self, cur) -> None:
+    def unbind(self, cur, *, clear_heartbeat: bool = False) -> None:
         """Clear bound_offer_id. Wired by dispatch's FireDropoff execution
-        and by /api/v1/test/driver_state_reset. Idempotent: clearing an
+        and by /api/v1/test/reset_driver. Idempotent: clearing an
         already-NULL pointer is a normal write that changes no values.
+
+        Args:
+            cur: psycopg2 cursor.
+            clear_heartbeat: if True, ALSO clears heartbeat and
+                heartbeat_at columns on the same UPDATE. Used only by
+                test infrastructure that resets a driver's full row
+                state. Production callers (FireDropoff) use the default
+                False — heartbeat fields are owned by the heartbeat
+                handler's own write path, not the dispatch wiring.
+
+        Logging:
+            Default (clear_heartbeat=False): silent. FireDropoff fires
+            this on every dropoff (~thousands/day in production); we
+            don't want that volume in INFO logs.
+            clear_heartbeat=True: emits INFO with driver_id and the
+            "+heartbeat" qualifier so forensic timeline reconstruction
+            can distinguish a normal dropoff unbind from a test reset.
         """
-        cur.execute("""
-            UPDATE app_private.driver_trip_state
-            SET current_offer_id = NULL
-            WHERE driver_id = %s
-        """, (self.driver_id,))
+        if clear_heartbeat:
+            log.info(
+                "[driver_queue] unbind+heartbeat driver_id=%s",
+                self.driver_id,
+            )
+            cur.execute("""
+                UPDATE app_private.driver_trip_state
+                SET current_offer_id = NULL,
+                    heartbeat = NULL,
+                    heartbeat_at = NULL
+                WHERE driver_id = %s
+            """, (self.driver_id,))
+        else:
+            cur.execute("""
+                UPDATE app_private.driver_trip_state
+                SET current_offer_id = NULL
+                WHERE driver_id = %s
+            """, (self.driver_id,))
 
     # -------------------------------------------------------------------------
     # Test surface

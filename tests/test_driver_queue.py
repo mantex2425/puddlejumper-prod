@@ -415,6 +415,59 @@ def test_unbind_idempotent():
     assert cur.execute.call_count == 2
 
 
+def test_unbind_default_path_silent(caplog):
+    """Default unbind (clear_heartbeat=False) issues NO log records.
+
+    Regression guard: FireDropoff fires unbind() on every dropoff,
+    ~thousands/day in production. The default path must stay silent
+    to avoid drowning INFO logs. The clear_heartbeat=True branch is
+    the only one that logs (rarer, used only by test infrastructure).
+    """
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    with caplog.at_level(logging.INFO, logger="driver_queue"):
+        q.unbind(cur)
+
+    assert len(caplog.records) == 0
+
+
+def test_unbind_with_clear_heartbeat_clears_three_columns():
+    """clear_heartbeat=True: same single UPDATE, but clears
+    current_offer_id, heartbeat, AND heartbeat_at on one row.
+    Used by /api/v1/test/reset_driver to route the multi-column
+    teardown through the queue API instead of raw SQL."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.unbind(cur, clear_heartbeat=True)
+
+    cur.execute.assert_called_once()
+    sql, params = cur.execute.call_args[0]
+    assert "UPDATE app_private.driver_trip_state" in sql
+    assert "current_offer_id = NULL" in sql
+    assert "heartbeat = NULL" in sql
+    assert "heartbeat_at = NULL" in sql
+    assert "WHERE driver_id = %s" in sql
+    assert params == (DRIVER_ID,)
+
+
+def test_unbind_with_clear_heartbeat_emits_info_log(caplog):
+    """clear_heartbeat=True emits an INFO log with the +heartbeat
+    qualifier so forensic timeline reconstruction can distinguish a
+    normal dropoff unbind from a test reset."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    with caplog.at_level(logging.INFO, logger="driver_queue"):
+        q.unbind(cur, clear_heartbeat=True)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "unbind+heartbeat" in m and DRIVER_ID in m for m in msgs
+    ), f"Expected unbind+heartbeat log with driver_id; got: {msgs}"
+
+
 # =============================================================================
 # force_bind — test-only escape hatch
 # =============================================================================

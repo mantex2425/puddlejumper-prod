@@ -34,19 +34,16 @@ def confirm_dropoff():
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        cur.execute("""
-            SELECT current_offer_id
-            FROM app_private.driver_trip_state
-            WHERE driver_id = %s
-        """, (driver_id,))
-        row = cur.fetchone()
-        if not row or not row.get("current_offer_id"):
+        # Resolve bound_offer_id — manual nail requires an active ride.
+        # See pickup_confirm.py for the "trust the hint" rationale.
+        from driver_queue import DriverQueue
+        queue = DriverQueue(driver_id)
+        offer_id = queue.bound_offer_id(cur)
+        if not offer_id:
             return jsonify({
                 "status": "no_active_ride",
                 "message": "Manual dropoff nail requires an active offer",
             }), 404
-
-        offer_id = row["current_offer_id"]
 
         from driver_heartbeat import _execute_action
         from dispatch import FireDropoff

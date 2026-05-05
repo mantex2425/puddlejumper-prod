@@ -297,19 +297,17 @@ def make_decision():
         # 2026-05-04). The new architecture has only NULL or set; we
         # synthesize the legacy enum values Android still reads.
         # See docs/RIDE_LIFECYCLE.md §1.
+        # bound_offer_id is a HINT post-Sub-commit 1c (see driver_queue.py).
+        # This site synthesizes the legacy IN_TRIP/UNCOMMITTED enum for the
+        # Android UI; if the hint is stale (L-19 class), the UI briefly
+        # shows IN_TRIP for an offer that has aged out — but the next
+        # heartbeat tick will self-heal via snapshot()'s invariant and
+        # the next decision request will see the corrected state.
+        # Acceptable lag for a UI-only synthesis.
         try:
-            cur.execute(
-                "SELECT current_offer_id "
-                "FROM app_private.driver_trip_state "
-                "WHERE driver_id = %s",
-                (uid,)
-            )
-            _row = cur.fetchone()
-            result["driverState"] = (
-                "IN_TRIP"
-                if (_row and _row.get("current_offer_id"))
-                else "UNCOMMITTED"
-            )
+            from driver_queue import DriverQueue
+            _bound = DriverQueue(uid).bound_offer_id(cur)
+            result["driverState"] = "IN_TRIP" if _bound else "UNCOMMITTED"
         except Exception as _state_err:
             logging.warning(f"[STATE] driverState lookup failed: {_state_err}")
             result["driverState"] = "UNCOMMITTED"
