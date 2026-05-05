@@ -966,6 +966,38 @@ class DiagnosticContext:
     stop_context: str
     per_target_outcomes: list  # list[tuple[str, str, MatchOutcome]]
 
+    def outcome_for(self, match) -> "Optional[MatchOutcome]":
+        """Return the MatchOutcome for a WAIMatch, by (offer_id, location_type).
+
+        Bridges the WAIMatch <-> MatchOutcome encapsulation gap (per
+        SIMPLIFIED_ARCHITECTURE.md s10 A8). WAIMatch is intentionally
+        minimal (offer_id, location_type, confidence) per its frozen
+        public contract; the forensic fields (reason, target_address,
+        signals) live on the internal MatchOutcome carrier.
+
+        per_target_outcomes is populated by _evaluate for every candidate
+        considered, regardless of whether it cleared WAI_CONFIDENCE_THRESHOLD.
+        Lookup is by (offer_id, location_type) key.
+
+        Returns None if no outcome matches the (offer_id, location_type)
+        of the given match. Defensive: every WAIMatch returned by
+        evaluate() is projected from a MatchOutcome at the bottom of
+        _evaluate, so the lookup should always succeed in production
+        paths. Test code that constructs WAIMatch manually may
+        legitimately hit None.
+
+        match is intentionally untyped to avoid a circular import with
+        pudo_types. Implementation is duck-typed on .offer_id and
+        .location_type.
+
+        Phase 1B (2026-05-05): added for forensic restoration.
+        Gemini-ratified per PHASE_1B_PROPOSAL_v2.md Section 1, Decision A1.
+        """
+        for offer_id, location_type, outcome in self.per_target_outcomes:
+            if offer_id == match.offer_id and location_type == match.location_type:
+                return outcome
+        return None
+
 
 class WhereAmI:
     """Continuous location awareness primitive.

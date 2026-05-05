@@ -272,3 +272,47 @@ def test_case_g_pickup_rematch_while_active():
     matches = [_wm("123", "pickup")]
     actions = dispatch(matches, "123", {"123"})
     assert actions == [LogPickupRematch("123")]
+
+
+
+# ============================================================================
+# Step F: _derive_post_offer_id (Phase 1B Deterministic Fold)
+# ============================================================================
+#
+# Test 5 from PHASE_1B_PROPOSAL_v2.md. Validates the post-dispatch
+# current_offer_id derivation in isolation from the heartbeat handler.
+
+from driver_heartbeat import _derive_post_offer_id
+
+
+def test_derive_post_offer_id_no_actions_returns_pre():
+    """Empty executed_actions -> post == pre."""
+    assert _derive_post_offer_id([], None) is None
+    assert _derive_post_offer_id([], "offer_X") == "offer_X"
+
+
+def test_derive_post_offer_id_fire_pickup_binds():
+    """FirePickup(N) -> post == N."""
+    assert _derive_post_offer_id([FirePickup("offer_A")], None) == "offer_A"
+    # Even when pre is set (re-pickup edge), FirePickup wins
+    assert _derive_post_offer_id([FirePickup("offer_B")], "offer_A") == "offer_B"
+
+
+def test_derive_post_offer_id_fire_dropoff_clears():
+    """FireDropoff(...) -> post == None."""
+    assert _derive_post_offer_id([FireDropoff("offer_A")], "offer_A") is None
+    # Even when pre was None (defensive -- shouldn't occur in production)
+    assert _derive_post_offer_id([FireDropoff("offer_X")], None) is None
+
+
+def test_derive_post_offer_id_case_d_dropoff_then_pickup():
+    """§5.2 Case D: FireDropoff(A) then FirePickup(B) -> post == B."""
+    actions = [FireDropoff("offer_A"), FirePickup("offer_B")]
+    assert _derive_post_offer_id(actions, "offer_A") == "offer_B"
+
+
+def test_derive_post_offer_id_log_actions_unchanged():
+    """LogNoMatch / LogPickupRematch / LogAmbiguousMatch -> no state change."""
+    log_actions = [LogNoMatch(), LogPickupRematch("offer_A"), LogAmbiguousMatch((), "test_ambiguous")]
+    assert _derive_post_offer_id(log_actions, None) is None
+    assert _derive_post_offer_id(log_actions, "offer_A") == "offer_A"

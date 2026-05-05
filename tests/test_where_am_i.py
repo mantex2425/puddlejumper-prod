@@ -1783,3 +1783,121 @@ def test_signal_adjacent_road_match_off_wire_allows_adjacency():
         current_road_class="unknown",
     )
     assert result_unknown == 1.0, "unknown class must allow adjacency"
+
+
+
+# =============================================================================
+# Step F: outcome_for tests
+# =============================================================================
+
+def test_outcome_for_returns_matching_outcome():
+    """Positive case: outcome_for returns the MatchOutcome whose
+    (offer_id, location_type) matches the given WAIMatch.
+    """
+    from where_am_i import DiagnosticContext, MatchOutcome
+    from pudo_types import WAIMatch
+
+    outcome_a_pickup = MatchOutcome(
+        matched=True, confidence=0.50, corrected_lat=None, corrected_lng=None,
+        reason="prox_hit", pudo_type="pickup", target_address="123 Main St",
+        signals={"on_target_road": 1.0},
+    )
+    outcome_a_dropoff = MatchOutcome(
+        matched=False, confidence=0.20, corrected_lat=None, corrected_lng=None,
+        reason="no_match", pudo_type=None, target_address="456 Oak Ave",
+        signals=None,
+    )
+    outcome_b_pickup = MatchOutcome(
+        matched=True, confidence=0.45, corrected_lat=None, corrected_lng=None,
+        reason="prox_partial", pudo_type="pickup", target_address="789 Elm Dr",
+        signals={"on_target_road": 0.0},
+    )
+
+    diag = DiagnosticContext(
+        cluster=None,
+        topology=None,
+        cluster_revisit=False,
+        stop_context="unknown_stop",
+        per_target_outcomes=[
+            ("offer_A", "pickup", outcome_a_pickup),
+            ("offer_A", "dropoff", outcome_a_dropoff),
+            ("offer_B", "pickup", outcome_b_pickup),
+        ],
+    )
+
+    match = WAIMatch(offer_id="offer_A", location_type="pickup", confidence=0.50)
+    result = diag.outcome_for(match)
+
+    assert result is outcome_a_pickup, (
+        "outcome_for should return the (offer_A, pickup) outcome by identity"
+    )
+
+
+def test_outcome_for_disambiguates_pickup_vs_dropoff():
+    """Same offer_id with different location_types must be distinguished."""
+    from where_am_i import DiagnosticContext, MatchOutcome
+    from pudo_types import WAIMatch
+
+    pickup_outcome = MatchOutcome(
+        matched=True, confidence=0.50, corrected_lat=None, corrected_lng=None,
+        reason="pickup_match", pudo_type="pickup", target_address="P-addr",
+        signals={"on_target_road": 1.0},
+    )
+    dropoff_outcome = MatchOutcome(
+        matched=True, confidence=0.55, corrected_lat=None, corrected_lng=None,
+        reason="dropoff_match", pudo_type="dropoff", target_address="D-addr",
+        signals={"on_target_road": 1.0},
+    )
+
+    diag = DiagnosticContext(
+        cluster=None, topology=None, cluster_revisit=False,
+        stop_context="unknown_stop",
+        per_target_outcomes=[
+            ("offer_X", "pickup", pickup_outcome),
+            ("offer_X", "dropoff", dropoff_outcome),
+        ],
+    )
+
+    pickup_match = WAIMatch(offer_id="offer_X", location_type="pickup", confidence=0.50)
+    dropoff_match = WAIMatch(offer_id="offer_X", location_type="dropoff", confidence=0.55)
+
+    assert diag.outcome_for(pickup_match) is pickup_outcome
+    assert diag.outcome_for(dropoff_match) is dropoff_outcome
+
+
+def test_outcome_for_returns_none_when_no_match():
+    """Defensive: returns None for an offer_id absent from per_target_outcomes."""
+    from where_am_i import DiagnosticContext, MatchOutcome
+    from pudo_types import WAIMatch
+
+    outcome = MatchOutcome(
+        matched=True, confidence=0.50, corrected_lat=None, corrected_lng=None,
+        reason="match", pudo_type="pickup", target_address="addr",
+        signals=None,
+    )
+
+    diag = DiagnosticContext(
+        cluster=None, topology=None, cluster_revisit=False,
+        stop_context="unknown_stop",
+        per_target_outcomes=[("offer_known", "pickup", outcome)],
+    )
+
+    match = WAIMatch(offer_id="offer_unknown", location_type="pickup", confidence=0.50)
+
+    assert diag.outcome_for(match) is None
+
+
+def test_outcome_for_empty_per_target_outcomes_returns_none():
+    """Edge case: empty per_target_outcomes returns None for any match."""
+    from where_am_i import DiagnosticContext
+    from pudo_types import WAIMatch
+
+    diag = DiagnosticContext(
+        cluster=None, topology=None, cluster_revisit=False,
+        stop_context="unknown_stop",
+        per_target_outcomes=[],
+    )
+
+    match = WAIMatch(offer_id="any", location_type="pickup", confidence=0.0)
+
+    assert diag.outcome_for(match) is None

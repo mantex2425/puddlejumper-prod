@@ -465,11 +465,40 @@ def _execute_action(action, cur, conn, driver_id, cluster=None,
 # LOG: pudo_decision_context INSERT (§3 step 8 — always fires)
 # =============================================================================
 
+def _derive_post_offer_id(executed_actions, current_offer_id):
+    """Derive post-dispatch current_offer_id from the executed action list.
+
+    Phase 1B Deterministic Fold (Gemini-ratified Option B,
+    PHASE_1B_PROPOSAL_v2.md §2). Mirrors dispatch.py module-docstring
+    wiring rules:
+
+        FirePickup(offer_id) -> current_offer_id = offer_id
+        FireDropoff(...)     -> current_offer_id = None
+        Log* actions         -> no state change
+
+    Returns the offer_id string the driver is now bound to, or None if
+    they were just dropped off (or were never bound and no FirePickup
+    fired). When executed_actions is empty, returns the input
+    current_offer_id unchanged.
+
+    For the rare Case D scenario (§5.2: implicit cancel + new pickup in
+    one heartbeat), dispatch.py emits FireDropoff first then FirePickup,
+    so the fold yields the new offer_id -- the truthful post-state.
+    """
+    post = current_offer_id
+    for action in executed_actions:
+        if isinstance(action, FirePickup):
+            post = action.offer_id
+        elif isinstance(action, FireDropoff):
+            post = None
+    return post
+
+
 def _log_decision_context(
     cur, driver_id, body,
     current_lat, current_lng, speed_mph, gps_accuracy_m,
     current_offer_id,
-    diagnostics, matches, actions,
+    diagnostics, matches, executed_actions,
     dispatch_executed, dispatch_error_msg,
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
@@ -479,24 +508,44 @@ def _log_decision_context(
     empty, even when WAI returned no cluster, this INSERT runs and records
     what we saw.
 
-    Column policy (Cut B3): kept columns are listed below; dropped columns
-    (primary_offer_id, wai_status, wai_target_address, wai_reason,
-    wai_on_target_road, wai_current_road, wai_off_wire_duration_s,
-    planner_target_state, planner_corrected_lat, planner_corrected_lng,
-    planner_reason) become vestigial NULL in the table — eligible for
-    DROP COLUMN in a future schema-cleanup cut.
+    Phase 1B (2026-05-05): forensic restoration.
+      - Restored 5 wai_* bindings dropped by Cut B3:
+        target_address, reason, on_target_road, current_road,
+        off_wire_duration_s. Sourced from MatchOutcome (looked up via
+        DiagnosticContext.outcome_for) and RoadTopology.
+      - Added wai_current_road_class binding (Phase 1A signal exposure).
+      - Added 3 poi_* columns bound NULL until Phase 2 (Operation Strip
+        Mall) populates them.
+      - Fixed Cut B3 double-binding bug for current_offer_id: at_eval
+        now binds the PRE-dispatch value (the parameter); current_offer_id
+        binds the POST-dispatch value derived via deterministic fold over
+        executed_actions (Gemini-ratified Option B).
+
+    Tie-handling: when matches contains ties at max confidence (§3 Reduce
+    step), top_match = matches[0] is stable / input-ordered (first-among-
+    equals from queue order in the Map step). Per-target detail for all
+    matches lives in diagnostics.per_target_outcomes; logging that
+    fan-out is out of 1B scope.
     """
     cluster = diagnostics.cluster
+    topo = diagnostics.topology
 
-    # Project Action list into a forensic-readable string. Multiple actions
-    # (Case D, §5.2) join with '+'.
-    action_str = "+".join(type(a).__name__ for a in actions) if actions else None
+    # Project executed-action list into a forensic-readable string.
+    # Multiple actions (Case D, §5.2) join with '+'. We project executed_
+    # actions (not the dispatched intent) because forensic truthfulness
+    # tracks what actually fired; failed dispatches surface via
+    # dispatch_error.
+    action_str = "+".join(type(a).__name__ for a in executed_actions) if executed_actions else None
 
-    # Match-side fields: take the highest-confidence match for the legacy
-    # single-match columns. Per-target detail is in
-    # diagnostics.per_target_outcomes — projection into a separate table or
-    # JSONB column is a future cut.
+    # Top match → outcome lookup for forensic fields (per WAIMatch's
+    # encapsulation discipline: forensic fields live on MatchOutcome,
+    # accessed via DiagnosticContext.outcome_for).
     top_match = matches[0] if matches else None
+    top_outcome = diagnostics.outcome_for(top_match) if top_match else None
+
+    # Deterministic fold (Phase 1B Option B): derive post-dispatch
+    # current_offer_id. See _derive_post_offer_id docstring for rules.
+    post_offer_id = _derive_post_offer_id(executed_actions, current_offer_id)
 
     cur.execute(
         """
@@ -504,32 +553,47 @@ def _log_decision_context(
             driver_id, current_offer_id_at_eval, current_offer_id,
             lat, lng, speed_mph, heading, gps_accuracy_m, gps_age_s,
             wai_pudo_type, wai_offer_id, wai_confidence,
+            wai_target_address, wai_reason, wai_on_target_road,
+            wai_current_road, wai_current_road_class, wai_off_wire_duration_s,
             wai_cluster_revisit,
             cluster_lat, cluster_lng, cluster_size, cluster_duration_s,
+            poi_lookup_source, poi_match_score, poi_top_names,
             planner_action,
             dispatch_executed, dispatch_error
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
             %s, %s, %s,
+            %s, %s, %s,
+            %s, %s, %s,
             %s,
             %s, %s, %s, %s,
+            %s, %s, %s,
             %s,
             %s, %s
         )
         """,
         (
-            driver_id, current_offer_id, current_offer_id,
+            driver_id, current_offer_id, post_offer_id,
             current_lat, current_lng, speed_mph,
             body.get('heading'), gps_accuracy_m, body.get('gpsAgeSec'),
             top_match.location_type if top_match else None,
             top_match.offer_id if top_match else None,
             top_match.confidence if top_match else None,
+            top_outcome.target_address if top_outcome else None,
+            top_outcome.reason if top_outcome else None,
+            (top_outcome.signals.get('on_target_road') if (top_outcome and top_outcome.signals) else None),
+            topo.current_road if topo else None,
+            topo.current_road_class if topo else None,
+            topo.off_wire_duration_s if topo else None,
             diagnostics.cluster_revisit,
             cluster.median_lat if cluster else None,
             cluster.median_lng if cluster else None,
             cluster.n if cluster else None,
             cluster.duration_s if cluster else None,
+            None,  # poi_lookup_source (Phase 2)
+            None,  # poi_match_score (Phase 2)
+            None,  # poi_top_names (Phase 2)
             action_str,
             dispatch_executed,
             dispatch_error_msg,
@@ -667,7 +731,7 @@ def post_heartbeat():
             cur, driver_id, body,
             current_lat, current_lng, speed_mph, gps_accuracy_m,
             current_offer_id,
-            diagnostics, matches, actions,
+            diagnostics, matches, executed_actions,
             dispatch_executed, dispatch_error_msg,
         )
     except Exception as e:
