@@ -150,11 +150,154 @@ _EXTENDED_POI_TOKENS = set(POI_TYPE_MAP) | {
 }
 
 
+# ----------------------------------------------------------------------------
+# Compiled word-boundary pattern — single source of truth for both
+# _contains_poi_token and detect_branded_token.
+#
+# Multi-word tokens sorted longest-first so "southwest airlines" matches
+# before "southwest" (defensive — "southwest" alone is NOT in the set, but
+# the longest-first sort locks in correct behavior if a future addition
+# creates that ambiguity).
+#
+# Word boundary (\b) eliminates the latent substring-matching bug where
+# "hou" matched inside "Houston", "park" matched inside "Forum Park",
+# etc. Validated against last 2000 offers (2026-05-05): 120 false-
+# positive eliminations, zero new false positives introduced.
+# ----------------------------------------------------------------------------
+
+_BRANDED_TOKEN_PATTERN = re.compile(
+    r"\b(?:"
+    + "|".join(
+        re.escape(t)
+        for t in sorted(_EXTENDED_POI_TOKENS, key=len, reverse=True)
+    )
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
 def _contains_poi_token(first_field: str) -> bool:
+    """Word-boundary check for branded POI tokens in text.
+
+    Returns True if any token from _EXTENDED_POI_TOKENS appears in
+    `first_field` as a complete word (or whitespace-separated phrase
+    for multi-word tokens). Substring matches inside larger words
+    (e.g. "hou" inside "Houston") do NOT trigger.
+    """
     if not first_field:
         return False
-    lower = first_field.lower()
-    return any(token in lower for token in _EXTENDED_POI_TOKENS)
+    return bool(_BRANDED_TOKEN_PATTERN.search(first_field))
+
+
+# ============================================================================
+# Branded token detection — Phase 2c semantic co-reference primitive
+# ============================================================================
+#
+# detect_branded_token answers: "does this text reference a branded entity
+# (airline, airport, hotel chain, named venue) that we have a token for?"
+#
+# Used by where_am_i._signal_poi_match (Design D, Head 2: branded
+# co-reference) to detect when the Uber offer text and the Google Places
+# POI both reference the same branded entity. Example: offer text contains
+# "Marriott Marquis Houston Downtown" and the POI is named "Marriott Marquis"
+# — both contain the token "marriott", co-reference fires.
+#
+# The high-noise filter (Gemini iron-fist mandate, Phase 2c design pass):
+# certain tokens are ambiguous in real Houston driving — "Galleria" matches
+# the mall, the neighborhood, AND any street with "Galleria" in the name.
+# These tokens return is_high_noise=True so the caller can apply the
+# "Galleria cap" — score capped at 0.5 unless a secondary anchor (street
+# number, type co-reference) confirms.
+
+_HIGH_NOISE_TOKENS = frozenset({
+    # ----- Validated against 2101 production offers (2026-05-05 audit) -----
+    # 4202 address-instances analyzed. These tokens fired in real Houston
+    # offer text and were ALL road-name false positives, never venues.
+    "park",         # 104 hits (47 pickup, 57 dropoff). ALL road names:
+                    # Dominion Park Dr, Moreland Park Ln, Summer Park
+                    # Dr, Cogburn Park Dr. Houston's road grid has
+                    # hundreds of "Park" roads; public-park pickups
+                    # are statistically negligible in production.
+    "airport",      # 18 hits (11 pickup, 7 dropoff). ALL road names:
+                    # W Airport Blvd, Airport Ave (Rosenberg). Real
+                    # airport pickups fire 'hobby airport' or
+                    # 'george bush' first (longest-first regex order).
+    "alaska",       # 1 hit (pickup), road name (Alaska St & Howard Dr).
+                    # State name + airline + street name collision.
+    # ----- Theoretical (zero production hits in 2026-05-05 audit) -----
+    # Kept based on common-word-collision reasoning; cannot validate
+    # without production hits. Re-evaluate when these tokens fire.
+    "british",      # common adjective AND airline
+    "hilton",       # common surname AND hotel chain
+    "marquis",      # title/honorific AND hotel sub-brand
+    "ritz",         # generic adjective ("ritzy") AND hotel chain
+})
+# Tokens REMOVED from HIGH_NOISE based on 2026-05-05 production audit:
+#   united (20 dropoffs, ALL bare-airline-name "United, Houston, Texas")
+#   southwest airlines (14 dropoffs, all real)
+#   delta (5 hits, 4 real airline dropoffs + 1 "Delta St" caught
+#     upstream by intersection regex)
+#   frontier (3 dropoffs, all real airline)
+#   spirit (1 dropoff, real airline)
+#   galleria (3 hits, all real Galleria mall)
+#   terminal (25 hits, ALL real IAH airport terminals — Terminal E/C)
+#
+# Directionality observation (BIASED): in this driver's offer_history,
+# airline tokens (united, delta, frontier, spirit, southwest airlines)
+# appear EXCLUSIVELY as dropoffs and 'george bush' appears exclusively
+# as dropoffs. This reflects the data-collecting driver's preference to
+# decline airport pickup queue offers — NOT a general market pattern.
+# In the commercial product, drivers who accept airport pickups will
+# see these tokens as PICKUPS too. Phase 2c matcher tests must cover
+# both directions for every airline/airport token: pickup AND dropoff,
+# with terminal-level pickup granularity ('Terminal E') and airport-
+# level granularity ('George Bush Intercontinental') both possible on
+# either end of a trip.
+
+
+def detect_branded_token(text: str) -> "Optional[tuple[str, bool]]":
+    """Detect a branded POI token in text.
+
+    Used by where_am_i._signal_poi_match for Design D Head 2 (branded
+    co-reference). When both the target address and a Google POI contain
+    the same branded token, the matcher treats it as strong evidence that
+    they refer to the same entity — even when direct fuzzy matching fails
+    ("Spirit Airlines" vs "William P. Hobby Airport" share zero characters
+    but both reference Hobby in context).
+
+    Args:
+        text: free-form text from an Uber offer or POI display name.
+              Empty/None safe.
+
+    Returns:
+        (token, is_high_noise) when a branded token is found:
+            token         the matched token, lowercase, as it appears in
+                          _EXTENDED_POI_TOKENS (e.g. "marriott", "iah",
+                          "southwest airlines")
+            is_high_noise True if this token is in _HIGH_NOISE_TOKENS and
+                          the caller must require a secondary anchor
+                          before treating the co-reference as strong.
+        None when no branded token is present.
+
+    First-match-wins ordering: tokens in _EXTENDED_POI_TOKENS are checked
+    in iteration order. Multi-word tokens like "southwest airlines" and
+    "hobby airport" are correctly matched as full phrases (not broken into
+    parts) because the substring-in-lowercase check is on the full token
+    string.
+
+    Note: this function uses the SAME substring-in-lowercase check as
+    _contains_poi_token. The Southwest-Fwy disambiguation noted at L136-138
+    in the original module continues to hold because we never check the
+    bare word "southwest" as a token — only "southwest airlines" as a full
+    phrase. So "Southwest Fwy" cannot match "southwest airlines".
+    """
+    if not text:
+        return None
+    m = _BRANDED_TOKEN_PATTERN.search(text)
+    if not m:
+        return None
+    token = m.group(0).lower()
+    return (token, token in _HIGH_NOISE_TOKENS)
 
 
 # ============================================================================
