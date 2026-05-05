@@ -1,0 +1,477 @@
+"""Tests for driver_queue.py — DriverQueue API + L-19 invariant.
+
+Mocking pattern: MagicMock cursor with fetchone/fetchall return values
+shaped as RealDictCursor would deliver them (psycopg2.extras.RealDictRow,
+which dict-likes work for at the test layer).
+
+Coverage:
+  - Construction & guards (RuntimeError when builder missing)
+  - offer_ids_only: empty / single / multiple, query shape
+  - bound_offer_id: None / NULL / populated
+  - snapshot: happy path / empty / L-19 INVARIANT_VIOLATION / unbuildable geocode
+  - offers: happy / empty
+  - bind / unbind: UPDATE issued correctly, idempotency
+  - force_bind: UPSERT issued, INFO log emitted
+  - Offer / QueueSnapshot dataclass behavior
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from driver_queue import (
+    DriverQueue,
+    Offer,
+    QueueSnapshot,
+    GC_BUFFER_MULT,
+    GC_MIN_MINUTES,
+    GC_MAX_MINUTES,
+    GC_NULL_PICKUP_MIN,
+    GC_NULL_TRIP_MIN,
+)
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+DRIVER_ID = "test_driver_uid_xyz"
+
+
+def make_cursor():
+    """A bare MagicMock cursor. Tests configure fetchone / fetchall as needed."""
+    cur = MagicMock()
+    cur.fetchone = MagicMock()
+    cur.fetchall = MagicMock()
+    cur.execute = MagicMock()
+    return cur
+
+
+def make_offer_row(offer_id, address_prefix="123 Main St", lat=29.76, lng=-95.37,
+                   created_at=None, pickup_minutes=10, trip_minutes=20):
+    """Shape the SELECT in _project_offers returns. RealDictRow is dict-compatible."""
+    return {
+        "id": int(offer_id),
+        "pickup_address": f"{address_prefix} pickup",
+        "dropoff_address": f"{address_prefix} dropoff",
+        "pickup_lat": lat,
+        "pickup_lng": lng,
+        "dropoff_lat": lat + 0.01,
+        "dropoff_lng": lng + 0.01,
+        "created_at": created_at or datetime.now(timezone.utc),
+        "raw_min": pickup_minutes + trip_minutes,
+    }
+
+
+def passthrough_builder(address, lat, lng):
+    """Test builder: returns a sentinel dict that DriverQueue treats as a TargetSpec."""
+    if address is None:
+        return None
+    return {"address": address, "lat": lat, "lng": lng}
+
+
+def null_returning_builder(address, lat, lng):
+    """Test builder that always returns None (simulates unbuildable geocode)."""
+    return None
+
+
+# =============================================================================
+# Construction & guards
+# =============================================================================
+
+def test_construct_without_builder_succeeds():
+    q = DriverQueue(DRIVER_ID)
+    assert q.driver_id == DRIVER_ID
+    assert q._build_target_spec is None
+
+
+def test_construct_with_builder_stores_it():
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    assert q._build_target_spec is passthrough_builder
+
+
+def test_snapshot_without_builder_raises_runtime_error():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    with pytest.raises(RuntimeError, match="target_spec_builder"):
+        q.snapshot(cur)
+
+
+def test_offers_without_builder_raises_runtime_error():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    with pytest.raises(RuntimeError, match="target_spec_builder"):
+        q.offers(cur)
+
+
+# =============================================================================
+# offer_ids_only — no builder needed
+# =============================================================================
+
+def test_offer_ids_only_empty_queue():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchall.return_value = []
+
+    result = q.offer_ids_only(cur)
+
+    assert result == ()
+    cur.execute.assert_called_once()
+    sql, params = cur.execute.call_args[0]
+    assert "FROM app_private.offer_history" in sql
+    assert "actual_dropoff_at IS NULL" in sql
+    assert params[0] == DRIVER_ID  # driver_id binding position
+
+
+def test_offer_ids_only_single_offer():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchall.return_value = [{"offer_id": "12345"}]
+
+    result = q.offer_ids_only(cur)
+
+    assert result == ("12345",)
+
+
+def test_offer_ids_only_multiple_offers_preserves_order():
+    """The SQL ORDER BY created_at DESC; we just pass through whatever rows return."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchall.return_value = [
+        {"offer_id": "9999"},
+        {"offer_id": "9998"},
+        {"offer_id": "9997"},
+    ]
+
+    result = q.offer_ids_only(cur)
+
+    assert result == ("9999", "9998", "9997")
+
+
+def test_offer_ids_only_query_uses_canonical_gc_constants():
+    """Regression guard: the GC tuning constants must thread into the query."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchall.return_value = []
+
+    q.offer_ids_only(cur)
+
+    _, params = cur.execute.call_args[0]
+    # Params: (driver_id, NULL_PICKUP_MIN, NULL_TRIP_MIN, BUFFER_MULT, MIN, MAX)
+    assert params == (
+        DRIVER_ID,
+        GC_NULL_PICKUP_MIN,
+        GC_NULL_TRIP_MIN,
+        GC_BUFFER_MULT,
+        GC_MIN_MINUTES,
+        GC_MAX_MINUTES,
+    )
+
+
+# =============================================================================
+# bound_offer_id — read-only hint access
+# =============================================================================
+
+def test_bound_offer_id_no_row_returns_none():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchone.return_value = None
+
+    assert q.bound_offer_id(cur) is None
+
+
+def test_bound_offer_id_null_value_returns_none():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchone.return_value = {"current_offer_id": None}
+
+    assert q.bound_offer_id(cur) is None
+
+
+def test_bound_offer_id_populated_returns_str():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchone.return_value = {"current_offer_id": "7712"}
+
+    assert q.bound_offer_id(cur) == "7712"
+
+
+def test_bound_offer_id_int_value_coerced_to_str():
+    """driver_trip_state.current_offer_id is text, but defensive coercion
+    matches _project_queue's behavior — `str(val) if val else None`."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+    cur.fetchone.return_value = {"current_offer_id": 7712}
+
+    assert q.bound_offer_id(cur) == "7712"
+
+
+# =============================================================================
+# snapshot — the L-19 vaccine
+# =============================================================================
+
+def test_snapshot_happy_path_bound_in_queue():
+    """Standard case: queue has the offer, bound points at it, no warning."""
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    # Fetchall returns offers; fetchone returns the bound row
+    cur.fetchall.return_value = [make_offer_row("7712")]
+    cur.fetchone.return_value = {"current_offer_id": "7712"}
+
+    snap = q.snapshot(cur)
+
+    assert isinstance(snap, QueueSnapshot)
+    assert len(snap.offers) == 1
+    assert snap.offers[0].offer_id == "7712"
+    assert snap.bound_offer_id == "7712"
+
+
+def test_snapshot_empty_queue_null_bound():
+    """Pre-pickup natural state: no offers seen, no binding."""
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = []
+    cur.fetchone.return_value = {"current_offer_id": None}
+
+    snap = q.snapshot(cur)
+
+    assert snap.is_empty
+    assert snap.bound_offer_id is None
+    assert snap.offer_ids == frozenset()
+
+
+def test_snapshot_l19_invariant_violation_self_heals(caplog):
+    """THE MARQUEE TEST: bound_offer_id points at an offer not in queue.
+
+    L-19's exact failure mode: priming current_offer_id without a fresh
+    offer_history row. snapshot() must (a) return None for the hint and
+    (b) emit a WARNING tagged INVARIANT_VIOLATION carrying the full
+    forensic payload.
+    """
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    # Queue has offer 9000, but bound_offer_id points at 7712 (stale)
+    cur.fetchall.return_value = [make_offer_row("9000")]
+    cur.fetchone.return_value = {"current_offer_id": "7712"}
+
+    with caplog.at_level(logging.WARNING, logger="driver_queue"):
+        snap = q.snapshot(cur)
+
+    # The hint is self-healed to None; the queue itself is preserved.
+    assert snap.bound_offer_id is None
+    assert len(snap.offers) == 1
+    assert snap.offers[0].offer_id == "9000"
+
+    # The forensic warning fired with all the diagnostic data L-19's hunt
+    # would have wanted in a single line.
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert "INVARIANT_VIOLATION" in msg
+    assert "driver_id=" + DRIVER_ID in msg
+    assert "bound_offer_id=7712" in msg
+    assert "queue_size=1" in msg
+    assert "queue_offer_ids=[9000]" in msg
+
+
+def test_snapshot_l19_violation_with_empty_queue(caplog):
+    """The exact L-19 scenario: queue is empty (offers aged out), bound
+    still set. Self-heal to None, log the full payload including empty
+    queue list."""
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = []
+    cur.fetchone.return_value = {"current_offer_id": "7712"}
+
+    with caplog.at_level(logging.WARNING, logger="driver_queue"):
+        snap = q.snapshot(cur)
+
+    assert snap.bound_offer_id is None
+    assert snap.is_empty
+    msg = caplog.records[0].getMessage()
+    assert "queue_size=0" in msg
+    assert "queue_offer_ids=[]" in msg
+
+
+def test_snapshot_l19_violation_logs_sorted_ids(caplog):
+    """Forensic stability: queue ID list in the warning is sorted, so a
+    grep for a known-offending ID matches deterministically regardless
+    of created_at ordering."""
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = [
+        make_offer_row("9999"),
+        make_offer_row("1111"),
+        make_offer_row("5555"),
+    ]
+    cur.fetchone.return_value = {"current_offer_id": "7712"}
+
+    with caplog.at_level(logging.WARNING, logger="driver_queue"):
+        q.snapshot(cur)
+
+    assert "queue_offer_ids=[1111,5555,9999]" in caplog.records[0].getMessage()
+
+
+def test_snapshot_unbuildable_geocode_skipped(caplog):
+    """Behavior preservation from _project_queue: offers with null
+    pickup or dropoff specs get logged and excluded."""
+    q = DriverQueue(DRIVER_ID, target_spec_builder=null_returning_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = [make_offer_row("7712")]
+    cur.fetchone.return_value = {"current_offer_id": None}
+
+    with caplog.at_level(logging.WARNING, logger="driver_queue"):
+        snap = q.snapshot(cur)
+
+    assert snap.is_empty
+    # Warning fired, but it's the geocode warning, not invariant violation
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("unbuildable geocode" in m for m in msgs)
+    assert not any("INVARIANT_VIOLATION" in m for m in msgs)
+
+
+# =============================================================================
+# offers — projection without invariant
+# =============================================================================
+
+def test_offers_returns_full_projection():
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = [make_offer_row("7712"), make_offer_row("8000")]
+
+    result = q.offers(cur)
+
+    assert len(result) == 2
+    assert isinstance(result, tuple)
+    assert all(isinstance(o, Offer) for o in result)
+    assert {o.offer_id for o in result} == {"7712", "8000"}
+
+
+def test_offers_empty():
+    q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
+    cur = make_cursor()
+    cur.fetchall.return_value = []
+
+    assert q.offers(cur) == ()
+
+
+# =============================================================================
+# bind / unbind — write surface
+# =============================================================================
+
+def test_bind_issues_update():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.bind("7712", cur)
+
+    cur.execute.assert_called_once()
+    sql, params = cur.execute.call_args[0]
+    assert "UPDATE app_private.driver_trip_state" in sql
+    assert "SET current_offer_id = %s" in sql
+    assert "WHERE driver_id = %s" in sql
+    assert params == ("7712", DRIVER_ID)
+
+
+def test_bind_idempotent_reissues_update():
+    """Re-binding to the same offer is a no-op semantically but still issues
+    the UPDATE (Postgres treats it as a normal write that changes no values).
+    Verifies we don't silently skip — the call always reaches the DB."""
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.bind("7712", cur)
+    q.bind("7712", cur)
+
+    assert cur.execute.call_count == 2
+
+
+def test_unbind_issues_update_with_null():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.unbind(cur)
+
+    cur.execute.assert_called_once()
+    sql, params = cur.execute.call_args[0]
+    assert "UPDATE app_private.driver_trip_state" in sql
+    assert "SET current_offer_id = NULL" in sql
+    assert "WHERE driver_id = %s" in sql
+    assert params == (DRIVER_ID,)
+
+
+def test_unbind_idempotent():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.unbind(cur)
+    q.unbind(cur)
+
+    assert cur.execute.call_count == 2
+
+
+# =============================================================================
+# force_bind — test-only escape hatch
+# =============================================================================
+
+def test_force_bind_issues_upsert():
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    q.force_bind("7712", cur)
+
+    cur.execute.assert_called_once()
+    sql, params = cur.execute.call_args[0]
+    assert "INSERT INTO app_private.driver_trip_state" in sql
+    assert "ON CONFLICT (driver_id) DO UPDATE" in sql
+    assert params == (DRIVER_ID, "7712")
+
+
+def test_force_bind_emits_info_log(caplog):
+    q = DriverQueue(DRIVER_ID)
+    cur = make_cursor()
+
+    with caplog.at_level(logging.INFO, logger="driver_queue"):
+        q.force_bind("7712", cur)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("force_bind" in m and "7712" in m and DRIVER_ID in m for m in msgs)
+
+
+# =============================================================================
+# Dataclass behavior
+# =============================================================================
+
+def test_offer_is_frozen():
+    o = Offer(offer_id="x", accepted_at=datetime.now(timezone.utc),
+              pickup={}, dropoff={})
+    with pytest.raises(Exception):  # FrozenInstanceError
+        o.offer_id = "y"
+
+
+def test_queue_snapshot_is_frozen():
+    snap = QueueSnapshot(offers=(), bound_offer_id=None)
+    with pytest.raises(Exception):
+        snap.offers = ()
+
+
+def test_queue_snapshot_offer_ids_property():
+    o1 = Offer(offer_id="a", accepted_at=datetime.now(timezone.utc),
+               pickup={}, dropoff={})
+    o2 = Offer(offer_id="b", accepted_at=datetime.now(timezone.utc),
+               pickup={}, dropoff={})
+    snap = QueueSnapshot(offers=(o1, o2), bound_offer_id="a")
+    assert snap.offer_ids == frozenset({"a", "b"})
+
+
+def test_queue_snapshot_is_empty_property():
+    empty = QueueSnapshot(offers=(), bound_offer_id=None)
+    assert empty.is_empty
+
+    o = Offer(offer_id="a", accepted_at=datetime.now(timezone.utc),
+              pickup={}, dropoff={})
+    nonempty = QueueSnapshot(offers=(o,), bound_offer_id=None)
+    assert not nonempty.is_empty
