@@ -147,6 +147,10 @@ _EXTENDED_POI_TOKENS = set(POI_TYPE_MAP) | {
     # Other venues
     "terminal", "arena", "coliseum", "music hall", "medical center",
     "plazamericas",
+    # Production-data-grounded inclusions (audit 2026-05-05, 2101 offers):
+    # nrg = 21 hits (NRG Stadium, NRG Park) - CLEAN, no road-name collision
+    # houston methodist = 3 hits (multi-word, near-zero collision surface)
+    "nrg", "houston methodist",
 }
 
 

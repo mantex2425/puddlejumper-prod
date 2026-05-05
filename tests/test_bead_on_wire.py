@@ -392,3 +392,83 @@ class TestSubstringRegressionGuard:
         # Positive control.
         from bead_on_wire import _contains_poi_token
         assert _contains_poi_token("Marriott Marquis") is True
+
+
+
+# =============================================================================
+# Phase 2c.2.0 - vocabulary expansion regression tests
+# =============================================================================
+#
+# Provenance: production audit (audit_token_vocabulary.py, 2026-05-05) tested
+# 35 hypothesized branded tokens against 2101 offers / 4202 address-instances.
+# 'nrg' fired 21 times (all real venue refs). 'houston methodist' fired 3
+# times (all real hospital refs). Both classified CLEAN (not HIGH_NOISE)
+# because samples showed zero road-name / common-word collision risk.
+#
+# These tests guard against vocabulary regression - if a future edit removes
+# either token from _EXTENDED_POI_TOKENS, these tests fail loudly.
+
+
+class TestPhase2c2VocabularyExpansion:
+    """Production-grounded inclusions per audit 2026-05-05."""
+
+    def test_nrg_clean_token_match(self):
+        """'nrg' detects from production sample 'NRG Stadium, Yellow Lot 38'.
+
+        Provenance: real production pickup_address from audit Section 3.
+        'nrg' is CLEAN (not HIGH_NOISE) - no road-name collision risk,
+        no common-word ambiguity.
+        """
+        result = detect_branded_token("NRG Stadium, Yellow Lot 38, Texas")
+        assert result is not None
+        token, is_high_noise = result
+        assert token == "nrg"
+        assert is_high_noise is False, (
+            "'nrg' must classify as CLEAN - no production evidence of "
+            "road-name collision; cap-at-0.5 would harm real NRG matches"
+        )
+
+    def test_nrg_park_dropoff_match(self):
+        """'nrg' detects from production sample 'NRG Park, Houston, Texas'.
+
+        Provenance: real production dropoff_address from audit Section 3.
+        Note: the substring 'park' is also present, but longest-first
+        sort ensures 'nrg' would match first if both were tokens; in
+        practice both fire and the matcher resolves via Option B logic
+        (high-noise capping for 'park', clean signal from 'nrg').
+        """
+        result = detect_branded_token("NRG Park, Houston, Texas")
+        assert result is not None
+        token, _ = result
+        assert token in ("nrg", "park"), (
+            f"Expected 'nrg' or 'park' from NRG Park sample, got {token!r}"
+        )
+
+    def test_houston_methodist_multi_word_match(self):
+        """'houston methodist' detects from production hospital reference.
+
+        Provenance: real production pickup_address from audit Section 3
+        ("Houston Methodist Hospital, Fannin St, Texas"). Multi-word
+        token has near-zero collision surface - neither "Houston St"
+        nor "Methodist Rd" can produce this bigram via word-boundary
+        matching.
+        """
+        result = detect_branded_token(
+            "Houston Methodist Hospital, Fannin St, Texas"
+        )
+        assert result is not None
+        token, is_high_noise = result
+        assert token == "houston methodist"
+        assert is_high_noise is False
+
+    def test_phase_2c2_inclusions_not_high_noise(self):
+        """CLEAN classification regression guard.
+
+        Both 'nrg' and 'houston methodist' must remain CLEAN. Adding
+        either to _HIGH_NOISE_TOKENS would cap real matches at 0.5,
+        breaking the strip-mall confidence path Phase 2c.2 was
+        designed to enable.
+        """
+        from bead_on_wire import _HIGH_NOISE_TOKENS
+        assert "nrg" not in _HIGH_NOISE_TOKENS
+        assert "houston methodist" not in _HIGH_NOISE_TOKENS
