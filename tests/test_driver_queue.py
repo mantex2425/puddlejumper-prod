@@ -17,7 +17,9 @@ Coverage:
 
 from __future__ import annotations
 
+import inspect
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -475,3 +477,67 @@ def test_queue_snapshot_is_empty_property():
               pickup={}, dropoff={})
     nonempty = QueueSnapshot(offers=(o,), bound_offer_id=None)
     assert not nonempty.is_empty
+
+
+# =============================================================================
+# Drift detector — Sub-commit 1b (Option 3 compromise per Gemini's review)
+# =============================================================================
+#
+# `offer_ids_only` and `_project_offers` carry parallel WHERE clauses
+# against `app_private.offer_history`. Both implement the GC-survivor
+# predicate: actual_dropoff_at IS NULL AND created_at within the
+# per-offer Houston Tax window. If they ever drift, snapshot()'s L-19
+# invariant (which compares bound_offer_id against the _project_offers
+# result) becomes inconsistent with what offer_ids_only callers
+# (monitor, status, drive_review) see — silently. This test extracts
+# the WHERE...ORDER BY block from each method's SQL and asserts they
+# match after lowercase + whitespace normalization. Catches predicate
+# changes; ignores indentation and keyword case so cosmetic edits
+# don't break the build.
+
+import driver_queue as _dq_module
+
+
+_WHERE_BLOCK_PATTERN = re.compile(
+    r"(WHERE\s+decision_log_id\s+IN.*?)\s+ORDER\s+BY\s+created_at",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_normalized_where(method_source: str) -> str:
+    """Extract the WHERE...ORDER BY block from a method's source and
+    return it lowercased with whitespace runs collapsed to single spaces."""
+    match = _WHERE_BLOCK_PATTERN.search(method_source)
+    if not match:
+        raise AssertionError(
+            f"Drift detector could not locate WHERE...ORDER BY block. "
+            f"This means the SQL structure changed in a way the regex "
+            f"doesn't recognize — update the regex AND verify the queries "
+            f"still match. Source searched:\n{method_source}"
+        )
+    raw = match.group(1)
+    return re.sub(r"\s+", " ", raw.lower()).strip()
+
+
+def test_offer_ids_only_and_project_offers_share_where_clause():
+    """Drift detector. Both methods filter offer_history with the same
+    GC-survivor predicate; if they ever diverge, snapshot's L-19 invariant
+    becomes unreliable.
+
+    Failure here means a developer edited one method's SQL without
+    updating the other. Either propagate the change to both methods,
+    or — if the divergence is intentional — extract the shared predicate
+    into a constant so there's only one source of truth.
+    """
+    src_offer_ids = inspect.getsource(_dq_module.DriverQueue.offer_ids_only)
+    src_project = inspect.getsource(_dq_module.DriverQueue._project_offers)
+
+    where_offer_ids = _extract_normalized_where(src_offer_ids)
+    where_project = _extract_normalized_where(src_project)
+
+    assert where_offer_ids == where_project, (
+        "GC-survivor WHERE clauses have drifted between offer_ids_only "
+        "and _project_offers.\n\n"
+        f"offer_ids_only WHERE:\n{where_offer_ids}\n\n"
+        f"_project_offers WHERE:\n{where_project}"
+    )
