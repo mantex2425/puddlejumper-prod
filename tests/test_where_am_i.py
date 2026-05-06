@@ -695,7 +695,7 @@ from where_am_i import (
     _match_single_road,
     _match_number_on_street,
     _match_apartment_complex,
-    _match_poi_stub,
+    _match_poi,
     _CLASS_DISPATCH,
     MIN_REPORT_THRESHOLD,
     STRONG_MATCH_CONFIDENCE,
@@ -997,33 +997,6 @@ class TestMatchApartmentComplex:
 # =============================================================================
 # TestMatchPoiStub - 2 tests
 # =============================================================================
-
-class TestMatchPoiStub:
-    def test_returns_not_at_pudo_semantics(self):
-        # POI stub always returns matched=False, confidence=0.0
-        # (Q4 ruling: WARN log for shadow-mode visibility, fall-through
-        # to ghost match in evaluate())
-        cluster = _cluster()
-        target = _target(address_class="poi", named_roads=())
-        outcome = _match_poi_stub(cluster, _topo(), target)
-        assert outcome.matched is False
-        assert outcome.confidence == 0.0
-        assert outcome.reason == "poi_stub"
-        assert outcome.signals is None
-
-    def test_warn_log_fires(self, caplog):
-        # Q4 ratification: WARN log per heartbeat for shadow-mode metrics.
-        # Production noise level is acceptable trade-off for visibility.
-        cluster = _cluster()
-        target = _target(address_class="poi", named_roads=())
-        with caplog.at_level(logging.WARNING, logger="where_am_i"):
-            _match_poi_stub(cluster, _topo(), target)
-        assert any(
-            "matcher=poi_stub" in record.message
-            and "deferred to v1.1" in record.message
-            for record in caplog.records
-        ), f"Expected POI stub WARN log; got: {[r.message for r in caplog.records]}"
-
 
 # =============================================================================
 # TestClassDispatch - 3 tests

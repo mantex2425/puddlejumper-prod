@@ -112,6 +112,13 @@ _PIVOT_FULL_OFF_WIRE_S = 30
 #   - number_on_street:  proximity dominates (Google geocode is precise)
 #   - apartment_complex: pivot dominates (off-wire arrival is the signal)
 
+# Patch 2c (Phase 2c.2, 2026-05-05): each row sums to 1.00 exactly.
+# All rows extended with poi_match key (loud-KeyError invariant in
+# _weighted_confidence requires every weights key to be present in
+# the signals dict; _compute_signals always emits poi_match as of 2c).
+# apartment_complex Path A: off_wire_pivot stays 0.40 ("signature signal");
+# credit shifts to poi_match (0.25) come from cluster_tightness (-0.10)
+# and cluster_duration (-0.10) per Gemini ratification 2026-05-05.
 _CONFIDENCE_WEIGHTS = {
     "intersection": {
         "proximity":            0.10,
@@ -121,33 +128,47 @@ _CONFIDENCE_WEIGHTS = {
         "on_target_road":       0.20,
         "off_wire_pivot":       0.05,
         "adjacent_road_match":  0.10,
+        "poi_match":            0.00,
     },
     "single_road": {
         "proximity":            0.05,
-        "breadcrumb_match":     0.35,
-        "cluster_tightness":    0.15,
-        "cluster_duration":     0.15,
-        "on_target_road":       0.15,
-        "off_wire_pivot":       0.05,
-        "adjacent_road_match":  0.10,
-    },
-    "number_on_street": {
-        "proximity":            0.30,
         "breadcrumb_match":     0.20,
         "cluster_tightness":    0.15,
         "cluster_duration":     0.10,
-        "on_target_road":       0.15,
+        "on_target_road":       0.10,
+        "off_wire_pivot":       0.05,
+        "adjacent_road_match":  0.05,
+        "poi_match":            0.30,
+    },
+    "number_on_street": {
+        "proximity":            0.20,
+        "breadcrumb_match":     0.10,
+        "cluster_tightness":    0.15,
+        "cluster_duration":     0.10,
+        "on_target_road":       0.10,
         "off_wire_pivot":       0.00,
-        "adjacent_road_match":  0.10,
+        "adjacent_road_match":  0.05,
+        "poi_match":            0.30,
     },
     "apartment_complex": {
         "proximity":            0.10,
-        "breadcrumb_match":     0.10,
-        "cluster_tightness":    0.20,
-        "cluster_duration":     0.15,
+        "breadcrumb_match":     0.05,
+        "cluster_tightness":    0.10,
+        "cluster_duration":     0.05,
         "on_target_road":       0.05,
         "off_wire_pivot":       0.40,
         "adjacent_road_match":  0.00,
+        "poi_match":            0.25,
+    },
+    "poi": {
+        "proximity":            0.15,
+        "breadcrumb_match":     0.05,
+        "cluster_tightness":    0.10,
+        "cluster_duration":     0.10,
+        "on_target_road":       0.05,
+        "off_wire_pivot":       0.10,
+        "adjacent_road_match":  0.00,
+        "poi_match":            0.45,
     },
 }
 
@@ -722,19 +743,35 @@ def _compute_signals(
     topo: RoadTopology,
     target,
     threshold_m: float,
-) -> dict[str, float]:
-    """Build the 6-signal dict for a matcher.
+    pois: Optional[list] = None,
+) -> tuple[dict[str, float], Optional[str]]:
+    """Build the 8-signal dict + poi_witness for a matcher.
+
+    Returns ``(signals, poi_witness)`` -- signals is the numeric dict
+    consumed by _weighted_confidence + _render_reason; poi_witness is
+    a forensic provenance string ("fuzzy:Excel Dental" / "branded:marriott"
+    / "airport_type:united") or None when poi_match is 0.
 
     Eliminates duplication across the 5 matchers (otherwise each would
-    have the same 6-line construction block). The class-specific knobs
+    have the same 8-line construction block). The class-specific knobs
     are the proximity threshold (passed in) and the weights row applied
     downstream — never the signals themselves.
 
     target must have lat, lng, named_roads attributes (TargetSpec).
     Validation that lat/lng are non-None happens BEFORE this is called,
     in _validate_target.
+
+    Patch 2c (Phase 2c.2, 2026-05-05): added poi_match signal + tuple
+    return for poi_witness per Gemini ratification 2026-05-05. pois
+    defaults to None for backward compatibility with pre-2d test calls;
+    _signal_poi_match handles None/empty inputs via internal
+    short-circuits (returns (0.0, None)).
     """
-    return {
+    poi_score, poi_witness = _signal_poi_match(
+        pois or [],
+        getattr(target, "address", None) or "",
+    )
+    signals = {
         "proximity": _signal_proximity(
             cluster, target.lat, target.lng, threshold_m,
         ),
@@ -756,7 +793,9 @@ def _compute_signals(
             topo.adjacent_roads, target.named_roads,
             current_road_class=topo.current_road_class,
         ),
+        "poi_match": poi_score,
     }
+    return signals, poi_witness
 
 
 def _build_outcome(
@@ -765,6 +804,7 @@ def _build_outcome(
     class_name: str,
     signals: dict[str, float],
     confidence: float,
+    witness: Optional[str] = None,
 ) -> MatchOutcome:
     """Assemble a MatchOutcome from computed signals + confidence.
 
@@ -772,6 +812,12 @@ def _build_outcome(
     clears MIN_REPORT_THRESHOLD (Step 1 Q4 lock); below that, the matcher
     reports "tried but didn't match" so evaluate() can fall through to
     ghost-match or at_unknown_pudo.
+
+    Patch 2c (Phase 2c.2, 2026-05-05): added witness param. Populates
+    MatchOutcome.poi_match (from signals dict, which now carries the
+    poi_match key as of 2c) and MatchOutcome.poi_witness (from kwarg).
+    witness defaults to None for backward compatibility with any caller
+    that hasn't yet been updated to pass it.
     """
     reason = _render_reason(class_name, signals, confidence)
     return MatchOutcome(
@@ -783,6 +829,8 @@ def _build_outcome(
         pudo_type=None,           # Set by _match_current_pudo orchestrator (Step 5.5)
         target_address=getattr(target, "address", None),
         signals=signals,
+        poi_match=signals.get("poi_match"),
+        poi_witness=witness,
     )
 
 
@@ -790,12 +838,15 @@ def _match_intersection(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an intersection-class target ("Joan St & Settemont Rd")."""
     if (skip := _validate_target(target, "intersection")) is not None:
         return skip
 
-    signals = _compute_signals(cluster, topo, target, INTERSECTION_RADIUS_M)
+    signals, witness = _compute_signals(
+        cluster, topo, target, INTERSECTION_RADIUS_M, pois,
+    )
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["intersection"])
 
     if log.isEnabledFor(logging.DEBUG):
@@ -804,19 +855,24 @@ def _match_intersection(
             _render_reason("intersection", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "intersection", signals, confidence)
+    return _build_outcome(
+        cluster, target, "intersection", signals, confidence, witness,
+    )
 
 
 def _match_single_road(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a single_road target ("fondren rd")."""
     if (skip := _validate_target(target, "single_road")) is not None:
         return skip
 
-    signals = _compute_signals(cluster, topo, target, SINGLE_ROAD_RADIUS_M)
+    signals, witness = _compute_signals(
+        cluster, topo, target, SINGLE_ROAD_RADIUS_M, pois,
+    )
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["single_road"])
 
     if log.isEnabledFor(logging.DEBUG):
@@ -825,13 +881,16 @@ def _match_single_road(
             _render_reason("single_road", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "single_road", signals, confidence)
+    return _build_outcome(
+        cluster, target, "single_road", signals, confidence, witness,
+    )
 
 
 def _match_number_on_street(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a number_on_street target ("1234 Main St").
 
@@ -841,7 +900,9 @@ def _match_number_on_street(
     if (skip := _validate_target(target, "number_on_street")) is not None:
         return skip
 
-    signals = _compute_signals(cluster, topo, target, NUMBER_ON_STREET_RADIUS_M)
+    signals, witness = _compute_signals(
+        cluster, topo, target, NUMBER_ON_STREET_RADIUS_M, pois,
+    )
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["number_on_street"])
 
     if log.isEnabledFor(logging.DEBUG):
@@ -850,13 +911,16 @@ def _match_number_on_street(
             _render_reason("number_on_street", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "number_on_street", signals, confidence)
+    return _build_outcome(
+        cluster, target, "number_on_street", signals, confidence, witness,
+    )
 
 
 def _match_apartment_complex(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an apartment_complex target.
 
@@ -868,7 +932,9 @@ def _match_apartment_complex(
     if (skip := _validate_target(target, "apartment_complex")) is not None:
         return skip
 
-    signals = _compute_signals(cluster, topo, target, APARTMENT_RADIUS_M)
+    signals, witness = _compute_signals(
+        cluster, topo, target, APARTMENT_RADIUS_M, pois,
+    )
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["apartment_complex"])
 
     if log.isEnabledFor(logging.DEBUG):
@@ -877,39 +943,46 @@ def _match_apartment_complex(
             _render_reason("apartment_complex", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "apartment_complex", signals, confidence)
+    return _build_outcome(
+        cluster, target, "apartment_complex", signals, confidence, witness,
+    )
 
 
-def _match_poi_stub(
+def _match_poi(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
-    """Stub for poi-class targets (airports, named businesses).
+    """Match a poi-class target (airports, named businesses).
 
-    Per Step 1 Q4 lock and Gemini Step 5.4 Q3 ratification: returns
-    not_at_pudo semantics with WARN log. The cluster falls through to
-    ghost match -> at_unknown_pudo in evaluate(), and the WARN log
-    surfaces the POI miss rate in shadow-mode aggregates.
+    Replaces the v1.0 stub matcher (which fell through to ghost /
+    at_unknown_pudo) with real Google-Places-grounded matching as of
+    Patch 2c (Phase 2c.2, 2026-05-05).
 
-    POI matching deferred to v1.1 per RFC v2.4.7. Polygon-based
-    matching (airport curbs, business footprints) is a separate
-    architectural conversation from point-proximity matching.
+    Uses POI_RADIUS_M (100m) as the proximity threshold. The poi_match
+    signal carries 45% of the weight here (per "poi" row in
+    _CONFIDENCE_WEIGHTS) -- when the address is "Spirit Airlines" or
+    "Excel Dental Forum Park", POI co-reference is the dominant
+    evidence. Falls back to off_wire_pivot (10%), proximity (15%),
+    cluster_tightness/duration (10%/10%) for spatial confirmation.
     """
-    log.warning(
-        "[WAI matcher=poi_stub] target=%r class=poi - match deferred to v1.1, "
-        "falling through to ghost / at_unknown_pudo",
-        getattr(target, "address", None),
+    if (skip := _validate_target(target, "poi")) is not None:
+        return skip
+
+    signals, witness = _compute_signals(
+        cluster, topo, target, POI_RADIUS_M, pois,
     )
-    return MatchOutcome(
-        matched=False,
-        confidence=0.0,
-        corrected_lat=None,
-        corrected_lng=None,
-        reason="poi_stub",
-        pudo_type=None,
-        target_address=getattr(target, "address", None),
-        signals=None,
+    confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["poi"])
+
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "[WAI matcher=poi] %s",
+            _render_reason("poi", signals, confidence),
+        )
+
+    return _build_outcome(
+        cluster, target, "poi", signals, confidence, witness,
     )
 
 
@@ -921,7 +994,7 @@ _CLASS_DISPATCH = {
     "single_road":       _match_single_road,
     "number_on_street":  _match_number_on_street,
     "apartment_complex": _match_apartment_complex,
-    "poi":               _match_poi_stub,
+    "poi":               _match_poi,
 }
 
 
