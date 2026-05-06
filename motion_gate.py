@@ -162,6 +162,7 @@ class GateVerdict:
 def evaluate_motion_gate(
     cluster: Any,  # Optional[Cluster]; duck-typed to avoid import cycle
     *,
+    speed_mph: Optional[float] = None,
     max_speed_mph: float = MOTION_MAX_SPEED_MPH,
     min_duration_s: float = MOTION_MIN_DURATION_S,
 ) -> MotionVerdict:
@@ -179,9 +180,17 @@ def evaluate_motion_gate(
     if cluster is None:
         return "no_cluster"
 
-    speed = getattr(cluster, "max_recent_speed_mph", None)
+    # Sprint A bugfix 2026-05-06: prefer explicit speed_mph kwarg over
+    # cluster attribute lookup. Production Cluster (cluster_detection.py)
+    # has no speed field; relying on getattr returned None and tripped the
+    # defensive "moving" branch on every heartbeat. Explicit threading from
+    # heartbeat request body is the source of truth.
+    speed = speed_mph
     if speed is None:
-        speed = getattr(cluster, "speed_mph", None)
+        # Legacy fallback: synthetic Cluster mocks may still expose these.
+        speed = getattr(cluster, "max_recent_speed_mph", None)
+        if speed is None:
+            speed = getattr(cluster, "speed_mph", None)
     duration = getattr(cluster, "duration_s", None)
 
     if speed is None or duration is None:
@@ -322,6 +331,7 @@ def evaluate_gates(
     cumulative_miles: Optional[float],
     queue_offers: list[Any],
     *,
+    speed_mph: Optional[float] = None,
     motion_max_speed_mph: float = MOTION_MAX_SPEED_MPH,
     motion_min_duration_s: float = MOTION_MIN_DURATION_S,
     odometer_floor_fraction: float = ODOMETER_FLOOR_FRACTION,
@@ -332,6 +342,7 @@ def evaluate_gates(
     """
     motion_verdict = evaluate_motion_gate(
         cluster,
+        speed_mph=speed_mph,
         max_speed_mph=motion_max_speed_mph,
         min_duration_s=motion_min_duration_s,
     )

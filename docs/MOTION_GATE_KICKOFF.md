@@ -287,7 +287,7 @@ Window: 19:43-21:00 UTC
 
 ### Validation script idea
 
-After implementing gate layer, write a script `tmp/validate_gate_layer.py`:
+After implementing gate layer, write a script `scripts/validate_gate_layer.py`:
 
 ```python
 # Pseudocode

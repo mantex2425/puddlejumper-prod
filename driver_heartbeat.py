@@ -629,6 +629,7 @@ def post_heartbeat():
         cluster=diagnostics.cluster,
         cumulative_miles=cumulative_miles,
         queue_offers=snap.offers,
+        speed_mph=speed_mph,
     )
     gated_matches = filter_matches_by_gates(matches, gate_verdict)
 
