@@ -1,0 +1,1398 @@
+[
+  {
+    "label": "D1 Stop 1A \u2014 mid-route stop (14:51-14:53)",
+    "lat": 29.4975076,
+    "lng": -95.518549,
+    "expected": "NONE_or_road",
+    "narrative": "Probably a stop sign or light on the way to dropoff",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJqVzZUNjvQIYR08Ip_FmWMyA",
+          "types": [
+            "swimming_pool",
+            "sports_activity_location",
+            "association_or_organization",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.496402399999997,
+            "longitude": -95.51925969999999
+          },
+          "displayName": {
+            "text": "Club Sienna",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ5Wb1VvzvQIYRNKpcckRSLqs",
+          "types": [
+            "association_or_organization",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.496525899999998,
+            "longitude": -95.5193022
+          },
+          "displayName": {
+            "text": "Sienna HOA Office",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Sienna HOA Office",
+        "types": [
+          "association_or_organization",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.496525899999998,
+        "lng": -95.5193022,
+        "dist_m": 131.16315956215058
+      },
+      {
+        "name": "Club Sienna",
+        "types": [
+          "swimming_pool",
+          "sports_activity_location",
+          "association_or_organization",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.496402399999997,
+        "lng": -95.51925969999999,
+        "dist_m": 140.7258753841136
+      }
+    ]
+  },
+  {
+    "label": "D1 Stop 1B \u2014 return-near-pickup (14:55-14:57)",
+    "lat": 29.4944391,
+    "lng": -95.5038588,
+    "expected": "NONE",
+    "narrative": "Right next to pickup intersection -- driver returned briefly",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "D1 Stop 1C \u2014 DROPOFF Sienna Pkwy / Excel Dental plaza (15:03-15:05+)",
+    "lat": 29.5102826,
+    "lng": -95.5272512,
+    "expected": "dental_clinic_or_strip_mall",
+    "narrative": "Same strip mall as yesterday's dentist drive. Uber said Sienna Pkwy.",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJe9ccdo3vQIYRf-dgi7uU20o",
+          "types": [
+            "gas_station",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510571000000002,
+            "longitude": -95.52700999999999
+          },
+          "displayName": {
+            "text": "Shell",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJRUDSZyrvQIYR6KJrcECCI30",
+          "types": [
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102437,
+            "longitude": -95.5275075
+          },
+          "displayName": {
+            "text": "Stomp's Burger Joint",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJUSRiYjnvQIYRp7GjiZW9MHg",
+          "types": [
+            "dentist",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102379,
+            "longitude": -95.5271731
+          },
+          "displayName": {
+            "text": "Missouri City Dentist - Excel Dental",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJyyRSKcnvQIYRXN0CB8jP-3Q",
+          "types": [
+            "sushi_restaurant",
+            "japanese_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5101188,
+            "longitude": -95.52730539999999
+          },
+          "displayName": {
+            "text": "Sushi Monster",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRuVP6yIeZDxo",
+          "types": [
+            "sandwich_shop",
+            "fast_food_restaurant",
+            "catering_service",
+            "food_delivery",
+            "meal_takeaway",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510264699999993,
+            "longitude": -95.5275916
+          },
+          "displayName": {
+            "text": "Subway",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJs0obscnvQIYRD0-IY22MMp4",
+          "types": [
+            "child_care_agency",
+            "consultant",
+            "school",
+            "educational_institution",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5104559,
+            "longitude": -95.5276562
+          },
+          "displayName": {
+            "text": "Mathnasium",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJzbdmoknvQIYRXqSfA6YJrJI",
+          "types": [
+            "liquor_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102038,
+            "longitude": -95.527259
+          },
+          "displayName": {
+            "text": "Jellos Liqour",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRs5Oeodhu6Bg",
+          "types": [
+            "donut_shop",
+            "bakery",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510274100000004,
+            "longitude": -95.52761729999999
+          },
+          "displayName": {
+            "text": "Snowflake Donuts",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRfdo6lwmcf2g",
+          "types": [
+            "laundry",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510567999999996,
+            "longitude": -95.527692
+          },
+          "displayName": {
+            "text": "Sienna Cleaners #1",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJcVKZt8nvQIYRV3ym2VCe1lQ",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510571000000002,
+            "longitude": -95.52700999999999
+          },
+          "displayName": {
+            "text": "Timewise",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRZFRZL9Fkm0Y",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510277400000003,
+            "longitude": -95.5269938
+          },
+          "displayName": {
+            "text": "Sienna Market & Deli",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJY4QmtMnvQIYRM_joYsszgG0",
+          "types": [
+            "home_goods_store",
+            "building_materials_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510386900000004,
+            "longitude": -95.52764909999999
+          },
+          "displayName": {
+            "text": "My Beauty Floors",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJg7RHtsnvQIYROad3Fyq0-A0",
+          "types": [
+            "shopping_mall",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510527500000002,
+            "longitude": -95.5271308
+          },
+          "displayName": {
+            "text": "The Village Of Bees Creek",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJgZbztsnvQIYR93CXXmdfL2U",
+          "types": [
+            "atm",
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102971,
+            "longitude": -95.5270109
+          },
+          "displayName": {
+            "text": "ATM (Sienna Market & Deli)",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJAQAAt8nvQIYRd8ofipT8jpA",
+          "types": [
+            "dentist",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5105083,
+            "longitude": -95.527118
+          },
+          "displayName": {
+            "text": "Dr. Jenny Lu",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJSXxUBADvQIYRG4yGCDwWn2I",
+          "types": [
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510546699999995,
+            "longitude": -95.5269905
+          },
+          "displayName": {
+            "text": "Work jellos",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJO8dxZADvQIYRveunYkVsCVc",
+          "types": [
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5105083,
+            "longitude": -95.527118
+          },
+          "displayName": {
+            "text": "airductcleaningmissouricity.",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJi-bp58bvQIYRw0Fm9xiF5OA",
+          "types": [
+            "business_center",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510550300000002,
+            "longitude": -95.5269898
+          },
+          "displayName": {
+            "text": "unlockhousedoorsmissouricity.",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Jellos Liqour",
+        "types": [
+          "liquor_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102038,
+        "lng": -95.527259,
+        "dist_m": 8.787972717474105
+      },
+      {
+        "name": "Missouri City Dentist - Excel Dental",
+        "types": [
+          "dentist",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102379,
+        "lng": -95.5271731,
+        "dist_m": 9.038812801299976
+      },
+      {
+        "name": "Sushi Monster",
+        "types": [
+          "sushi_restaurant",
+          "japanese_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5101188,
+        "lng": -95.52730539999999,
+        "dist_m": 18.93955680287948
+      },
+      {
+        "name": "ATM (Sienna Market & Deli)",
+        "types": [
+          "atm",
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102971,
+        "lng": -95.5270109,
+        "dist_m": 23.291899586429253
+      },
+      {
+        "name": "Sienna Market & Deli",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510277400000003,
+        "lng": -95.5269938,
+        "dist_m": 24.896326022513644
+      },
+      {
+        "name": "Stomp's Burger Joint",
+        "types": [
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102437,
+        "lng": -95.5275075,
+        "dist_m": 25.157334812226456
+      },
+      {
+        "name": "Dr. Jenny Lu",
+        "types": [
+          "dentist",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5105083,
+        "lng": -95.527118,
+        "dist_m": 28.191953636418887
+      },
+      {
+        "name": "airductcleaningmissouricity.",
+        "types": [
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5105083,
+        "lng": -95.527118,
+        "dist_m": 28.191953636418887
+      },
+      {
+        "name": "The Village Of Bees Creek",
+        "types": [
+          "shopping_mall",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510527500000002,
+        "lng": -95.5271308,
+        "dist_m": 29.59703198549024
+      },
+      {
+        "name": "Subway",
+        "types": [
+          "sandwich_shop",
+          "fast_food_restaurant",
+          "catering_service",
+          "food_delivery",
+          "meal_takeaway",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510264699999993,
+        "lng": -95.5275916,
+        "dist_m": 32.97544723294176
+      },
+      {
+        "name": "Snowflake Donuts",
+        "types": [
+          "donut_shop",
+          "bakery",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510274100000004,
+        "lng": -95.52761729999999,
+        "dist_m": 35.4131023636407
+      },
+      {
+        "name": "Work jellos",
+        "types": [
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510546699999995,
+        "lng": -95.5269905,
+        "dist_m": 38.685559254520236
+      },
+      {
+        "name": "unlockhousedoorsmissouricity.",
+        "types": [
+          "business_center",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510550300000002,
+        "lng": -95.5269898,
+        "dist_m": 39.03364161501376
+      },
+      {
+        "name": "Shell",
+        "types": [
+          "gas_station",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510571000000002,
+        "lng": -95.52700999999999,
+        "dist_m": 39.63346694183213
+      },
+      {
+        "name": "Timewise",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510571000000002,
+        "lng": -95.52700999999999,
+        "dist_m": 39.63346694183213
+      },
+      {
+        "name": "My Beauty Floors",
+        "types": [
+          "home_goods_store",
+          "building_materials_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510386900000004,
+        "lng": -95.52764909999999,
+        "dist_m": 40.18283854561281
+      },
+      {
+        "name": "Mathnasium",
+        "types": [
+          "child_care_agency",
+          "consultant",
+          "school",
+          "educational_institution",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5104559,
+        "lng": -95.5276562,
+        "dist_m": 43.63982691641446
+      },
+      {
+        "name": "Sienna Cleaners #1",
+        "types": [
+          "laundry",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510567999999996,
+        "lng": -95.527692,
+        "dist_m": 53.12596936545663
+      }
+    ]
+  },
+  {
+    "label": "D2 Stop \u2014 DROPOFF US-90-ALT actual cluster (15:56-16:00+)",
+    "lat": 29.5912088,
+    "lng": -95.6011899,
+    "expected": "strip_mall_business",
+    "narrative": "Uber said US-90-ALT (29.6153849, -95.6453517). Driver actually here.",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ-wqS6mLmQIYRVLgLSKueej4",
+          "types": [
+            "fast_food_restaurant",
+            "hamburger_restaurant",
+            "sandwich_shop",
+            "breakfast_restaurant",
+            "coffee_shop",
+            "cafe",
+            "food_store",
+            "american_restaurant",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "store",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591611999999998,
+            "longitude": -95.60224199999999
+          },
+          "displayName": {
+            "text": "McDonald's",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJb2vKmGLmQIYRbntcH607b8c",
+          "types": [
+            "ice_cream_shop",
+            "cake_shop",
+            "bakery",
+            "dessert_shop",
+            "confectionery",
+            "food_store",
+            "wholesaler",
+            "point_of_interest",
+            "food",
+            "store",
+            "manufacturer",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.590488099999998,
+            "longitude": -95.6020599
+          },
+          "displayName": {
+            "text": "Baskin-Robbins",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJozOjkOehQIYRHBJ60KTuJVo",
+          "types": [
+            "restaurant",
+            "fast_food_restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5908698,
+            "longitude": -95.60016139999999
+          },
+          "displayName": {
+            "text": "Burger King",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ254QJGPmQIYR_tEiOwudm4I",
+          "types": [
+            "chicken_restaurant",
+            "fast_food_restaurant",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591022199999994,
+            "longitude": -95.6008875
+          },
+          "displayName": {
+            "text": "KFC",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ-W6KKmPmQIYR96zGbOq8SYE",
+          "types": [
+            "atm",
+            "finance",
+            "association_or_organization",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5901255,
+            "longitude": -95.6010458
+          },
+          "displayName": {
+            "text": "First Community Credit Union - Sugar Land",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJZS1it0vnQIYRtBPebh8Urnc",
+          "types": [
+            "pizza_restaurant",
+            "halal_restaurant",
+            "fusion_restaurant",
+            "vegan_restaurant",
+            "vegetarian_restaurant",
+            "indian_restaurant",
+            "meal_takeaway",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5906369,
+            "longitude": -95.60192049999999
+          },
+          "displayName": {
+            "text": "Pizza Twist - Halal",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJCajBwmLmQIYR5b16f09piqw",
+          "types": [
+            "fast_food_restaurant",
+            "breakfast_restaurant",
+            "vegetarian_restaurant",
+            "tex_mex_restaurant",
+            "mexican_restaurant",
+            "meal_takeaway",
+            "american_restaurant",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591432099999995,
+            "longitude": -95.60174099999999
+          },
+          "displayName": {
+            "text": "Taco Bell",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJtX0QFmPmQIYRAcpMdRs2QQE",
+          "types": [
+            "sports_school",
+            "sports_activity_location",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591495,
+            "longitude": -95.600185
+          },
+          "displayName": {
+            "text": "Renzo Gracie Houston",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ4XZDL_TnQIYRJf1aPwFP38M",
+          "types": [
+            "cafe",
+            "sandwich_shop",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5904422,
+            "longitude": -95.6019876
+          },
+          "displayName": {
+            "text": "Boba & Broth",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJORKfIGPmQIYRuu4FRlchlqw",
+          "types": [
+            "electric_vehicle_charging_station",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591144999999997,
+            "longitude": -95.601106
+          },
+          "displayName": {
+            "text": "Shell Recharge Charging Station",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJt3WXHmPmQIYRdKu5NV04SFY",
+          "types": [
+            "pharmacy",
+            "veterinary_care",
+            "pet_boarding_service",
+            "pet_care",
+            "medical_clinic",
+            "health",
+            "point_of_interest",
+            "store",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5917173,
+            "longitude": -95.60089769999999
+          },
+          "displayName": {
+            "text": "Animal Hospital Highway 6",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJD-VX5GLmQIYRreD_EzM_8OE",
+          "types": [
+            "doctor",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.592032500000002,
+            "longitude": -95.601495
+          },
+          "displayName": {
+            "text": "Mc Menemy Scott MD",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ3x9tFmPmQIYRX92l6Fm8Mak",
+          "types": [
+            "fitness_center",
+            "gym",
+            "sports_activity_location",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591576000000003,
+            "longitude": -95.6001864
+          },
+          "displayName": {
+            "text": "Jazzercise",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJNe4WW2PmQIYROcymb2X-S5w",
+          "types": [
+            "chiropractor",
+            "health",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591425100000002,
+            "longitude": -95.5998666
+          },
+          "displayName": {
+            "text": "Parkway Family Chiropractic",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ57aDzu_nQIYRPG-H01S-9PQ",
+          "types": [
+            "family_restaurant",
+            "vietnamese_restaurant",
+            "asian_restaurant",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.590305499999996,
+            "longitude": -95.6021251
+          },
+          "displayName": {
+            "text": "Yummy Pho & Bo Ne",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ19vJF2PmQIYRREBmWH9oLE0",
+          "types": [
+            "service",
+            "point_of_interest",
+            "store",
+            "school",
+            "educational_institution",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591540399999996,
+            "longitude": -95.6001811
+          },
+          "displayName": {
+            "text": "Music school | Music teacher| piano lessons | Guitar instructor - Century Fine Arts - Sugar Land",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJD-VX5GLmQIYRNWJE8GiqvTw",
+          "types": [
+            "dentist",
+            "dental_clinic",
+            "medical_clinic",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.592015999999997,
+            "longitude": -95.6015384
+          },
+          "displayName": {
+            "text": "Sunrise Dentistry",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ3x9tFmPmQIYRlmPRlB0J9ls",
+          "types": [
+            "medical_clinic",
+            "health",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591576000000003,
+            "longitude": -95.6001864
+          },
+          "displayName": {
+            "text": "Intensity Fitness Personal Training",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJqbe5sY3HQIYRV4PagqHdNa8",
+          "types": [
+            "physiotherapist",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591523600000002,
+            "longitude": -95.60023650000001
+          },
+          "displayName": {
+            "text": "Injury2Victory",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJrRqrMND7oCcRkXVVHHgAFTo",
+          "types": [
+            "spa",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.591541199999998,
+            "longitude": -95.6002642
+          },
+          "displayName": {
+            "text": "Premier Health Spa",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Shell Recharge Charging Station",
+        "types": [
+          "electric_vehicle_charging_station",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591144999999997,
+        "lng": -95.601106,
+        "dist_m": 10.768693682054044
+      },
+      {
+        "name": "KFC",
+        "types": [
+          "chicken_restaurant",
+          "fast_food_restaurant",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.591022199999994,
+        "lng": -95.6008875,
+        "dist_m": 35.82648261698775
+      },
+      {
+        "name": "Taco Bell",
+        "types": [
+          "fast_food_restaurant",
+          "breakfast_restaurant",
+          "vegetarian_restaurant",
+          "tex_mex_restaurant",
+          "mexican_restaurant",
+          "meal_takeaway",
+          "american_restaurant",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.591432099999995,
+        "lng": -95.60174099999999,
+        "dist_m": 58.74342943446971
+      },
+      {
+        "name": "Animal Hospital Highway 6",
+        "types": [
+          "pharmacy",
+          "veterinary_care",
+          "pet_boarding_service",
+          "pet_care",
+          "medical_clinic",
+          "health",
+          "point_of_interest",
+          "store",
+          "establishment"
+        ],
+        "lat": 29.5917173,
+        "lng": -95.60089769999999,
+        "dist_m": 63.16080545829494
+      },
+      {
+        "name": "Pizza Twist - Halal",
+        "types": [
+          "pizza_restaurant",
+          "halal_restaurant",
+          "fusion_restaurant",
+          "vegan_restaurant",
+          "vegetarian_restaurant",
+          "indian_restaurant",
+          "meal_takeaway",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.5906369,
+        "lng": -95.60192049999999,
+        "dist_m": 94.9780447176024
+      },
+      {
+        "name": "Sunrise Dentistry",
+        "types": [
+          "dentist",
+          "dental_clinic",
+          "medical_clinic",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.592015999999997,
+        "lng": -95.6015384,
+        "dist_m": 95.80111392571462
+      },
+      {
+        "name": "Mc Menemy Scott MD",
+        "types": [
+          "doctor",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.592032500000002,
+        "lng": -95.601495,
+        "dist_m": 96.1523292080191
+      },
+      {
+        "name": "Premier Health Spa",
+        "types": [
+          "spa",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591541199999998,
+        "lng": -95.6002642,
+        "dist_m": 96.76554917410058
+      },
+      {
+        "name": "Injury2Victory",
+        "types": [
+          "physiotherapist",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591523600000002,
+        "lng": -95.60023650000001,
+        "dist_m": 98.53351189533319
+      },
+      {
+        "name": "Renzo Gracie Houston",
+        "types": [
+          "sports_school",
+          "sports_activity_location",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591495,
+        "lng": -95.600185,
+        "dist_m": 102.16715032175577
+      },
+      {
+        "name": "Music school | Music teacher| piano lessons | Guitar instructor - Century Fine Arts - Sugar Land",
+        "types": [
+          "service",
+          "point_of_interest",
+          "store",
+          "school",
+          "educational_institution",
+          "establishment"
+        ],
+        "lat": 29.591540399999996,
+        "lng": -95.6001811,
+        "dist_m": 104.20032583592247
+      },
+      {
+        "name": "Jazzercise",
+        "types": [
+          "fitness_center",
+          "gym",
+          "sports_activity_location",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591576000000003,
+        "lng": -95.6001864,
+        "dist_m": 105.19158457826556
+      },
+      {
+        "name": "Intensity Fitness Personal Training",
+        "types": [
+          "medical_clinic",
+          "health",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591576000000003,
+        "lng": -95.6001864,
+        "dist_m": 105.19158457826556
+      },
+      {
+        "name": "Burger King",
+        "types": [
+          "restaurant",
+          "fast_food_restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.5908698,
+        "lng": -95.60016139999999,
+        "dist_m": 106.27183824143523
+      },
+      {
+        "name": "McDonald's",
+        "types": [
+          "fast_food_restaurant",
+          "hamburger_restaurant",
+          "sandwich_shop",
+          "breakfast_restaurant",
+          "coffee_shop",
+          "cafe",
+          "food_store",
+          "american_restaurant",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "store",
+          "establishment"
+        ],
+        "lat": 29.591611999999998,
+        "lng": -95.60224199999999,
+        "dist_m": 111.08676322748799
+      },
+      {
+        "name": "Boba & Broth",
+        "types": [
+          "cafe",
+          "sandwich_shop",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.5904422,
+        "lng": -95.6019876,
+        "dist_m": 114.87172083925289
+      },
+      {
+        "name": "Baskin-Robbins",
+        "types": [
+          "ice_cream_shop",
+          "cake_shop",
+          "bakery",
+          "dessert_shop",
+          "confectionery",
+          "food_store",
+          "wholesaler",
+          "point_of_interest",
+          "food",
+          "store",
+          "manufacturer",
+          "establishment"
+        ],
+        "lat": 29.590488099999998,
+        "lng": -95.6020599,
+        "dist_m": 116.09610553350933
+      },
+      {
+        "name": "First Community Credit Union - Sugar Land",
+        "types": [
+          "atm",
+          "finance",
+          "association_or_organization",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5901255,
+        "lng": -95.6010458,
+        "dist_m": 121.16910221972283
+      },
+      {
+        "name": "Parkway Family Chiropractic",
+        "types": [
+          "chiropractor",
+          "health",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.591425100000002,
+        "lng": -95.5998666,
+        "dist_m": 130.09480460714354
+      },
+      {
+        "name": "Yummy Pho & Bo Ne",
+        "types": [
+          "family_restaurant",
+          "vietnamese_restaurant",
+          "asian_restaurant",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.590305499999996,
+        "lng": -95.6021251,
+        "dist_m": 135.04844729005282
+      }
+    ]
+  },
+  {
+    "label": "D2 Uber-geocoded dropoff (US-90-ALT, Sugar Land)",
+    "lat": 29.6153849,
+    "lng": -95.6453517,
+    "expected": "NONE_or_road",
+    "narrative": "What Uber put as dropoff_lat/lng. Should be road-only.",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ6x9MQsvnQIYRDfhIamit_To",
+          "types": [
+            "car_wash",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.6154154,
+            "longitude": -95.644053
+          },
+          "displayName": {
+            "text": "Quick Quack Car Wash",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Quick Quack Car Wash",
+        "types": [
+          "car_wash",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.6154154,
+        "lng": -95.644053,
+        "dist_m": 125.49459607217723
+      }
+    ]
+  }
+]

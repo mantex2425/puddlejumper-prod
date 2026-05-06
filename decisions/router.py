@@ -196,6 +196,13 @@ def parse_request(p, uid):
     gps_age_sec = p.get("gpsAgeSec")
     if gps_age_sec is not None: gps_age_sec = float(gps_age_sec)
 
+    # Sprint A gate-layer addition: capture odometer at offer-receipt time.
+    # Sourced from heartbeat payload alongside currentLat/currentLng.
+    # Populates leg_start_cumulative_miles_pickup (gate anchor) AND
+    # miles_at_offer_receipt (Phase 2c.2 receipt-capture column).
+    cumulative_miles = p.get("cumulativeMiles")
+    if cumulative_miles is not None: cumulative_miles = float(cumulative_miles)
+
     market_id                   = p.get("marketId")
     towards_active              = bool(p.get("towardsActive", False))
     towards_target_lat          = p.get("towardsTargetLat")
@@ -233,6 +240,7 @@ def parse_request(p, uid):
         "p_lat": p_lat, "p_lng": p_lng,
         "current_lat": current_lat, "current_lng": current_lng,
         "gps_age_sec": gps_age_sec, "market_id": market_id,
+        "cumulative_miles": cumulative_miles,
         "towards_active": towards_active,
         "towards_target_lat": towards_target_lat,
         "towards_target_lng": towards_target_lng,

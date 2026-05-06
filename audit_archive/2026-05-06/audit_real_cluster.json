@@ -1,0 +1,702 @@
+[
+  {
+    "label": "Stop 1 \u2014 home (09:15-09:18)",
+    "lat": 29.506395,
+    "lng": -95.502285,
+    "expected": "NONE_or_residential",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ64e2k5LvQIYRvlSm_jHE4bY",
+          "types": [
+            "event_venue",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.506577299999996,
+            "longitude": -95.50379249999999
+          },
+          "displayName": {
+            "text": "The Ranch on McKeever",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJeez3kqDvQIYRdq8Td9PiX7g",
+          "types": [
+            "general_contractor",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5066383,
+            "longitude": -95.50316769999999
+          },
+          "displayName": {
+            "text": "Southwest Irrigation Systems",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Southwest Irrigation Systems",
+        "types": [
+          "general_contractor",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5066383,
+        "lng": -95.50316769999999,
+        "dist_m": 89.53553815258444
+      },
+      {
+        "name": "The Ranch on McKeever",
+        "types": [
+          "event_venue",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.506577299999996,
+        "lng": -95.50379249999999,
+        "dist_m": 147.17562661894308
+      }
+    ]
+  },
+  {
+    "label": "Stop 2 \u2014 DENTIST (09:20:11-09:21:39)",
+    "lat": 29.510316,
+    "lng": -95.527151,
+    "expected": "dental_clinic",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJe9ccdo3vQIYRf-dgi7uU20o",
+          "types": [
+            "gas_station",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510571000000002,
+            "longitude": -95.52700999999999
+          },
+          "displayName": {
+            "text": "Shell",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJRUDSZyrvQIYR6KJrcECCI30",
+          "types": [
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102437,
+            "longitude": -95.5275075
+          },
+          "displayName": {
+            "text": "Stomp's Burger Joint",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJUSRiYjnvQIYRp7GjiZW9MHg",
+          "types": [
+            "dentist",
+            "point_of_interest",
+            "health",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102379,
+            "longitude": -95.5271731
+          },
+          "displayName": {
+            "text": "Missouri City Dentist - Excel Dental",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJyyRSKcnvQIYRXN0CB8jP-3Q",
+          "types": [
+            "sushi_restaurant",
+            "japanese_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5101188,
+            "longitude": -95.52730539999999
+          },
+          "displayName": {
+            "text": "Sushi Monster",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRuVP6yIeZDxo",
+          "types": [
+            "sandwich_shop",
+            "catering_service",
+            "meal_takeaway",
+            "food_delivery",
+            "fast_food_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510264699999993,
+            "longitude": -95.5275916
+          },
+          "displayName": {
+            "text": "Subway",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJs0obscnvQIYRD0-IY22MMp4",
+          "types": [
+            "child_care_agency",
+            "consultant",
+            "school",
+            "educational_institution",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5104559,
+            "longitude": -95.5276562
+          },
+          "displayName": {
+            "text": "Mathnasium",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJzbdmoknvQIYRXqSfA6YJrJI",
+          "types": [
+            "liquor_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102038,
+            "longitude": -95.527259
+          },
+          "displayName": {
+            "text": "Jellos Liqour",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRs5Oeodhu6Bg",
+          "types": [
+            "donut_shop",
+            "bakery",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510274100000004,
+            "longitude": -95.52761729999999
+          },
+          "displayName": {
+            "text": "Snowflake Donuts",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRfdo6lwmcf2g",
+          "types": [
+            "laundry",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510567999999996,
+            "longitude": -95.527692
+          },
+          "displayName": {
+            "text": "Sienna Cleaners #1",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJcVKZt8nvQIYRV3ym2VCe1lQ",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510571000000002,
+            "longitude": -95.52700999999999
+          },
+          "displayName": {
+            "text": "Timewise",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJX9tAscnvQIYRZFRZL9Fkm0Y",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510277400000003,
+            "longitude": -95.5269938
+          },
+          "displayName": {
+            "text": "Sienna Market & Deli",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJY4QmtMnvQIYRM_joYsszgG0",
+          "types": [
+            "building_materials_store",
+            "home_goods_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510386900000004,
+            "longitude": -95.52764909999999
+          },
+          "displayName": {
+            "text": "My Beauty Floors",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJg7RHtsnvQIYROad3Fyq0-A0",
+          "types": [
+            "shopping_mall",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510527500000002,
+            "longitude": -95.5271308
+          },
+          "displayName": {
+            "text": "The Village Of Bees Creek",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJgZbztsnvQIYR93CXXmdfL2U",
+          "types": [
+            "atm",
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5102971,
+            "longitude": -95.5270109
+          },
+          "displayName": {
+            "text": "ATM (Sienna Market & Deli)",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJAQAAt8nvQIYRd8ofipT8jpA",
+          "types": [
+            "dentist",
+            "point_of_interest",
+            "health",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5105083,
+            "longitude": -95.527118
+          },
+          "displayName": {
+            "text": "Dr. Jenny Lu",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJSXxUBADvQIYRG4yGCDwWn2I",
+          "types": [
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510546699999995,
+            "longitude": -95.5269905
+          },
+          "displayName": {
+            "text": "Work jellos",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJO8dxZADvQIYRveunYkVsCVc",
+          "types": [
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5105083,
+            "longitude": -95.527118
+          },
+          "displayName": {
+            "text": "airductcleaningmissouricity.",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJi-bp58bvQIYRw0Fm9xiF5OA",
+          "types": [
+            "business_center",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.510550300000002,
+            "longitude": -95.5269898
+          },
+          "displayName": {
+            "text": "unlockhousedoorsmissouricity.",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Missouri City Dentist - Excel Dental",
+        "types": [
+          "dentist",
+          "point_of_interest",
+          "health",
+          "establishment"
+        ],
+        "lat": 29.5102379,
+        "lng": -95.5271731,
+        "dist_m": 8.937023722327213
+      },
+      {
+        "name": "ATM (Sienna Market & Deli)",
+        "types": [
+          "atm",
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102971,
+        "lng": -95.5270109,
+        "dist_m": 13.70894275515659
+      },
+      {
+        "name": "Sienna Market & Deli",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510277400000003,
+        "lng": -95.5269938,
+        "dist_m": 15.794123673166137
+      },
+      {
+        "name": "Jellos Liqour",
+        "types": [
+          "liquor_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102038,
+        "lng": -95.527259,
+        "dist_m": 16.26277605351239
+      },
+      {
+        "name": "Dr. Jenny Lu",
+        "types": [
+          "dentist",
+          "point_of_interest",
+          "health",
+          "establishment"
+        ],
+        "lat": 29.5105083,
+        "lng": -95.527118,
+        "dist_m": 21.603607086983235
+      },
+      {
+        "name": "airductcleaningmissouricity.",
+        "types": [
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5105083,
+        "lng": -95.527118,
+        "dist_m": 21.603607086983235
+      },
+      {
+        "name": "The Village Of Bees Creek",
+        "types": [
+          "shopping_mall",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510527500000002,
+        "lng": -95.5271308,
+        "dist_m": 23.581012020542573
+      },
+      {
+        "name": "Sushi Monster",
+        "types": [
+          "sushi_restaurant",
+          "japanese_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5101188,
+        "lng": -95.52730539999999,
+        "dist_m": 26.51411242303621
+      },
+      {
+        "name": "Work jellos",
+        "types": [
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510546699999995,
+        "lng": -95.5269905,
+        "dist_m": 29.96545414484644
+      },
+      {
+        "name": "unlockhousedoorsmissouricity.",
+        "types": [
+          "business_center",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510550300000002,
+        "lng": -95.5269898,
+        "dist_m": 30.343048910231825
+      },
+      {
+        "name": "Shell",
+        "types": [
+          "gas_station",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510571000000002,
+        "lng": -95.52700999999999,
+        "dist_m": 31.443064221585455
+      },
+      {
+        "name": "Timewise",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510571000000002,
+        "lng": -95.52700999999999,
+        "dist_m": 31.443064221585455
+      },
+      {
+        "name": "Stomp's Burger Joint",
+        "types": [
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5102437,
+        "lng": -95.5275075,
+        "dist_m": 35.39588073657621
+      },
+      {
+        "name": "Subway",
+        "types": [
+          "sandwich_shop",
+          "catering_service",
+          "meal_takeaway",
+          "food_delivery",
+          "fast_food_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510264699999993,
+        "lng": -95.5275916,
+        "dist_m": 42.98398068767177
+      },
+      {
+        "name": "Snowflake Donuts",
+        "types": [
+          "donut_shop",
+          "bakery",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510274100000004,
+        "lng": -95.52761729999999,
+        "dist_m": 45.329174523057475
+      },
+      {
+        "name": "My Beauty Floors",
+        "types": [
+          "building_materials_store",
+          "home_goods_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.510386900000004,
+        "lng": -95.52764909999999,
+        "dist_m": 48.804372152357296
+      },
+      {
+        "name": "Mathnasium",
+        "types": [
+          "child_care_agency",
+          "consultant",
+          "school",
+          "educational_institution",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5104559,
+        "lng": -95.5276562,
+        "dist_m": 51.264415614206875
+      },
+      {
+        "name": "Sienna Cleaners #1",
+        "types": [
+          "laundry",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.510567999999996,
+        "lng": -95.527692,
+        "dist_m": 59.334699576267134
+      }
+    ]
+  },
+  {
+    "label": "Stop 3 \u2014 home return (09:25:40+)",
+    "lat": 29.506411,
+    "lng": -95.50235,
+    "expected": "NONE_or_residential",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ64e2k5LvQIYRvlSm_jHE4bY",
+          "types": [
+            "event_venue",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.506577299999996,
+            "longitude": -95.50379249999999
+          },
+          "displayName": {
+            "text": "The Ranch on McKeever",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJeez3kqDvQIYRdq8Td9PiX7g",
+          "types": [
+            "general_contractor",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5066383,
+            "longitude": -95.50316769999999
+          },
+          "displayName": {
+            "text": "Southwest Irrigation Systems",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Southwest Irrigation Systems",
+        "types": [
+          "general_contractor",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.5066383,
+        "lng": -95.50316769999999,
+        "dist_m": 83.00686788368104
+      },
+      {
+        "name": "The Ranch on McKeever",
+        "types": [
+          "event_venue",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.506577299999996,
+        "lng": -95.50379249999999,
+        "dist_m": 140.70811464263045
+      }
+    ]
+  }
+]

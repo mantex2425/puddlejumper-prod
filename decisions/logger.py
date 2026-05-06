@@ -83,7 +83,10 @@ def log_decision(cur, conn, uid, params, ep, result):
                     trip_miles, trip_minutes,
                     fare, ride_type, is_surge, is_priority, is_reserve,
                     effective_hourly_rate, dollars_per_mile,
-                    app_verdict, app_reason, mode_at_decision, market_name
+                    app_verdict, app_reason, mode_at_decision, market_name,
+                    leg_start_cumulative_miles_pickup,
+                    miles_at_offer_receipt,
+                    lat_at_offer_receipt, lng_at_offer_receipt
                 ) VALUES (
                     NOW(),
                     EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
@@ -97,7 +100,10 @@ def log_decision(cur, conn, uid, params, ep, result):
                     %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s,
-                    %s, %s, %s, %s
+                    %s, %s, %s, %s,
+                    %s,
+                    %s,
+                    %s, %s
                 )
             """, (
                 decision_log_id,
@@ -114,6 +120,10 @@ def log_decision(cur, conn, uid, params, ep, result):
                 _safe_numeric(result.get("hourlyRate")), _safe_numeric(result.get("dollarsPerMile")),
                 result["verdict"], result.get("reason"),
                 ep["mode_name"], ep["market_name"],
+                # Sprint A gate-layer additions:
+                ep.get("cumulative_miles"),                    # leg_start_cumulative_miles_pickup
+                ep.get("cumulative_miles"),                    # miles_at_offer_receipt (same source)
+                ep.get("current_lat"), ep.get("current_lng"),  # lat/lng_at_offer_receipt
             ))
             conn.commit()
             logging.info(f"[LOG] Offer history logged -- id: {decision_log_id}")

@@ -399,6 +399,9 @@ class DriverQueue:
                 pickup_lat, pickup_lng,
                 dropoff_lat, dropoff_lng,
                 created_at,
+                pickup_miles, trip_miles,
+                leg_start_cumulative_miles_pickup,
+                leg_start_cumulative_miles_dropoff,
                 COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
             FROM app_private.offer_history
             WHERE decision_log_id IN (
@@ -443,6 +446,20 @@ class DriverQueue:
                 accepted_at=o['created_at'],
                 pickup=pickup_spec,
                 dropoff=dropoff_spec,
+                pickup_miles=(
+                    float(o['pickup_miles']) if o.get('pickup_miles') is not None else None
+                ),
+                trip_miles=(
+                    float(o['trip_miles']) if o.get('trip_miles') is not None else None
+                ),
+                leg_start_cumulative_miles_pickup=(
+                    float(o['leg_start_cumulative_miles_pickup'])
+                    if o.get('leg_start_cumulative_miles_pickup') is not None else None
+                ),
+                leg_start_cumulative_miles_dropoff=(
+                    float(o['leg_start_cumulative_miles_dropoff'])
+                    if o.get('leg_start_cumulative_miles_dropoff') is not None else None
+                ),
             ))
         return tuple(offers)
 

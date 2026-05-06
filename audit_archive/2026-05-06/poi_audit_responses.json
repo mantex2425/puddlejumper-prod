@@ -1,0 +1,3103 @@
+[
+  {
+    "label": "1900 Yorktown Galleria Apartments",
+    "lat": 29.7464275,
+    "lng": -95.4714857,
+    "expected": "apartment_complex",
+    "bucket": "apt",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJqX1pll3BQIYR-ErqK56Rmdg",
+          "types": [
+            "apartment_complex",
+            "apartment_building",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.746427500000003,
+            "longitude": -95.4714857
+          },
+          "displayName": {
+            "text": "1900 Yorktown Galleria Apartments",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ__8_6l3BQIYRRRmZl6CDRYg",
+          "types": [
+            "consultant",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.746561300000003,
+            "longitude": -95.4714829
+          },
+          "displayName": {
+            "text": "Profit Gold Consulting Group",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJPUOZQWfBQIYR2d8jbAf4zIU",
+          "types": [
+            "lodging",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7461834,
+            "longitude": -95.4717178
+          },
+          "displayName": {
+            "text": "Reginas Chateau 3 Min - Galleria",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "1900 Yorktown Galleria Apartments",
+        "types": [
+          "apartment_complex",
+          "apartment_building",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.746427500000003,
+        "lng": -95.4714857,
+        "dist_m": 3.9474556956520246e-10
+      },
+      {
+        "name": "Profit Gold Consulting Group",
+        "types": [
+          "consultant",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.746561300000003,
+        "lng": -95.4714829,
+        "dist_m": 14.86910549173572
+      },
+      {
+        "name": "Reginas Chateau 3 Min - Galleria",
+        "types": [
+          "lodging",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7461834,
+        "lng": -95.4717178,
+        "dist_m": 35.17038901965238
+      }
+    ]
+  },
+  {
+    "label": "Costa Verde Apartments",
+    "lat": 29.6894187,
+    "lng": -95.5074848,
+    "expected": "apartment_complex",
+    "bucket": "apt",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJMUe3ZjLDQIYR-W-tSbPS8v8",
+          "types": [
+            "apartment_complex",
+            "apartment_building",
+            "real_estate_agency",
+            "point_of_interest",
+            "finance",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.689418699999997,
+            "longitude": -95.5074848
+          },
+          "displayName": {
+            "text": "Costa Verde Apartments",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJIStSCG_CQIYR9Sxr00MnCfQ",
+          "types": [
+            "apartment_complex",
+            "apartment_building",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.6897316,
+            "longitude": -95.5074435
+          },
+          "displayName": {
+            "text": "Forest Green Apartments",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ-Z5GYADDQIYR6Fvy4o3IGdw",
+          "types": [
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.689418699999997,
+            "longitude": -95.5074848
+          },
+          "displayName": {
+            "text": "Alora apartamentos",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJB8iEkzLDQIYRRdyfDzwfOFU",
+          "types": [
+            "car_repair",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.689549000000003,
+            "longitude": -95.5076078
+          },
+          "displayName": {
+            "text": "Gerson mec\u00e1nico",
+            "languageCode": "es"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Costa Verde Apartments",
+        "types": [
+          "apartment_complex",
+          "apartment_building",
+          "real_estate_agency",
+          "point_of_interest",
+          "finance",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.689418699999997,
+        "lng": -95.5074848,
+        "dist_m": 3.9474556956520246e-10
+      },
+      {
+        "name": "Alora apartamentos",
+        "types": [
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.689418699999997,
+        "lng": -95.5074848,
+        "dist_m": 3.9474556956520246e-10
+      },
+      {
+        "name": "Gerson mec\u00e1nico",
+        "types": [
+          "car_repair",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.689549000000003,
+        "lng": -95.5076078,
+        "dist_m": 18.72331577644766
+      },
+      {
+        "name": "Forest Green Apartments",
+        "types": [
+          "apartment_complex",
+          "apartment_building",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.6897316,
+        "lng": -95.5074435,
+        "dist_m": 34.99443644273367
+      }
+    ]
+  },
+  {
+    "label": "Texas Medical Center hub",
+    "lat": 29.7031,
+    "lng": -95.3998,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Houston Methodist (TMC)",
+    "lat": 29.7105,
+    "lng": -95.3988,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJVVXFMHHAQIYRC6xC_u9PE9A",
+          "types": [
+            "general_hospital",
+            "hospital",
+            "health",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7103654,
+            "longitude": -95.3990881
+          },
+          "displayName": {
+            "text": "Houston Methodist Hospital",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJHado0XbAQIYRF6xfFiaCiBk",
+          "types": [
+            "heliport",
+            "airport",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.710525999999998,
+            "longitude": -95.3989453
+          },
+          "displayName": {
+            "text": "Methodist Hospital Alkek Heliport",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ7_w70XbAQIYRWFoLgBt3Db0",
+          "types": [
+            "heliport",
+            "airport",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7105584,
+            "longitude": -95.3987604
+          },
+          "displayName": {
+            "text": "Helipad",
+            "languageCode": "cs"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Helipad",
+        "types": [
+          "heliport",
+          "airport",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7105584,
+        "lng": -95.3987604,
+        "dist_m": 7.5306058080355385
+      },
+      {
+        "name": "Methodist Hospital Alkek Heliport",
+        "types": [
+          "heliport",
+          "airport",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.710525999999998,
+        "lng": -95.3989453,
+        "dist_m": 14.316588495323938
+      },
+      {
+        "name": "Houston Methodist Hospital",
+        "types": [
+          "general_hospital",
+          "hospital",
+          "health",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7103654,
+        "lng": -95.3990881,
+        "dist_m": 31.570110489380344
+      }
+    ]
+  },
+  {
+    "label": "Memorial Hermann Memorial City",
+    "lat": 29.7758,
+    "lng": -95.5485,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Houston Methodist Baytown",
+    "lat": 29.7369,
+    "lng": -94.9754,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Houston Methodist Clear Lake",
+    "lat": 29.5309,
+    "lng": -95.1278,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Houston Methodist Sugar Land",
+    "lat": 29.5779,
+    "lng": -95.6322,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Houston Methodist Willowbrook",
+    "lat": 29.9806,
+    "lng": -95.5562,
+    "expected": "hospital",
+    "bucket": "hospital",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "IAH (George Bush)",
+    "lat": 29.9844353,
+    "lng": -95.3414425,
+    "expected": "airport",
+    "bucket": "airport",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Hobby (HOU)",
+    "lat": 29.64686,
+    "lng": -95.27878,
+    "expected": "airport",
+    "bucket": "airport",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Ellington (EFD)",
+    "lat": 29.607333,
+    "lng": -95.15875,
+    "expected": "airport",
+    "bucket": "airport",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Giant Leap Coffee",
+    "lat": 29.7554,
+    "lng": -95.4593,
+    "expected": "cafe",
+    "bucket": "coffee",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "La Tazza",
+    "lat": 29.6845,
+    "lng": -95.4371,
+    "expected": "cafe",
+    "bucket": "coffee",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Long Coffee (Bellaire)",
+    "lat": 29.7061,
+    "lng": -95.5768,
+    "expected": "cafe",
+    "bucket": "coffee",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ_fAkSDvdQIYRXT0eyQ-JLZc",
+          "types": [
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7058671,
+            "longitude": -95.5763522
+          },
+          "displayName": {
+            "text": "Brays Village Patio Homes Maintenance Fund",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Brays Village Patio Homes Maintenance Fund",
+        "types": [
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7058671,
+        "lng": -95.5763522,
+        "dist_m": 50.37196420069336
+      }
+    ]
+  },
+  {
+    "label": "Luce Coffee Roasters",
+    "lat": 29.8149,
+    "lng": -95.4357,
+    "expected": "cafe",
+    "bucket": "coffee",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Pistachio's Coffee",
+    "lat": 29.7824,
+    "lng": -95.5413,
+    "expected": "cafe",
+    "bucket": "coffee",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJdzDY4b3EQIYR0CNQ9gtArf4",
+          "types": [
+            "department_store",
+            "toy_store",
+            "shoe_store",
+            "child_care_agency",
+            "furniture_store",
+            "home_improvement_store",
+            "home_goods_store",
+            "electronics_store",
+            "supplier",
+            "clothing_store",
+            "store",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782643699999994,
+            "longitude": -95.5415654
+          },
+          "displayName": {
+            "text": "Target",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJMevhOZbEQIYRm_QKG2o9MRU",
+          "types": [
+            "shoe_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7820403,
+            "longitude": -95.5413777
+          },
+          "displayName": {
+            "text": "Famous Footwear",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJi6NVmL3EQIYR6RKQmzkNG-8",
+          "types": [
+            "child_care_agency",
+            "clothing_store",
+            "store",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782168499999997,
+            "longitude": -95.5415102
+          },
+          "displayName": {
+            "text": "The Children's Place",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJHRD4gr7EQIYRnhkQ4bCKWqg",
+          "types": [
+            "pharmacy",
+            "store",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782643699999994,
+            "longitude": -95.5415654
+          },
+          "displayName": {
+            "text": "CVS Pharmacy",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJBdV-5L3EQIYRHOKaFQj35TU",
+          "types": [
+            "coffee_shop",
+            "cafe",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.78265,
+            "longitude": -95.54155999999999
+          },
+          "displayName": {
+            "text": "Starbucks Coffee Company",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJDyzMNCnFQIYRIv38_4bEYbk",
+          "types": [
+            "store",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7826828,
+            "longitude": -95.5415481
+          },
+          "displayName": {
+            "text": "Target Optical",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJdzDY4b3EQIYRM4iuUxK7DPU",
+          "types": [
+            "cell_phone_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782742499999998,
+            "longitude": -95.54124540000001
+          },
+          "displayName": {
+            "text": "Target Mobile",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ6xJh473EQIYRgfoYoIyRZb8",
+          "types": [
+            "pizza_restaurant",
+            "meal_takeaway",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7827031,
+            "longitude": -95.5415111
+          },
+          "displayName": {
+            "text": "Pizza Hut Express",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJPXI99L3EQIYRmqllZLiOnKc",
+          "types": [
+            "non_profit_organization",
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782079699999997,
+            "longitude": -95.54108
+          },
+          "displayName": {
+            "text": "Virtuosi of Houston",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJJbGqfevFQIYRDN2RDQmiNxc",
+          "types": [
+            "cell_phone_store",
+            "supplier",
+            "store",
+            "point_of_interest",
+            "manufacturer",
+            "telecommunications_service_provider",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782640899999997,
+            "longitude": -95.54164999999999
+          },
+          "displayName": {
+            "text": "AT&T Kiosk in Target",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJacGkRJDFQIYR06eINUXWnUk",
+          "types": [
+            "medical_clinic",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782640899999997,
+            "longitude": -95.54164999999999
+          },
+          "displayName": {
+            "text": "Nellie and Juliet Eyecare",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJzzjm7r3EQIYRr_00tUh-uTE",
+          "types": [
+            "child_care_agency",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7820829,
+            "longitude": -95.541618
+          },
+          "displayName": {
+            "text": "Strollers",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ9wjjxd4dQYYRG35YFvoQ-54",
+          "types": [
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782643699999994,
+            "longitude": -95.5415654
+          },
+          "displayName": {
+            "text": "Bunker Hill Village TX Dryer Vent Cleaning",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJb8-W8L3EQIYRENePYIRfg2I",
+          "types": [
+            "point_of_interest",
+            "subpremise",
+            "establishment",
+            "street_address"
+          ],
+          "location": {
+            "latitude": 29.782249,
+            "longitude": -95.5410922
+          },
+          "displayName": {
+            "text": "Vending Machine",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJP9oOfEbFQIYRW2AAJ8T1j5U",
+          "types": [
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782640899999997,
+            "longitude": -95.54164999999999
+          },
+          "displayName": {
+            "text": "CDReload by Crypto Dispensers - CVS Pharmacy",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJzToR41TFQIYRVy2RGi-bMto",
+          "types": [
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.782640899999997,
+            "longitude": -95.54164999999999
+          },
+          "displayName": {
+            "text": "LibertyX Bitcoin ATM",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Vending Machine",
+        "types": [
+          "point_of_interest",
+          "subpremise",
+          "establishment",
+          "street_address"
+        ],
+        "lat": 29.782249,
+        "lng": -95.5410922,
+        "dist_m": 26.135515404207272
+      },
+      {
+        "name": "The Children's Place",
+        "types": [
+          "child_care_agency",
+          "clothing_store",
+          "store",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.782168499999997,
+        "lng": -95.5415102,
+        "dist_m": 32.74955196874461
+      },
+      {
+        "name": "Target",
+        "types": [
+          "department_store",
+          "toy_store",
+          "shoe_store",
+          "child_care_agency",
+          "furniture_store",
+          "home_improvement_store",
+          "home_goods_store",
+          "electronics_store",
+          "supplier",
+          "clothing_store",
+          "store",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.782643699999994,
+        "lng": -95.5415654,
+        "dist_m": 37.259246125021065
+      },
+      {
+        "name": "CVS Pharmacy",
+        "types": [
+          "pharmacy",
+          "store",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782643699999994,
+        "lng": -95.5415654,
+        "dist_m": 37.259246125021065
+      },
+      {
+        "name": "Bunker Hill Village TX Dryer Vent Cleaning",
+        "types": [
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.782643699999994,
+        "lng": -95.5415654,
+        "dist_m": 37.259246125021065
+      },
+      {
+        "name": "Starbucks Coffee Company",
+        "types": [
+          "coffee_shop",
+          "cafe",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.78265,
+        "lng": -95.54155999999999,
+        "dist_m": 37.42011974250896
+      },
+      {
+        "name": "Target Mobile",
+        "types": [
+          "cell_phone_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782742499999998,
+        "lng": -95.54124540000001,
+        "dist_m": 38.418047572582026
+      },
+      {
+        "name": "Pizza Hut Express",
+        "types": [
+          "pizza_restaurant",
+          "meal_takeaway",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7827031,
+        "lng": -95.5415111,
+        "dist_m": 39.35246107699344
+      },
+      {
+        "name": "Target Optical",
+        "types": [
+          "store",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7826828,
+        "lng": -95.5415481,
+        "dist_m": 39.49412664734037
+      },
+      {
+        "name": "Famous Footwear",
+        "types": [
+          "shoe_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7820403,
+        "lng": -95.5413777,
+        "dist_m": 40.66296568309326
+      },
+      {
+        "name": "Virtuosi of Houston",
+        "types": [
+          "non_profit_organization",
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782079699999997,
+        "lng": -95.54108,
+        "dist_m": 41.43279053801707
+      },
+      {
+        "name": "AT&T Kiosk in Target",
+        "types": [
+          "cell_phone_store",
+          "supplier",
+          "store",
+          "point_of_interest",
+          "manufacturer",
+          "telecommunications_service_provider",
+          "establishment"
+        ],
+        "lat": 29.782640899999997,
+        "lng": -95.54164999999999,
+        "dist_m": 43.07749338129675
+      },
+      {
+        "name": "Nellie and Juliet Eyecare",
+        "types": [
+          "medical_clinic",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782640899999997,
+        "lng": -95.54164999999999,
+        "dist_m": 43.07749338129675
+      },
+      {
+        "name": "CDReload by Crypto Dispensers - CVS Pharmacy",
+        "types": [
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782640899999997,
+        "lng": -95.54164999999999,
+        "dist_m": 43.07749338129675
+      },
+      {
+        "name": "LibertyX Bitcoin ATM",
+        "types": [
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.782640899999997,
+        "lng": -95.54164999999999,
+        "dist_m": 43.07749338129675
+      },
+      {
+        "name": "Strollers",
+        "types": [
+          "child_care_agency",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7820829,
+        "lng": -95.541618,
+        "dist_m": 46.70992234469393
+      }
+    ]
+  },
+  {
+    "label": "Starbucks W 43rd",
+    "lat": 29.82866,
+    "lng": -95.43039,
+    "expected": "cafe",
+    "bucket": "chain_starbucks",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJNQ9X-LHHQIYRcLmwovTfhw4",
+          "types": [
+            "coffee_shop",
+            "breakfast_restaurant",
+            "internet_cafe",
+            "cafe",
+            "restaurant",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.828664800000002,
+            "longitude": -95.43040359999999
+          },
+          "displayName": {
+            "text": "Starbucks Coffee Company",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJbQgO97HHQIYRcXIgK_5ZjXo",
+          "types": [
+            "massage_spa",
+            "skin_care_clinic",
+            "wellness_center",
+            "spa",
+            "massage",
+            "beauty_salon",
+            "point_of_interest",
+            "service",
+            "medical_clinic",
+            "health",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.8288463,
+            "longitude": -95.4303789
+          },
+          "displayName": {
+            "text": "Massage Envy",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ1SQ347HHQIYRqyjiw6rMuWg",
+          "types": [
+            "hair_salon",
+            "hair_care",
+            "beauty_salon",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.828910299999997,
+            "longitude": -95.43040309999999
+          },
+          "displayName": {
+            "text": "Great Clips",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJnSiy8k3HQIYRA3yUrjX3Ryc",
+          "types": [
+            "shopping_mall",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.828754500000002,
+            "longitude": -95.4304757
+          },
+          "displayName": {
+            "text": "The Shops at Oak Forest",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJuxhyWN_HQIYRZSWT1lEk03Y",
+          "types": [
+            "fast_food_restaurant",
+            "pizza_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.828544199999996,
+            "longitude": -95.42995069999999
+          },
+          "displayName": {
+            "text": "Hunts brother pizza",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJORaPzsnHQIYRfOF6U_2qILg",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.828565799999996,
+            "longitude": -95.4300026
+          },
+          "displayName": {
+            "text": "Handi Stop",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJGzun843HQIYRfvqvorhKgtg",
+          "types": [
+            "atm",
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.8286228,
+            "longitude": -95.43008209999999
+          },
+          "displayName": {
+            "text": "ATM (ATM Link, Inc.)",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Starbucks Coffee Company",
+        "types": [
+          "coffee_shop",
+          "breakfast_restaurant",
+          "internet_cafe",
+          "cafe",
+          "restaurant",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.828664800000002,
+        "lng": -95.43040359999999,
+        "dist_m": 1.4152513572687395
+      },
+      {
+        "name": "The Shops at Oak Forest",
+        "types": [
+          "shopping_mall",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.828754500000002,
+        "lng": -95.4304757,
+        "dist_m": 13.359960074472735
+      },
+      {
+        "name": "Massage Envy",
+        "types": [
+          "massage_spa",
+          "skin_care_clinic",
+          "wellness_center",
+          "spa",
+          "massage",
+          "beauty_salon",
+          "point_of_interest",
+          "service",
+          "medical_clinic",
+          "health",
+          "establishment"
+        ],
+        "lat": 29.8288463,
+        "lng": -95.4303789,
+        "dist_m": 20.727612126873662
+      },
+      {
+        "name": "Great Clips",
+        "types": [
+          "hair_salon",
+          "hair_care",
+          "beauty_salon",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.828910299999997,
+        "lng": -95.43040309999999,
+        "dist_m": 27.839734301187576
+      },
+      {
+        "name": "ATM (ATM Link, Inc.)",
+        "types": [
+          "atm",
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.8286228,
+        "lng": -95.43008209999999,
+        "dist_m": 29.96512846264066
+      },
+      {
+        "name": "Handi Stop",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.828565799999996,
+        "lng": -95.4300026,
+        "dist_m": 38.78089352537016
+      },
+      {
+        "name": "Hunts brother pizza",
+        "types": [
+          "fast_food_restaurant",
+          "pizza_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.828544199999996,
+        "lng": -95.42995069999999,
+        "dist_m": 44.25609876116698
+      }
+    ]
+  },
+  {
+    "label": "Starbucks S Shepherd",
+    "lat": 29.74051,
+    "lng": -95.41043,
+    "expected": "cafe",
+    "bucket": "chain_starbucks",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJpd0KxZPAQIYR2MZ0PU6A6lU",
+          "types": [
+            "steak_house",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7401973,
+            "longitude": -95.4104852
+          },
+          "displayName": {
+            "text": "Doris Metropolitan",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJM_flZWfAQIYRihFWbVyFy78",
+          "types": [
+            "beauty_salon",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409587,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Amazing Lash Studio",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJLxmyVUfBQIYRU7VfI-aA7wE",
+          "types": [
+            "pet_care",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409159,
+            "longitude": -95.41031339999999
+          },
+          "displayName": {
+            "text": "Scenthound River Oaks",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJsxZfSkfBQIYRFeF4guSMiSc",
+          "types": [
+            "fitness_center",
+            "gym",
+            "sports_activity_location",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409587,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "StretchLab",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJO6oQddTBQIYR1SIeLSNhP5c",
+          "types": [
+            "medical_clinic",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409587,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Equity Urgent Care",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJNeQ5CpTAQIYR06AS_AYTxgI",
+          "types": [
+            "dentist",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409588,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Andrew J Keene, DDS",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ_T7Y55PAQIYRFxZpvyxAG6w",
+          "types": [
+            "beauty_salon",
+            "medical_clinic",
+            "hair_care",
+            "spa",
+            "health",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409587,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Amerejuve Medspa Shepherd",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJs_IgxJPAQIYRd1KuIsNz42M",
+          "types": [
+            "bus_stop",
+            "transit_stop",
+            "transit_station",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.740337999999994,
+            "longitude": -95.410641
+          },
+          "displayName": {
+            "text": "S Shepherd Dr @ Harold St",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJCxFqwZPAQIYRN4FXAxxUfBQ",
+          "types": [
+            "transit_station",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.740545,
+            "longitude": -95.41071000000001
+          },
+          "displayName": {
+            "text": "Shepherd Dr @ Harold St",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJNeQ5CpTAQIYRAht1swD6Hn8",
+          "types": [
+            "dentist",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409159,
+            "longitude": -95.41031339999999
+          },
+          "displayName": {
+            "text": "Dr. Ronald D. Garcia, DDS",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJNeQ5CpTAQIYRz3dSLQJTJ9Y",
+          "types": [
+            "doctor",
+            "health",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409588,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Terrence H. Upton, DPM",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJWa2G6JPAQIYRmxjSYbU9e7A",
+          "types": [
+            "tanning_studio",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409159,
+            "longitude": -95.41031339999999
+          },
+          "displayName": {
+            "text": "Can I Tan After Laser Hair Removal",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJx_pFCpTAQIYRVyKvjlVMOEs",
+          "types": [
+            "skin_care_clinic",
+            "beauty_salon",
+            "medical_clinic",
+            "hair_care",
+            "health",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7409588,
+            "longitude": -95.41031199999999
+          },
+          "displayName": {
+            "text": "Center For Beautiful Bodies",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Shepherd Dr @ Harold St",
+        "types": [
+          "transit_station",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.740545,
+        "lng": -95.41071000000001,
+        "dist_m": 27.291646204433185
+      },
+      {
+        "name": "S Shepherd Dr @ Harold St",
+        "types": [
+          "bus_stop",
+          "transit_stop",
+          "transit_station",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.740337999999994,
+        "lng": -95.410641,
+        "dist_m": 27.92159262452291
+      },
+      {
+        "name": "Doris Metropolitan",
+        "types": [
+          "steak_house",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.7401973,
+        "lng": -95.4104852,
+        "dist_m": 35.1501710765413
+      },
+      {
+        "name": "Scenthound River Oaks",
+        "types": [
+          "pet_care",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409159,
+        "lng": -95.41031339999999,
+        "dist_m": 46.48168001208575
+      },
+      {
+        "name": "Dr. Ronald D. Garcia, DDS",
+        "types": [
+          "dentist",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409159,
+        "lng": -95.41031339999999,
+        "dist_m": 46.48168001208575
+      },
+      {
+        "name": "Can I Tan After Laser Hair Removal",
+        "types": [
+          "tanning_studio",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409159,
+        "lng": -95.41031339999999,
+        "dist_m": 46.48168001208575
+      },
+      {
+        "name": "Amazing Lash Studio",
+        "types": [
+          "beauty_salon",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409587,
+        "lng": -95.41031199999999,
+        "dist_m": 51.138723025016404
+      },
+      {
+        "name": "StretchLab",
+        "types": [
+          "fitness_center",
+          "gym",
+          "sports_activity_location",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409587,
+        "lng": -95.41031199999999,
+        "dist_m": 51.138723025016404
+      },
+      {
+        "name": "Equity Urgent Care",
+        "types": [
+          "medical_clinic",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409587,
+        "lng": -95.41031199999999,
+        "dist_m": 51.138723025016404
+      },
+      {
+        "name": "Amerejuve Medspa Shepherd",
+        "types": [
+          "beauty_salon",
+          "medical_clinic",
+          "hair_care",
+          "spa",
+          "health",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409587,
+        "lng": -95.41031199999999,
+        "dist_m": 51.138723025016404
+      },
+      {
+        "name": "Andrew J Keene, DDS",
+        "types": [
+          "dentist",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409588,
+        "lng": -95.41031199999999,
+        "dist_m": 51.14955537429795
+      },
+      {
+        "name": "Terrence H. Upton, DPM",
+        "types": [
+          "doctor",
+          "health",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409588,
+        "lng": -95.41031199999999,
+        "dist_m": 51.14955537429795
+      },
+      {
+        "name": "Center For Beautiful Bodies",
+        "types": [
+          "skin_care_clinic",
+          "beauty_salon",
+          "medical_clinic",
+          "hair_care",
+          "health",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7409588,
+        "lng": -95.41031199999999,
+        "dist_m": 51.14955537429795
+      }
+    ]
+  },
+  {
+    "label": "Shell Downtown Hub",
+    "lat": 29.762773,
+    "lng": -95.360715,
+    "expected": "gas_station",
+    "bucket": "gas",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJf1QRkS-_QIYR2DsRPtJiRNA",
+          "types": [
+            "hotel",
+            "wedding_venue",
+            "event_venue",
+            "lodging",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762578299999998,
+            "longitude": -95.36088509999999
+          },
+          "displayName": {
+            "text": "Hotel ICON, Autograph Collection",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJKylKmC-_QIYRI6VQcQpGTCs",
+          "types": [
+            "mosque",
+            "place_of_worship",
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762956000000003,
+            "longitude": -95.36055019999999
+          },
+          "displayName": {
+            "text": "Islamic Da'wah Center",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ0-xIly-_QIYRQ5gP-TYjqRk",
+          "types": [
+            "electric_vehicle_charging_station",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762729000000004,
+            "longitude": -95.36065699999999
+          },
+          "displayName": {
+            "text": "Shell Recharge Charging Station",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJf1QRkS-_QIYR7EoVnFv8P0g",
+          "types": [
+            "american_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762582099999996,
+            "longitude": -95.3608448
+          },
+          "displayName": {
+            "text": "Line & Lariat",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJewSpky-_QIYRAW7mu3pqt0E",
+          "types": [
+            "parking_lot",
+            "parking",
+            "transportation_service",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762589300000002,
+            "longitude": -95.361072
+          },
+          "displayName": {
+            "text": "903-999 Congress Avenue Parking",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJXdViSFS_QIYR1ht64lQ2oJ8",
+          "types": [
+            "spa",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762546300000004,
+            "longitude": -95.3608756
+          },
+          "displayName": {
+            "text": "Beauty and Beyond Skin Care and Spa",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ3SaZ17a_QIYRz3LqymaB5Ic",
+          "types": [
+            "parking_lot",
+            "parking",
+            "transportation_service",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762691999999994,
+            "longitude": -95.360748
+          },
+          "displayName": {
+            "text": "parkingmgt.com",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJE8dhaS2_QIYRq5DFewFAl6o",
+          "types": [
+            "tourist_attraction",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7626314,
+            "longitude": -95.3606685
+          },
+          "displayName": {
+            "text": "AEC | Big Art Bigger Change | Mural",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJG6riixy_QIYRpkaB_x3-f3g",
+          "types": [
+            "finance",
+            "health",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.762948299999998,
+            "longitude": -95.3605563
+          },
+          "displayName": {
+            "text": "Credex Healthcare Houston - Medical Billing, Credentialing and Licensing",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Shell Recharge Charging Station",
+        "types": [
+          "electric_vehicle_charging_station",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.762729000000004,
+        "lng": -95.36065699999999,
+        "dist_m": 7.429525219130373
+      },
+      {
+        "name": "parkingmgt.com",
+        "types": [
+          "parking_lot",
+          "parking",
+          "transportation_service",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.762691999999994,
+        "lng": -95.360748,
+        "dist_m": 9.54626895833483
+      },
+      {
+        "name": "AEC | Big Art Bigger Change | Mural",
+        "types": [
+          "tourist_attraction",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7626314,
+        "lng": -95.3606685,
+        "dist_m": 16.3601220102204
+      },
+      {
+        "name": "Line & Lariat",
+        "types": [
+          "american_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.762582099999996,
+        "lng": -95.3608448,
+        "dist_m": 24.63036181466847
+      },
+      {
+        "name": "Credex Healthcare Houston - Medical Billing, Credentialing and Licensing",
+        "types": [
+          "finance",
+          "health",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.762948299999998,
+        "lng": -95.3605563,
+        "dist_m": 24.772873434316498
+      },
+      {
+        "name": "Islamic Da'wah Center",
+        "types": [
+          "mosque",
+          "place_of_worship",
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.762956000000003,
+        "lng": -95.36055019999999,
+        "dist_m": 25.80919650587148
+      },
+      {
+        "name": "Hotel ICON, Autograph Collection",
+        "types": [
+          "hotel",
+          "wedding_venue",
+          "event_venue",
+          "lodging",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.762578299999998,
+        "lng": -95.36088509999999,
+        "dist_m": 27.151158831006555
+      },
+      {
+        "name": "Beauty and Beyond Skin Care and Spa",
+        "types": [
+          "spa",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.762546300000004,
+        "lng": -95.3608756,
+        "dist_m": 29.570865595535565
+      },
+      {
+        "name": "903-999 Congress Avenue Parking",
+        "types": [
+          "parking_lot",
+          "parking",
+          "transportation_service",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.762589300000002,
+        "lng": -95.361072,
+        "dist_m": 40.029040510276296
+      }
+    ]
+  },
+  {
+    "label": "Shell Southwest Fwy",
+    "lat": 29.704425,
+    "lng": -95.511742,
+    "expected": "gas_station",
+    "bucket": "gas",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJRVMdNDTDQIYRvanpUMD_CkQ",
+          "types": [
+            "gas_station",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704424999999993,
+            "longitude": -95.51174200000001
+          },
+          "displayName": {
+            "text": "Shell",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJHZ0QelvCQIYRQ8D4BlIphnI",
+          "types": [
+            "electric_vehicle_charging_station",
+            "transportation_service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704124999999998,
+            "longitude": -95.5115
+          },
+          "displayName": {
+            "text": "Shell Recharge Charging Station",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJaXTW94_DQIYRyXThtehnsJg",
+          "types": [
+            "car_wash",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7044599,
+            "longitude": -95.5121434
+          },
+          "displayName": {
+            "text": "Shell Car Wash",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJoeU47zvDQIYR4mhLbXnoARM",
+          "types": [
+            "convenience_store",
+            "food_store",
+            "store",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704424999999993,
+            "longitude": -95.51174200000001
+          },
+          "displayName": {
+            "text": "Timewise",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJw0EtUUPDQIYRy6-OjWOFVsQ",
+          "types": [
+            "atm",
+            "finance",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704420199999994,
+            "longitude": -95.5118085
+          },
+          "displayName": {
+            "text": "FirstCoin ATM",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJB5Z5kRPDQIYRUcQr5v6GWCA",
+          "types": [
+            "car_wash",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704424999999993,
+            "longitude": -95.51174200000001
+          },
+          "displayName": {
+            "text": "Timewise Car Wash",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ9fVbWx3DQIYRmz3fAyjC0w0",
+          "types": [
+            "finance",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.704420199999994,
+            "longitude": -95.5118085
+          },
+          "displayName": {
+            "text": "RockItCoin Bitcoin ATM",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Shell",
+        "types": [
+          "gas_station",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.704424999999993,
+        "lng": -95.51174200000001,
+        "dist_m": 1.5824949453995137e-09
+      },
+      {
+        "name": "Timewise",
+        "types": [
+          "convenience_store",
+          "food_store",
+          "store",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.704424999999993,
+        "lng": -95.51174200000001,
+        "dist_m": 1.5824949453995137e-09
+      },
+      {
+        "name": "Timewise Car Wash",
+        "types": [
+          "car_wash",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.704424999999993,
+        "lng": -95.51174200000001,
+        "dist_m": 1.5824949453995137e-09
+      },
+      {
+        "name": "FirstCoin ATM",
+        "types": [
+          "atm",
+          "finance",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.704420199999994,
+        "lng": -95.5118085,
+        "dist_m": 6.4400546881072005
+      },
+      {
+        "name": "RockItCoin Bitcoin ATM",
+        "types": [
+          "finance",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.704420199999994,
+        "lng": -95.5118085,
+        "dist_m": 6.4400546881072005
+      },
+      {
+        "name": "Shell Car Wash",
+        "types": [
+          "car_wash",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7044599,
+        "lng": -95.5121434,
+        "dist_m": 38.93281111968115
+      },
+      {
+        "name": "Shell Recharge Charging Station",
+        "types": [
+          "electric_vehicle_charging_station",
+          "transportation_service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.704124999999998,
+        "lng": -95.5115,
+        "dist_m": 40.701218030675356
+      }
+    ]
+  },
+  {
+    "label": "Exxon Arcola",
+    "lat": 29.508,
+    "lng": -95.485,
+    "expected": "gas_station",
+    "bucket": "gas",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Cinemark Missouri City",
+    "lat": 29.544,
+    "lng": -95.518,
+    "expected": "movie_theater",
+    "bucket": "entertainment",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Walmart Richmond",
+    "lat": 29.5855,
+    "lng": -95.5714,
+    "expected": "department_store",
+    "bucket": "retail",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJnZToCQbmQIYR6LyweNxsI4M",
+          "types": [
+            "association_or_organization",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.585423400000003,
+            "longitude": -95.5709931
+          },
+          "displayName": {
+            "text": "Brightwater Home Owners Associates",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Brightwater Home Owners Associates",
+        "types": [
+          "association_or_organization",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.585423400000003,
+        "lng": -95.5709931,
+        "dist_m": 40.22713906534881
+      }
+    ]
+  },
+  {
+    "label": "Walmart Sugar Land",
+    "lat": 29.623,
+    "lng": -95.6186,
+    "expected": "department_store",
+    "bucket": "retail",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Assisi Ln & Cinque Terre Dr",
+    "lat": 29.5183041,
+    "lng": -95.5592474,
+    "expected": "NONE",
+    "bucket": "intersection_neg",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Brushy Lake Dr & Spice Ridge Row",
+    "lat": 29.4943891,
+    "lng": -95.5031795,
+    "expected": "NONE",
+    "bucket": "intersection_neg",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Highway 6 & Vicksburg Blvd",
+    "lat": 29.5337218,
+    "lng": -95.5160243,
+    "expected": "NONE",
+    "bucket": "intersection_neg",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJCXE6sFXuQIYRumcH0IM33Q4",
+          "types": [
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5334035,
+            "longitude": -95.51640569999999
+          },
+          "displayName": {
+            "text": "Secure Net Lease",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Secure Net Lease",
+        "types": [
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5334035,
+        "lng": -95.51640569999999,
+        "dist_m": 51.0911356458093
+      }
+    ]
+  },
+  {
+    "label": "Becker Glen St & Dartmouth Field Ln",
+    "lat": 29.5400079,
+    "lng": -95.488207,
+    "expected": "NONE",
+    "bucket": "intersection_neg",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "Sienna Pkwy (Missouri City)",
+    "lat": 29.5140504,
+    "lng": -95.5276629,
+    "expected": "NONE",
+    "bucket": "single_road_neg",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "US-90-ALT (Sugar Land)",
+    "lat": 29.6153849,
+    "lng": -95.6453517,
+    "expected": "NONE",
+    "bucket": "single_road_neg",
+    "raw_response": {
+      "places": []
+    },
+    "parsed_pois": []
+  },
+  {
+    "label": "3333 Weslayan, Leasing Office",
+    "lat": 29.7352515,
+    "lng": -95.4406785,
+    "expected": "apartment_complex",
+    "bucket": "residential_apt",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJGza9VAPBQIYRSoQXRs2ZMk8",
+          "types": [
+            "apartment_complex",
+            "apartment_building",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7351176,
+            "longitude": -95.44115599999999
+          },
+          "displayName": {
+            "text": "3333 Weslayan",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJU1boxI7BQIYRaqDh8f6JMyY",
+          "types": [
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.735526699999998,
+            "longitude": -95.4409391
+          },
+          "displayName": {
+            "text": "The Intuitive Body",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJnyjmZADBQIYRxUSYdzzcan0",
+          "types": [
+            "apartment_complex",
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.735251500000004,
+            "longitude": -95.44067849999999
+          },
+          "displayName": {
+            "text": "2nd Home",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJJxROPHLBQIYR-UNdUb6Coyo",
+          "types": [
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.735251500000004,
+            "longitude": -95.44067849999999
+          },
+          "displayName": {
+            "text": "HoneyFungus",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJhR1f_qrBQIYR-cWjTiXIQO4",
+          "types": [
+            "service",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7351238,
+            "longitude": -95.4406137
+          },
+          "displayName": {
+            "text": "Rebecca Rose Studios, LLC",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "2nd Home",
+        "types": [
+          "apartment_complex",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.735251500000004,
+        "lng": -95.44067849999999,
+        "dist_m": 1.4267666214674005e-09
+      },
+      {
+        "name": "HoneyFungus",
+        "types": [
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.735251500000004,
+        "lng": -95.44067849999999,
+        "dist_m": 1.4267666214674005e-09
+      },
+      {
+        "name": "Rebecca Rose Studios, LLC",
+        "types": [
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7351238,
+        "lng": -95.4406137,
+        "dist_m": 15.50519355440228
+      },
+      {
+        "name": "The Intuitive Body",
+        "types": [
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.735526699999998,
+        "lng": -95.4409391,
+        "dist_m": 39.58737012740886
+      },
+      {
+        "name": "3333 Weslayan",
+        "types": [
+          "apartment_complex",
+          "apartment_building",
+          "service",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7351176,
+        "lng": -95.44115599999999,
+        "dist_m": 48.41228627974466
+      }
+    ]
+  },
+  {
+    "label": "4444 Westheimer Rd",
+    "lat": 29.7421635,
+    "lng": -95.4546113,
+    "expected": "apartment_complex",
+    "bucket": "residential_mixed",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJBx-DjBTBQIYRg-AGJi1o8ac",
+          "types": [
+            "steak_house",
+            "seafood_restaurant",
+            "fine_dining_restaurant",
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7417749,
+            "longitude": -95.4545141
+          },
+          "displayName": {
+            "text": "Steak 48",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJv_D3aRTBQIYRncLMUjWEHAY",
+          "types": [
+            "clothing_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421197,
+            "longitude": -95.45421329999999
+          },
+          "displayName": {
+            "text": "Vince",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJcehCL-bBQIYRHD9kmhpCr0Q",
+          "types": [
+            "restaurant",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.742363,
+            "longitude": -95.4546666
+          },
+          "displayName": {
+            "text": "NC Creative Ventures",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJIZ_tH0fBQIYRSvv0CwITOKI",
+          "types": [
+            "point_of_interest",
+            "finance",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7418305,
+            "longitude": -95.45450609999999
+          },
+          "displayName": {
+            "text": "Maquina",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJc14g9aPBQIYRI_oSni_CCRY",
+          "types": [
+            "auto_parts_store",
+            "car_repair",
+            "store",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7418305,
+            "longitude": -95.45450609999999
+          },
+          "displayName": {
+            "text": "Ander Auto Center",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJm6wglgDBQIYRyFSPrL2ItjY",
+          "types": [
+            "bar_and_grill",
+            "restaurant",
+            "bar",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7418305,
+            "longitude": -95.45450609999999
+          },
+          "displayName": {
+            "text": "\u179c\u17b6\u179f\u17d2\u1793\u17b6",
+            "languageCode": "km"
+          }
+        },
+        {
+          "id": "ChIJHSbu-HDBQIYRwKddChmlWpk",
+          "types": [
+            "art_gallery",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "Opera Gallery Houston",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJkYOSreTBQIYRWphHsuAtyIc",
+          "types": [
+            "parking_garage",
+            "parking_lot",
+            "parking",
+            "transportation_service",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "River Oaks District Parking (Sovereign Services)",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJ-eJ1UrLBQIYRi2b1PBub4Kw",
+          "types": [
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "neighborscleaning",
+            "languageCode": "es"
+          }
+        },
+        {
+          "id": "ChIJJ5tz8p7BQIYRn7uP2u0s_lw",
+          "types": [
+            "health",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "ONG Herbal",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJu8s7AZvBQIYR0sh88cDLtb8",
+          "types": [
+            "cafe",
+            "point_of_interest",
+            "food",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "Cafe Feuillette",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJT1pLgbzBQIYRHkg6AU-fpE8",
+          "types": [
+            "department_store",
+            "store",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "Natura Biss\u00e9 x Cos Bar Houston",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJd7a411XBQIYRgyrC6Rq73vc",
+          "types": [
+            "consultant",
+            "point_of_interest",
+            "service",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.7421635,
+            "longitude": -95.4546113
+          },
+          "displayName": {
+            "text": "TVM Technologies",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Opera Gallery Houston",
+        "types": [
+          "art_gallery",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "River Oaks District Parking (Sovereign Services)",
+        "types": [
+          "parking_garage",
+          "parking_lot",
+          "parking",
+          "transportation_service",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "neighborscleaning",
+        "types": [
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "ONG Herbal",
+        "types": [
+          "health",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "Cafe Feuillette",
+        "types": [
+          "cafe",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "Natura Biss\u00e9 x Cos Bar Houston",
+        "types": [
+          "department_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "TVM Technologies",
+        "types": [
+          "consultant",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7421635,
+        "lng": -95.4546113,
+        "dist_m": 0.0
+      },
+      {
+        "name": "NC Creative Ventures",
+        "types": [
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.742363,
+        "lng": -95.4546666,
+        "dist_m": 22.799614345163405
+      },
+      {
+        "name": "Maquina",
+        "types": [
+          "point_of_interest",
+          "finance",
+          "establishment"
+        ],
+        "lat": 29.7418305,
+        "lng": -95.45450609999999,
+        "dist_m": 38.36666619076058
+      },
+      {
+        "name": "Ander Auto Center",
+        "types": [
+          "auto_parts_store",
+          "car_repair",
+          "store",
+          "point_of_interest",
+          "service",
+          "establishment"
+        ],
+        "lat": 29.7418305,
+        "lng": -95.45450609999999,
+        "dist_m": 38.36666619076058
+      },
+      {
+        "name": "\u179c\u17b6\u179f\u17d2\u1793\u17b6",
+        "types": [
+          "bar_and_grill",
+          "restaurant",
+          "bar",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.7418305,
+        "lng": -95.45450609999999,
+        "dist_m": 38.36666619076058
+      },
+      {
+        "name": "Vince",
+        "types": [
+          "clothing_store",
+          "store",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.7421197,
+        "lng": -95.45421329999999,
+        "dist_m": 38.70384051222013
+      },
+      {
+        "name": "Steak 48",
+        "types": [
+          "steak_house",
+          "seafood_restaurant",
+          "fine_dining_restaurant",
+          "restaurant",
+          "point_of_interest",
+          "food",
+          "establishment"
+        ],
+        "lat": 29.7417749,
+        "lng": -95.4545141,
+        "dist_m": 44.18427675116378
+      }
+    ]
+  },
+  {
+    "label": "3239 Silverlake Village Dr",
+    "lat": 29.5495299,
+    "lng": -95.3862618,
+    "expected": "apartment_complex",
+    "bucket": "residential_apt",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ_1DA0y-TQIYRBqA5ENuIai8",
+          "types": [
+            "steak_house",
+            "seafood_restaurant",
+            "american_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.5491256,
+            "longitude": -95.38622980000001
+          },
+          "displayName": {
+            "text": "Saltgrass Steak House",
+            "languageCode": "en"
+          }
+        },
+        {
+          "id": "ChIJtyeq_y6TQIYRIdJh28WqCgU",
+          "types": [
+            "seafood_restaurant",
+            "fish_and_chips_restaurant",
+            "bar_and_grill",
+            "steak_house",
+            "family_restaurant",
+            "bar",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.549495799999995,
+            "longitude": -95.3863219
+          },
+          "displayName": {
+            "text": "Sam's Boat Pearland",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Sam's Boat Pearland",
+        "types": [
+          "seafood_restaurant",
+          "fish_and_chips_restaurant",
+          "bar_and_grill",
+          "steak_house",
+          "family_restaurant",
+          "bar",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.549495799999995,
+        "lng": -95.3863219,
+        "dist_m": 6.935586909491792
+      },
+      {
+        "name": "Saltgrass Steak House",
+        "types": [
+          "steak_house",
+          "seafood_restaurant",
+          "american_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.5491256,
+        "lng": -95.38622980000001,
+        "dist_m": 45.02853758530183
+      }
+    ]
+  },
+  {
+    "label": "16530 Peninsula St",
+    "lat": 29.743675,
+    "lng": -95.110801,
+    "expected": "NONE",
+    "bucket": "pure_residential",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJD1xoxgWhQIYRh9ruH3wLC8U",
+          "types": [
+            "manufacturer",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 29.743680899999998,
+            "longitude": -95.1108473
+          },
+          "displayName": {
+            "text": "South Atlantic Services Inc",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "South Atlantic Services Inc",
+        "types": [
+          "manufacturer",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 29.743680899999998,
+        "lng": -95.1108473,
+        "dist_m": 4.514527918597338
+      }
+    ]
+  },
+  {
+    "label": "10005 FM 1960 (Humble) [TRAP]",
+    "lat": 30.005537,
+    "lng": -95.272117,
+    "expected": "restaurant",
+    "bucket": "trap",
+    "raw_response": {
+      "places": [
+        {
+          "id": "ChIJ-0-dRqqzQIYRJTjiMjJGz90",
+          "types": [
+            "mexican_restaurant",
+            "restaurant",
+            "food",
+            "point_of_interest",
+            "establishment"
+          ],
+          "location": {
+            "latitude": 30.005502899999996,
+            "longitude": -95.2720374
+          },
+          "displayName": {
+            "text": "Pappasito's Cantina",
+            "languageCode": "en"
+          }
+        }
+      ]
+    },
+    "parsed_pois": [
+      {
+        "name": "Pappasito's Cantina",
+        "types": [
+          "mexican_restaurant",
+          "restaurant",
+          "food",
+          "point_of_interest",
+          "establishment"
+        ],
+        "lat": 30.005502899999996,
+        "lng": -95.2720374,
+        "dist_m": 8.545007559753689
+      }
+    ]
+  }
+]
