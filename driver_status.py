@@ -8,6 +8,7 @@ from flask import Blueprint, request, jsonify
 from psycopg2.extras import RealDictCursor
 
 from db import get_db
+from driver_queue import DriverQueue
 from utils import verify_and_get_user_id, require_firebase_auth
 
 driver_status_bp = Blueprint('driver_status', __name__)
@@ -179,11 +180,13 @@ def get_driver_status():
                 "seconds_ago":           o["seconds_ago"],
             } for o in recent_offers],
 
-            # Cut B3 planner pipeline — synthetic 1-offer queue (Option α)
-            "planner_queue": (
-                [state_row["current_offer_id"]]
-                if state_row and state_row["current_offer_id"]
-                else []
+            # All live offers in the GC-survivor queue, ordered by
+            # created_at DESC (newest first). The bound offer (the one
+            # whose pickup has fired) is also surfaced as top-level
+            # `offer_id`; the monitor floats that one to the top.
+            # Lightweight projection — no TargetSpec building needed.
+            "planner_queue": list(
+                DriverQueue(driver_id).offer_ids_only(cur)
             ),
 
             # Latest WAI evaluation (lifted from newest pudo_decision_context row)
