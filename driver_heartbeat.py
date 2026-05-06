@@ -46,6 +46,11 @@ from dispatch import (
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
 from pudo_types import Offer, TargetSpec
+from motion_gate import (
+    GateVerdict,
+    evaluate_gates,
+    filter_matches_by_gates,
+)
 from driver_queue import DriverQueue
 from bead_on_wire import classify_address
 
@@ -136,7 +141,8 @@ def _bucket_to_target_spec(address_text, lat, lng):
 # =============================================================================
 
 def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
-                    fallback_lat=None, fallback_lng=None):
+                    fallback_lat=None, fallback_lng=None,
+                    cumulative_miles=None):
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
@@ -181,17 +187,26 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 WHERE offer_id = %s::integer
             """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
 
-            # offer_history: actual_pickup_* + classification + source
+            # offer_history: actual_pickup_* + classification + source +
+            # Sprint A gate anchor (leg_start_cumulative_miles_dropoff) and
+            # forensic snapshot (cumulative_miles_at_pickup_fire). Both columns
+            # already exist on schema; population was lost in Sprint A demolition.
             cur.execute("""
                 UPDATE app_private.offer_history
-                SET actual_pickup_lat     = %s,
-                    actual_pickup_lng     = %s,
-                    actual_pickup_h3      = app_private.coords_to_h3(%s, %s)::text,
-                    actual_pickup_at      = NOW(),
-                    pickup_classification = 'auto',
-                    pickup_data_source    = 'nail_it'
+                SET actual_pickup_lat                   = %s,
+                    actual_pickup_lng                   = %s,
+                    actual_pickup_h3                    = app_private.coords_to_h3(%s, %s)::text,
+                    actual_pickup_at                    = NOW(),
+                    pickup_classification               = 'auto',
+                    pickup_data_source                  = 'nail_it',
+                    leg_start_cumulative_miles_dropoff  = %s,
+                    cumulative_miles_at_pickup_fire     = %s
                 WHERE decision_log_id = %s::integer
-            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+            """, (
+                nail_lat, nail_lng, nail_lat, nail_lng,
+                cumulative_miles, cumulative_miles,
+                action.offer_id,
+            ))
 
             # community_offers: radar feed (NOT EXISTS guarded for idempotency)
             cur.execute("""
@@ -247,16 +262,23 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 WHERE offer_id = %s::integer
             """, (action.offer_id,))
 
-            # offer_history: actual_dropoff_* + classification
+            # offer_history: actual_dropoff_* + classification + Sprint A
+            # forensic snapshot (cumulative_miles_at_dropoff_fire). Schema
+            # column already exists; population was lost in demolition.
             cur.execute("""
                 UPDATE app_private.offer_history
-                SET actual_dropoff_lat     = %s,
-                    actual_dropoff_lng     = %s,
-                    actual_dropoff_h3      = app_private.coords_to_h3(%s, %s)::text,
-                    actual_dropoff_at      = NOW(),
-                    dropoff_classification = 'auto'
+                SET actual_dropoff_lat               = %s,
+                    actual_dropoff_lng               = %s,
+                    actual_dropoff_h3                = app_private.coords_to_h3(%s, %s)::text,
+                    actual_dropoff_at                = NOW(),
+                    dropoff_classification           = 'auto',
+                    cumulative_miles_at_dropoff_fire = %s
                 WHERE decision_log_id = %s::integer
-            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+            """, (
+                nail_lat, nail_lng, nail_lat, nail_lng,
+                cumulative_miles,
+                action.offer_id,
+            ))
 
             # community_offers failsafe — NOT EXISTS guarded; no-ops if
             # FirePickup already published. Only writes for Case F
@@ -371,6 +393,7 @@ def _log_decision_context(
     current_offer_id,
     diagnostics, matches, executed_actions,
     dispatch_executed, dispatch_error_msg,
+    gate_verdict=None,
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -430,7 +453,9 @@ def _log_decision_context(
             cluster_lat, cluster_lng, cluster_size, cluster_duration_s,
             poi_lookup_source, poi_match_score, poi_top_names,
             planner_action,
-            dispatch_executed, dispatch_error
+            dispatch_executed, dispatch_error,
+            motion_gate_result, odometer_gate_result,
+            gate_held_offer_ids, gate_held_legs
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
@@ -441,6 +466,8 @@ def _log_decision_context(
             %s, %s, %s, %s,
             %s, %s, %s,
             %s,
+            %s, %s,
+            %s, %s,
             %s, %s
         )
         """,
@@ -468,6 +495,11 @@ def _log_decision_context(
             action_str,
             dispatch_executed,
             dispatch_error_msg,
+            # Sprint A gate-layer columns (Gemini round-2 ratified):
+            (gate_verdict.motion_verdict if gate_verdict else None),
+            (json.dumps(gate_verdict.jsonb_payload()) if gate_verdict else None),
+            (gate_verdict.held_offer_ids_and_legs()[0] if gate_verdict else None),
+            (gate_verdict.held_offer_ids_and_legs()[1] if gate_verdict else None),
         ),
     )
 
@@ -588,15 +620,30 @@ def post_heartbeat():
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(driver_id, snap.offers)
 
+    # ── GATE ─────────────────────────────────────────────────────────
+    # Sprint A §7 + Amendment 1: post-WAI filtering. Runs unconditionally
+    # so motion_verdict and per-leg odometer math are logged for every
+    # heartbeat regardless of whether dispatch fires (forensic visibility
+    # for matcher tuning per §3 step 8).
+    gate_verdict = evaluate_gates(
+        cluster=diagnostics.cluster,
+        cumulative_miles=cumulative_miles,
+        queue_offers=snap.offers,
+    )
+    gated_matches = filter_matches_by_gates(matches, gate_verdict)
+
     # ── DECIDE ───────────────────────────────────────────────────────
-    actions = dispatch(matches, current_offer_id, queue_offer_ids)
+    actions = dispatch(gated_matches, current_offer_id, queue_offer_ids)
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster
     executed_actions: list = []
     dispatch_error_msg = None
     for action in actions:
-        executed, err = _execute_action(action, cur, conn, driver_id, queue, cluster)
+        executed, err = _execute_action(
+            action, cur, conn, driver_id, queue, cluster,
+            cumulative_miles=cumulative_miles,
+        )
         if executed:
             executed_actions.append(action)
         if err:
@@ -612,6 +659,7 @@ def post_heartbeat():
             current_offer_id,
             diagnostics, matches, executed_actions,
             dispatch_executed, dispatch_error_msg,
+            gate_verdict=gate_verdict,
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is

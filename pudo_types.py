@@ -88,6 +88,13 @@ class Offer:
     accepted_at: datetime
     pickup: TargetSpec
     dropoff: TargetSpec
+    # Sprint A gate-layer additions (2026-05-06):
+    # Used by motion_gate.evaluate_odometer_gate per-leg progress check.
+    # All Optional — default None preserves existing fixture constructors.
+    pickup_miles: Optional[float] = None
+    trip_miles: Optional[float] = None
+    leg_start_cumulative_miles_pickup: Optional[float] = None
+    leg_start_cumulative_miles_dropoff: Optional[float] = None
 
 
 # ============================================================================
