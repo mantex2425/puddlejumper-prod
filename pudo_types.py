@@ -95,6 +95,13 @@ class Offer:
     trip_miles: Optional[float] = None
     leg_start_cumulative_miles_pickup: Optional[float] = None
     leg_start_cumulative_miles_dropoff: Optional[float] = None
+    # Phase 2c.2 additions (2026-05-07):
+    # Used by tad.compute_offer_expectations() to compute expected pickup
+    # and dropoff arrival times. Optional/default-None preserves existing
+    # fixture constructors (8 production callers, 1 in tests/test_where_am_i.py).
+    # Source: app_private.offer_history.pickup_minutes / trip_minutes (smallint).
+    pickup_minutes: Optional[int] = None
+    trip_minutes: Optional[int] = None
 
 
 # ============================================================================

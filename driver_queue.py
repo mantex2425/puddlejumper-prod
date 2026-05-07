@@ -400,6 +400,7 @@ class DriverQueue:
                 dropoff_lat, dropoff_lng,
                 created_at,
                 pickup_miles, trip_miles,
+                pickup_minutes, trip_minutes,
                 leg_start_cumulative_miles_pickup,
                 leg_start_cumulative_miles_dropoff,
                 COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
@@ -459,6 +460,12 @@ class DriverQueue:
                 leg_start_cumulative_miles_dropoff=(
                     float(o['leg_start_cumulative_miles_dropoff'])
                     if o.get('leg_start_cumulative_miles_dropoff') is not None else None
+                ),
+                pickup_minutes=(
+                    int(o['pickup_minutes']) if o.get('pickup_minutes') is not None else None
+                ),
+                trip_minutes=(
+                    int(o['trip_minutes']) if o.get('trip_minutes') is not None else None
                 ),
             ))
         return tuple(offers)

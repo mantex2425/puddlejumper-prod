@@ -33,12 +33,21 @@ When in doubt during implementation, ask: "does this serve the mantra?" If yes, 
 
 By the time you read this, the following have been committed to `phase-2c-2-tad-exit-4tools`:
 
-1. Schema migration applied to production DB (`tmp/phase_2c_2_schema.sql`)
-2. `tad.py` module with unit tests
-3. `_signal_poi_type_match` + `CLASS_TO_TYPE_MAP` + `MatchOutcome` extensions in `where_am_i.py` with unit tests
-4. `evaluate()` TAD bouncer integration + commit rule update in `where_am_i.py` with integration tests
+1. Schema migration applied to production DB (`migrations/2026-05-07_phase_2c_2_tad_exit.sql`)
+2. `Offer` dataclass extended with `pickup_minutes` and `trip_minutes` (Optional[int]) in `pudo_types.py`, plus `_project_offers` in `driver_queue.py` updated to populate them from `offer_history`
+3. `tad.py` module with unit tests
+4. `_signal_poi_type_match` + `CLASS_TO_TYPE_MAP` + `MatchOutcome` extensions in `where_am_i.py` with unit tests
+5. `evaluate()` TAD bouncer integration + commit rule update in `where_am_i.py` with integration tests
 
 Run `git log --oneline f3f5dc9..HEAD` on the sprint branch to see exactly what landed. Read those commits before authoring Phase 2.
+
+### Phase 1 prerequisite discoveries
+
+The kickoff and the original Bible drafting did not anticipate that `Offer` lacked `pickup_minutes` and `trip_minutes` fields. Recon during architecture-chat revealed the gap: `offer_history` schema has them as `smallint`, `_project_offers` SQL already touched them inline for GC-window math, but the `Offer` dataclass surfaced only `pickup_miles` / `trip_miles` (gate-layer additions from 2026-05-06).
+
+This sprint extends `Offer` mirroring the gate-layer pattern exactly: two `Optional[int] = None` fields appended to the dataclass, two `int(...) if not None else None` kwargs added to the `Offer(...)` construction in `_project_offers`, two columns added to that function's SELECT clause. Zero existing constructors break (8 production callers + 1 test fixture all use keyword args). Test-only `FakeOffer` callers (~18 in tests/) are unaffected — separate fixture class.
+
+If Phase 2 finds anywhere that constructs `Offer(...)` and needs minutes context, the pattern is established. If you find a place that still reads `pickup_minutes` from `offer_history` rows directly (e.g., `scripts/replay_pudo.py`, `scripts/harvest_ride.py`), leave it alone — those are out-of-scope script-level reads from raw DB rows, not `Offer` instances.
 
 ---
 
