@@ -5,8 +5,8 @@ gcloud builds submit --tag us-central1-docker.pkg.dev/puddle-jumper-477316/cloud
 gcloud run deploy puddlejumper-api \
   --image us-central1-docker.pkg.dev/puddle-jumper-477316/cloud-run-source-deploy/puddlejumper-api:latest \
   --region us-central1 \
-  --cpu=2 \
-  --memory=2Gi \
+  --cpu=1 \
+  --memory=1Gi \
   --timeout=600 \
   --cpu-boost \
   --command="gunicorn" \
@@ -15,8 +15,9 @@ gcloud run deploy puddlejumper-api \
   --set-secrets "DB_PASSWORD=DB_PASSWORD:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,TAVILY_API_KEY=TAVILY_API_KEY:latest,GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest,MAPBOX_API_KEY=MAPBOX_API_KEY:latest,APPLE_WEATHER_KEY=APPLE_WEATHER_PRIVATE_KEY:latest,DB_PASSWORD_READONLY=DB_PASSWORD_READONLY:latest" \
   --vpc-connector puddle-bridge \
   --vpc-egress private-ranges-only \
-  --min-instances=1 \
-  --no-cpu-throttling
+  --min-instances=0 \
+  --max-instances=1 \
+  --cpu-throttling
 
 # 3. Force traffic to the new revision.
 # Cloud Run pins traffic to specific named revisions once any manual route
