@@ -176,7 +176,9 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                                   nail_lat, nail_lng, 0)
             queue.bind(action.offer_id, cur)
 
-            # pickup_market_signals: actual_pickup_* + nail_it elevation
+            # [α-fix] pickup_market_signals: actual_pickup_* + nail_it elevation.
+            # pms.offer_id REFERENCES decision_log(id), but action.offer_id is
+            # offer_history.id; translate via subquery at schema boundary.
             cur.execute("""
                 UPDATE app_private.pickup_market_signals
                 SET actual_pickup_lat     = %s,
@@ -185,13 +187,16 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     actual_pickup_at      = NOW(),
                     data_source           = 'nail_it',
                     offer_status          = 'completed'
-                WHERE offer_id = %s::integer
+                WHERE offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
             """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
 
-            # offer_history: actual_pickup_* + classification + source +
-            # Sprint A gate anchor (leg_start_cumulative_miles_dropoff) and
-            # forensic snapshot (cumulative_miles_at_pickup_fire). Both columns
-            # already exist on schema; population was lost in Sprint A demolition.
+            # [α-fix] offer_history: canonical PUDO record. action.offer_id
+            # IS offer_history.id, so target it directly. Rowcount guard fires
+            # on zero-row UPDATE — that means the offer doesn't exist (logged
+            # WARNING + return failure).
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_pickup_lat                   = %s,
@@ -202,14 +207,23 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     pickup_data_source                  = 'nail_it',
                     leg_start_cumulative_miles_dropoff  = %s,
                     cumulative_miles_at_pickup_fire     = %s
-                WHERE decision_log_id = %s::integer
+                WHERE id = %s::bigint
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles, cumulative_miles,
                 action.offer_id,
             ))
+            if cur.rowcount == 0:
+                log.warning(
+                    "[α-fix] FirePickup offer_history UPDATE wrote 0 rows "
+                    "for offer_id=%s — offer not found in offer_history",
+                    action.offer_id,
+                )
+                return False, "fire_pickup_zero_rows"
 
-            # community_offers: radar feed (NOT EXISTS guarded for idempotency)
+
+            # [α-fix] community_offers: radar feed. action.offer_id is
+            # offer_history.id; pms.offer_id is decision_log.id; translate.
             cur.execute("""
                 INSERT INTO public.community_offers (
                     created_at, day_of_year, day_of_week, hour_of_day,
@@ -234,7 +248,10 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
                 FROM app_private.pickup_market_signals pms
                 JOIN app_private.decision_log dl ON dl.id = pms.offer_id
-                WHERE pms.offer_id = %s::integer
+                WHERE pms.offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
                   AND pms.actual_pickup_lat IS NOT NULL
                   AND pms.hourly_rate_offered BETWEEN 5 AND 150
                   AND NOT EXISTS (
@@ -255,17 +272,21 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                                   nail_lat, nail_lng, 0)
             queue.unbind(cur)
 
-            # pms: data_source elevation (no actual_dropoff_* columns on pms)
+            # [α-fix] pms: data_source elevation. action.offer_id is
+            # offer_history.id; translate via subquery.
             cur.execute("""
                 UPDATE app_private.pickup_market_signals
                 SET data_source  = 'nail_it',
                     offer_status = 'completed'
-                WHERE offer_id = %s::integer
+                WHERE offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
             """, (action.offer_id,))
 
-            # offer_history: actual_dropoff_* + classification + Sprint A
-            # forensic snapshot (cumulative_miles_at_dropoff_fire). Schema
-            # column already exists; population was lost in demolition.
+            # [α-fix] offer_history: canonical PUDO record. action.offer_id
+            # IS offer_history.id, target directly. Rowcount guard fires on
+            # zero-row UPDATE.
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_dropoff_lat               = %s,
@@ -274,17 +295,23 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     actual_dropoff_at                = NOW(),
                     dropoff_classification           = 'auto',
                     cumulative_miles_at_dropoff_fire = %s
-                WHERE decision_log_id = %s::integer
+                WHERE id = %s::bigint
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles,
                 action.offer_id,
             ))
+            if cur.rowcount == 0:
+                log.warning(
+                    "[α-fix] FireDropoff offer_history UPDATE wrote 0 rows "
+                    "for offer_id=%s — offer not found in offer_history",
+                    action.offer_id,
+                )
+                return False, "fire_dropoff_zero_rows"
 
-            # community_offers failsafe — NOT EXISTS guarded; no-ops if
-            # FirePickup already published. Only writes for Case F
-            # pickup_missed dropoffs that have an earlier-stamped
-            # pms.actual_pickup row from some other source.
+
+            # [α-fix] community_offers failsafe. action.offer_id is
+            # offer_history.id; translate via subquery.
             cur.execute("""
                 INSERT INTO public.community_offers (
                     created_at, day_of_year, day_of_week, hour_of_day,
@@ -310,7 +337,10 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
                 FROM app_private.pickup_market_signals pms
                 JOIN app_private.decision_log dl ON dl.id = pms.offer_id
-                WHERE pms.offer_id = %s::integer
+                WHERE pms.offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
                   AND pms.data_source = 'nail_it'
                   AND pms.actual_pickup_lat IS NOT NULL
                   AND pms.hourly_rate_offered BETWEEN 5 AND 150
