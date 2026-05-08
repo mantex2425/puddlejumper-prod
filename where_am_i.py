@@ -668,7 +668,7 @@ def _signal_poi_type_match(
     return False, None
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -1149,6 +1149,22 @@ from cluster_detection import detect_cluster, get_recent_clusters
 from adjacency import get_adjacent_roads_for_cluster
 from pivot_context import get_pivot_context
 from pudo_types import WAIMatch, WAI_CONFIDENCE_THRESHOLD
+from tad import evaluate_tad_gate, OfferTadState, TadVerdict
+
+
+# =============================================================================
+# Phase 2c.2 Item 3 — commit rule constants (Bible Rules 3a + 3b)
+# =============================================================================
+# Three thresholds used by Step 6's dual commit rule. WAI_CONFIDENCE_THRESHOLD
+# (0.40 in pudo_types) remains the legacy/bridge-state floor used when no TAD
+# context is supplied by the caller (graceful degradation during Item 3b
+# rollout). Once Item 3b lands, the dual rule below subsumes the floor.
+#
+# Tuning: these are Phase 2g concerns. Constants are module-local because the
+# commit policy is internal to this module (per Gemini ratification 2026-05-08).
+COMMIT_NORMAL_HIGH = 0.90       # Bible Rule 3a, standalone (no Head 4 needed)
+COMMIT_NORMAL_ELEVATOR = 0.80   # Bible Rule 3a, with poi_type_match=True
+COMMIT_LOST_FLOOR = 0.85        # Bible Rule 3b, mandatory poi_type_match=True
 
 
 # Ghost cache SELECT — read-only per Q12. Phase A schema:
@@ -1300,6 +1316,12 @@ class DiagnosticContext:
     cluster_revisit: bool
     stop_context: str
     per_target_outcomes: list  # list[tuple[str, str, MatchOutcome]]
+    # Phase 2c.2 Item 3e: TAD verdicts per offer for forensic JSONB
+    # serialization. Defaulted to empty dict so legacy constructors
+    # (4 test fixtures + bridge-state production calls) keep working
+    # without modification. Caller layer (driver_heartbeat.py, Item 3b)
+    # serializes this into pudo_decision_context.tad_decision_context.
+    tad_verdicts: dict = field(default_factory=dict)
 
     def outcome_for(self, match) -> "Optional[MatchOutcome]":
         """Return the MatchOutcome for a WAIMatch, by (offer_id, location_type).
@@ -1332,6 +1354,80 @@ class DiagnosticContext:
             if offer_id == match.offer_id and location_type == match.location_type:
                 return outcome
         return None
+
+
+def _commits(outcome, verdict) -> bool:
+    """Phase 2c.2 Item 3c — dual commit rule (Bible Rules 3a + 3b).
+
+    Pure policy function. Returns True if `outcome` should commit given the
+    TAD `verdict` for the same offer. No side effects.
+
+    Three branches (in priority order):
+      1. verdict is None (bridge state, caller hasn't wired Item 3b):
+            legacy WAI_CONFIDENCE_THRESHOLD floor. Once Item 3b ships and
+            every production caller supplies TAD context, this branch is
+            unreachable in production but remains for graceful degradation
+            and test fixtures.
+      2. verdict.passed is True (Normal Mode):
+            Rule 3a elevator. Commit if confidence >= COMMIT_NORMAL_HIGH (0.90)
+            OR (confidence >= COMMIT_NORMAL_ELEVATOR (0.80) AND
+                outcome.poi_type_match is True).
+      3. verdict.passed is None (Lost Mode):
+            Rule 3b strict floor. Commit if confidence >= COMMIT_LOST_FLOOR
+            (0.85) AND outcome.poi_type_match is True (mandatory Head 4
+            corroboration when narrative is broken).
+
+    verdict.passed is False is unreachable here — Step 5 skips dispatch for
+    those offers, so per_target_outcomes never contains them. Defensive
+    fall-through returns False.
+    """
+    if not outcome.matched:
+        return False
+    conf = outcome.confidence
+    if verdict is None:
+        # Bridge state: legacy floor.
+        return conf >= WAI_CONFIDENCE_THRESHOLD
+    if verdict.passed is True:
+        # Normal Mode elevator.
+        return (
+            conf >= COMMIT_NORMAL_HIGH
+            or (conf >= COMMIT_NORMAL_ELEVATOR and outcome.poi_type_match is True)
+        )
+    if verdict.passed is None:
+        # Lost Mode strict floor.
+        return conf >= COMMIT_LOST_FLOOR and outcome.poi_type_match is True
+    # passed=False: defensive (Step 5 already skipped this offer)
+    return False
+
+
+def classify_commit_rule(outcome, verdict) -> str:
+    """Phase 2c.2 Item 3e — forensic classifier for the JSONB blob.
+
+    Pure reporter. Names which clause of the dual commit rule fired for an
+    outcome that _commits() returned True for. Caller (heartbeat handler's
+    pudo_decision_context serializer) invokes this only on committed outcomes.
+
+    Returns one of:
+      "normal_high"       — verdict.passed=True, conf >= 0.90 (no Head 4 needed)
+      "normal_elevator"   — verdict.passed=True, conf in [0.80, 0.90), Head 4 lifted
+      "lost_floor"        — verdict.passed=None, conf >= 0.85 with Head 4
+      "legacy_floor"      — verdict is None (bridge state), conf >= 0.40
+      "unknown"           — defensive (verdict.passed=False; should be unreachable)
+
+    NOT a decision function — _commits() owns the decision. This labels the
+    decision after the fact for forensic queries like "how often did Head 4
+    save the day?" (Phase 2g tuning input).
+    """
+    conf = outcome.confidence
+    if verdict is None:
+        return "legacy_floor"
+    if verdict.passed is True:
+        if conf >= COMMIT_NORMAL_HIGH:
+            return "normal_high"
+        return "normal_elevator"
+    if verdict.passed is None:
+        return "lost_floor"
+    return "unknown"
 
 
 class WhereAmI:
@@ -1386,6 +1482,10 @@ class WhereAmI:
         self,
         driver_id: str,
         queue: list,
+        per_offer_state: "Optional[dict[str, OfferTadState]]" = None,
+        lost_mode: bool = False,
+        last_known_anchor_id: "Optional[str]" = None,
+        current_odometer: "Optional[float]" = None,
     ) -> list[WAIMatch]:
         """Pure Sensor: returns naked match list per the §3 Map-Reduce contract.
 
@@ -1394,35 +1494,66 @@ class WhereAmI:
 
         Per CANONICAL_RULES Section XIV.A and SIMPLIFIED_ARCHITECTURE.md §10
         A8: this is the only legitimate path from cluster to PUDO match.
+
+        Phase 2c.2 Item 3 TAD parameters (all optional; bridge state preserved
+        when caller does not supply them):
+          per_offer_state: dict[offer_id, OfferTadState]. Caller (driver_
+              heartbeat.py) assembles from offer_history rows alongside queue.
+          lost_mode: True signals narrative_blindness (queue empty, prev GC'd).
+          last_known_anchor_id: most recent confirmed-anchor offer_id (forensic).
+          current_odometer: cumulative miles at heartbeat time.
         """
-        matches, _ = self._evaluate(driver_id, queue)
+        matches, _ = self._evaluate(
+            driver_id, queue,
+            per_offer_state=per_offer_state,
+            lost_mode=lost_mode,
+            last_known_anchor_id=last_known_anchor_id,
+            current_odometer=current_odometer,
+        )
         return matches
 
     def evaluate_with_diagnostics(
         self,
         driver_id: str,
         queue: list,
+        per_offer_state: "Optional[dict[str, OfferTadState]]" = None,
+        lost_mode: bool = False,
+        last_known_anchor_id: "Optional[str]" = None,
+        current_odometer: "Optional[float]" = None,
     ) -> tuple[list[WAIMatch], "DiagnosticContext"]:
         """Forensic counterpart to evaluate().
 
         Returns (matches, diagnostics) for the heartbeat handler's
         pudo_decision_context insert and for forensic replay tests
         (e.g. _replay_S31). The DiagnosticContext carries the cluster,
-        topology, cluster_revisit flag, stop context, and per-target
-        outcomes — everything pudo_decision_context's logging surface
-        needs to record what WAI saw on this heartbeat.
+        topology, cluster_revisit flag, stop context, per-target
+        outcomes, AND tad_verdicts (Phase 2c.2 Item 3e) — everything
+        pudo_decision_context's logging surface needs to record what
+        WAI saw on this heartbeat.
 
         Per SIMPLIFIED_ARCHITECTURE.md §3 step 8: cluster data MUST be
         logged independently of WAI outcome. DiagnosticContext.cluster is
         populated even when no targets match, so forensic logging never
         silently drops cluster rows.
+
+        Phase 2c.2 Item 3 TAD parameters: see evaluate() docstring.
         """
-        return self._evaluate(driver_id, queue)
+        return self._evaluate(
+            driver_id, queue,
+            per_offer_state=per_offer_state,
+            lost_mode=lost_mode,
+            last_known_anchor_id=last_known_anchor_id,
+            current_odometer=current_odometer,
+        )
 
     def _evaluate(
         self,
         driver_id: str,
         queue: list,
+        per_offer_state: "Optional[dict[str, OfferTadState]]" = None,
+        lost_mode: bool = False,
+        last_known_anchor_id: "Optional[str]" = None,
+        current_odometer: "Optional[float]" = None,
     ) -> tuple[list[WAIMatch], "DiagnosticContext"]:
         """Internal: §3 Map-Reduce algorithm. Single source of truth.
 
@@ -1436,15 +1567,28 @@ class WhereAmI:
         Evaluate run Signal Economics on each surviving candidate via
                 _CLASS_DISPATCH. Per §3 step 3c.
 
-        Reduce  return all candidates whose confidence is exactly equal
-                to the maximum and clears WAI_CONFIDENCE_THRESHOLD.
-                Ties at exact float equality are returned together for
-                §5 disambiguation downstream. Per §3 steps 3d-3e.
+        Reduce  return all candidates that clear the dual commit rule
+                (Bible Rules 3a/3b, Phase 2c.2 Item 3c) and tie at the
+                maximum confidence. Ties at exact float equality are
+                returned together for §5 disambiguation downstream.
 
         Memory Eye: cluster-history lookback anchors on the oldest
         accepted_at across the queue (Cut B2 extension of Step 6
         Amendment 1's Offer-Anchor Lookback). Empty queue -> no lookback
         fetch, cluster_revisit=False.
+
+        Phase 2c.2 Item 3 — Step 4.5 TAD bouncer:
+            Between Map (Step 4) and Dispatch (Step 5), a parallel pass
+            evaluates each offer through tad.evaluate_tad_gate(). Three
+            verdicts:
+              passed=True  -> Normal Mode, apply Rule 3a elevator at Step 6
+              passed=False -> skip dispatch entirely (no Google API spend)
+              passed=None  -> Lost Mode, apply Rule 3b strict floor at Step 6
+
+        Bridge state: when per_offer_state or current_odometer is None
+        (caller hasn't yet wired Item 3b), TAD evaluation is bypassed and
+        Step 6 falls back to legacy WAI_CONFIDENCE_THRESHOLD floor. This
+        preserves backward compatibility during Item 3b rollout.
         """
         # Step 1: Cluster check
         cluster = self._cluster_fn(driver_id, self.cur)
@@ -1455,6 +1599,7 @@ class WhereAmI:
                 cluster_revisit=False,
                 stop_context="unknown_stop",
                 per_target_outcomes=[],
+                tad_verdicts={},
             )
 
         # Step 2: Topology (single pivot_context call, reused in Evaluate)
@@ -1498,11 +1643,36 @@ class WhereAmI:
             candidates.append((offer.pickup, "pickup", offer.offer_id))
             candidates.append((offer.dropoff, "dropoff", offer.offer_id))
 
+        # Step 4.5 (TAD bouncer, Phase 2c.2 Item 3a): parallel pass over the
+        # queue producing per-offer verdicts. Bypassed in bridge state when
+        # caller hasn't supplied TAD context — empty dict means "no filtering"
+        # at Step 5 and "legacy floor" at Step 6.
+        tad_verdicts: dict = {}
+        if queue and per_offer_state is not None and current_odometer is not None:
+            tad_verdicts = evaluate_tad_gate(
+                cluster=cluster,
+                queue_offers=tuple(queue),
+                current_odometer=current_odometer,
+                per_offer_state=per_offer_state,
+                lost_mode=lost_mode,
+                last_known_anchor_id=last_known_anchor_id,
+            )
+
         # Step 5 (Evaluate): run per-class matcher against each candidate.
+        # TAD-failed offers (verdict.passed is False) are skipped here — no
+        # spatial scoring, no Google API spend (Bible Rule 1, the wallet gate).
         # Defensive logging on unknown address_class — alerts to upstream
         # geocoding drift without polluting the match logic.
         per_target_outcomes = []
         for target, location_type, offer_id in candidates:
+            # TAD bouncer skip: when verdicts dict is populated and verdict
+            # for this offer says passed=False, skip entirely. passed=True
+            # and passed=None both proceed to spatial scoring (Lost Mode
+            # still scores; Step 6 applies stricter rule).
+            if tad_verdicts:
+                verdict = tad_verdicts.get(offer_id)
+                if verdict is not None and verdict.passed is False:
+                    continue
             matcher = _CLASS_DISPATCH.get(target.address_class)
             if matcher is None:
                 log.warning(
@@ -1513,11 +1683,12 @@ class WhereAmI:
             outcome = matcher(cluster, topo, target, pois=cluster_pois)
             per_target_outcomes.append((offer_id, location_type, outcome))
 
-        # Step 6 (Reduce): filter by matched + threshold, then ties at max.
+        # Step 6 (Reduce, Phase 2c.2 Item 3c): apply dual commit rule per
+        # Bible Rules 3a + 3b, then tie at max across surviving candidates.
         above_threshold = [
             (offer_id, location_type, outcome)
             for offer_id, location_type, outcome in per_target_outcomes
-            if outcome.matched and outcome.confidence >= WAI_CONFIDENCE_THRESHOLD
+            if _commits(outcome, tad_verdicts.get(offer_id))
         ]
 
         matches: list[WAIMatch] = []
@@ -1537,6 +1708,7 @@ class WhereAmI:
             cluster_revisit=cluster_revisit,
             stop_context=stop_context,
             per_target_outcomes=per_target_outcomes,
+            tad_verdicts=tad_verdicts,
         )
         return matches, diagnostics
 
