@@ -19,6 +19,13 @@ Reviewer: Gemini iron-fist Phase 2c mandate, "Galleria cap" rule ratified.
 """
 
 from bead_on_wire import detect_branded_token, _HIGH_NOISE_TOKENS
+from poi_service import POI
+from where_am_i import (
+    _signal_poi_match,
+    _signal_poi_type_match,
+    CLASS_TO_TYPE_MAP,
+    POI_RADIUS_M,
+)
 
 
 # ============================================================================
@@ -472,3 +479,202 @@ class TestPhase2c2VocabularyExpansion:
         from bead_on_wire import _HIGH_NOISE_TOKENS
         assert "nrg" not in _HIGH_NOISE_TOKENS
         assert "houston methodist" not in _HIGH_NOISE_TOKENS
+
+
+# ============================================================================
+# Item 2 (Phase 2c.2, 2026-05-08): witness signal unit tests.
+#
+# Option β scope: tests both _signal_poi_match (legacy, patch 2b, previously
+# uncovered) and _signal_poi_type_match (new, Head 4, this sprint) as
+# sibling witnesses. Closes the patch 2a/2b unit-test gap while introducing
+# Head 4 coverage.
+#
+# Witness signal architecture (Bible Rule 2): NOT in _CONFIDENCE_WEIGHTS.
+# Both functions populate MatchOutcome witness fields, consumed by Item 3's
+# evaluate() integration via Rule 3a (Normal Mode) / Rule 3b (Lost Mode).
+# ============================================================================
+
+
+def _make_poi(name, types, dist_m=50.0, place_id=None, lat=29.7604, lng=-95.3698):
+    """Construct a POI for witness-signal tests.
+
+    Defaults:
+      dist_m=50  -- inside POI_RADIUS_M (100m), so witness signals consider it.
+                    Override per-test to test the radius boundary.
+      place_id   -- deterministic from name if not specified.
+      lat/lng    -- Houston downtown placeholder; witness signals don't read
+                    these (only dist_m for radius filtering, name for fuzzy/branded
+                    matching, types for type matching).
+    """
+    if place_id is None:
+        place_id = f"ChIJ_test_{name.replace(' ', '_').lower()}"
+    return POI(
+        place_id=place_id,
+        name=name,
+        types=list(types),
+        lat=lat,
+        lng=lng,
+        dist_m=dist_m,
+    )
+
+
+class TestSignalPoiMatch:
+    """Unit tests for _signal_poi_match (patch 2b, 3-headed witness signal).
+
+    Closes coverage gap from patch 2a/2b (function shipped 2026-05-05 without
+    direct unit tests; only the underlying detect_branded_token had coverage).
+    """
+
+    def test_empty_pois_returns_zero_none(self):
+        score, witness = _signal_poi_match([], "Some Address")
+        assert score == 0.0
+        assert witness is None
+
+    def test_empty_address_returns_zero_none(self):
+        pois = [_make_poi("Pappasito's Cantina", ["restaurant"])]
+        score, witness = _signal_poi_match(pois, "")
+        assert score == 0.0
+        assert witness is None
+
+    def test_pois_outside_radius_filtered(self):
+        # POI at 200m, well outside POI_RADIUS_M (100m).
+        pois = [_make_poi("Pappasito's Cantina", ["restaurant"], dist_m=200.0)]
+        score, witness = _signal_poi_match(pois, "Pappasito's Cantina")
+        assert score == 0.0
+        assert witness is None
+
+    def test_head1_fuzzy_pappasitos_match(self):
+        # Head 1: rapidfuzz partial_ratio. Apostrophe-S handled natively.
+        # Audit case: Pappasito's at 10005 FM 1960.
+        pois = [_make_poi("Pappasito's Cantina", ["restaurant", "food"])]
+        score, witness = _signal_poi_match(pois, "Pappasito's Cantina")
+        # partial_ratio of identical strings = 1.0
+        assert score == 1.0
+        assert witness is not None
+        assert witness.startswith("fuzzy:") or witness.startswith("branded:")
+
+    def test_head1_fuzzy_excel_dental_match(self):
+        # Audit case: Excel Dental on Sienna Parkway. No branded token,
+        # Head 1 fuzzy carries the signal.
+        pois = [_make_poi("Excel Dental", ["dentist", "doctor"])]
+        score, witness = _signal_poi_match(pois, "Excel Dental Forum Park")
+        assert score > 0.5
+        assert witness is not None
+
+    def test_head2_branded_marriott_match(self):
+        # Head 2: detect_branded_token equality. "marriott" is a clean token.
+        pois = [_make_poi("Marriott Houston Downtown", ["lodging"])]
+        score, witness = _signal_poi_match(pois, "Marriott Westchase")
+        assert score >= 0.5  # Head 2 fires at 1.0; Head 1 also high
+        assert witness is not None
+
+    def test_head3_airport_type_iah(self):
+        # Head 3: target token in airline/airport set + POI has "airport" in types.
+        pois = [_make_poi("George Bush Intercontinental Airport", ["airport", "point_of_interest"])]
+        score, witness = _signal_poi_match(pois, "IAH")
+        assert score >= 0.9
+        assert witness is not None
+
+    def test_no_match_returns_zero(self):
+        # Unrelated POI and address - all 3 heads return 0.
+        pois = [_make_poi("Random Coffee Shop", ["cafe"])]
+        score, witness = _signal_poi_match(pois, "7623 Forum Park Dr")
+        # partial_ratio gives some non-zero score for any string overlap;
+        # but no branded match, no airport match. Score should be modest.
+        assert score < 0.7
+
+
+class TestSignalPoiTypeMatch:
+    """Unit tests for _signal_poi_type_match (Head 4, Phase 2c.2 Item 2).
+
+    Witness signal that confirms POI type matches the address class.
+    First-match-wins semantics: returns (True, witness_str) on first
+    qualifying type/POI pair, (False, None) otherwise.
+    """
+
+    def test_empty_pois_returns_false_none(self):
+        matched, witness = _signal_poi_type_match([], "single_road")
+        assert matched is False
+        assert witness is None
+
+    def test_empty_address_class_returns_false_none(self):
+        pois = [_make_poi("Excel Dental", ["dentist"])]
+        matched, witness = _signal_poi_type_match(pois, "")
+        assert matched is False
+        assert witness is None
+
+    def test_unknown_address_class_returns_false_none(self):
+        pois = [_make_poi("Excel Dental", ["dentist"])]
+        matched, witness = _signal_poi_type_match(pois, "some_unknown_class")
+        assert matched is False
+        assert witness is None
+
+    def test_dentist_in_single_road_returns_true(self):
+        # Audit case: Excel Dental on Sienna Parkway (single_road class).
+        pois = [_make_poi("Excel Dental", ["dentist", "doctor"])]
+        matched, witness = _signal_poi_type_match(pois, "single_road")
+        assert matched is True
+        assert witness == "poi_type:dentist/Excel Dental"
+
+    def test_restaurant_in_number_on_street_returns_true(self):
+        # Audit case: Pappasito's at 10005 FM 1960 (number_on_street class).
+        pois = [_make_poi("Pappasito's Cantina", ["restaurant", "food"])]
+        matched, witness = _signal_poi_type_match(pois, "number_on_street")
+        assert matched is True
+        assert witness == "poi_type:restaurant/Pappasito's Cantina"
+
+    def test_car_repair_in_intersection_returns_true(self):
+        # Audit case: tire shop at intersection in residential area (Houston no-zoning).
+        pois = [_make_poi("Quick Tire Shop", ["car_repair"])]
+        matched, witness = _signal_poi_type_match(pois, "intersection")
+        assert matched is True
+        assert witness == "poi_type:car_repair/Quick Tire Shop"
+
+    def test_university_in_poi_returns_true(self):
+        # Audit case: Calhoun/U of H (poi class).
+        pois = [_make_poi("University of Houston", ["university", "point_of_interest"])]
+        matched, witness = _signal_poi_type_match(pois, "poi")
+        assert matched is True
+        assert witness == "poi_type:university/University of Houston"
+
+    def test_lodging_in_apartment_complex_returns_true(self):
+        pois = [_make_poi("The Enclave at Sienna", ["lodging", "premise"])]
+        matched, witness = _signal_poi_type_match(pois, "apartment_complex")
+        assert matched is True
+        assert witness == "poi_type:lodging/The Enclave at Sienna"
+
+    def test_restaurant_in_apartment_complex_returns_false(self):
+        # Apartment complex set is conservative - restaurant doesn't qualify.
+        # Protects against Houston no-zoning false-positives where commercial
+        # POI sits across the street from residential cluster.
+        pois = [_make_poi("Random Cafe", ["restaurant", "cafe"])]
+        matched, witness = _signal_poi_type_match(pois, "apartment_complex")
+        assert matched is False
+        assert witness is None
+
+    def test_first_match_wins_returns_first_qualifying(self):
+        # Two POIs, both with matching types - first one wins.
+        pois = [
+            _make_poi("First Restaurant", ["restaurant"], dist_m=80.0),
+            _make_poi("Second Restaurant", ["restaurant"], dist_m=20.0),
+        ]
+        matched, witness = _signal_poi_type_match(pois, "single_road")
+        assert matched is True
+        # First-match-wins: the witness reflects POIs[0], not the closer one.
+        assert witness == "poi_type:restaurant/First Restaurant"
+
+    def test_pois_outside_radius_filtered(self):
+        # POI at 150m, outside POI_RADIUS_M (100m).
+        pois = [_make_poi("Far Restaurant", ["restaurant"], dist_m=150.0)]
+        matched, witness = _signal_poi_type_match(pois, "single_road")
+        assert matched is False
+        assert witness is None
+
+    def test_class_to_type_map_keys_match_dispatch(self):
+        # Sanity: every CLASS_TO_TYPE_MAP key corresponds to a real address class
+        # that _CLASS_DISPATCH would route. Drift here means a mismatch between
+        # the type-map and the matcher dispatch.
+        from where_am_i import _CLASS_DISPATCH
+        assert set(CLASS_TO_TYPE_MAP.keys()) == set(_CLASS_DISPATCH.keys())
+
+

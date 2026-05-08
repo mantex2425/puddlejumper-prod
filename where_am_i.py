@@ -61,6 +61,73 @@ GHOST_MATCH_RADIUS_M = 50.0
 # threshold to filter POIs before computing co-reference scores.
 POI_RADIUS_M = 100.0
 
+# Item 2 (Phase 2c.2, 2026-05-08): CLASS_TO_TYPE_MAP for Head 4
+# (_signal_poi_type_match). Maps Uber's address_class -> the set of
+# Google Places types that qualify as a valid type-match witness.
+#
+# Houston insight (validated against 6+ audit cases): three of the five
+# address classes are coordinate-naming conventions, not destination-type
+# filters. Numbered addresses (Pappasito's at 10005 FM 1960), road-only
+# addresses (Sienna Parkway, US-90), AND intersections (21st & Palmsprings,
+# Curtis & Wafer, tire-shop-in-residential) all routinely resolve at any
+# kind of commercial destination -- strip-mall storefronts, corner stores,
+# tire shops between houses. The 7 weighted signals discriminate WHERE
+# the cluster is; Head 4 is the FOURTH tool that confirms WHAT is there.
+#
+# Witness signal architecture (Bible Rule 2): NOT in _CONFIDENCE_WEIGHTS.
+# Populates MatchOutcome.poi_type_match (boolean) and
+# MatchOutcome.poi_type_witness (string). Consumed by Item 3's evaluate()
+# integration via Rule 3a (Normal Mode) and Rule 3b (Lost Mode).
+_STREET_ADDRESS_DESTINATIONS = frozenset({
+    # Food & beverage
+    "restaurant", "bar", "cafe", "bakery", "meal_takeaway", "meal_delivery",
+    # Retail
+    "store", "supermarket", "shopping_mall", "convenience_store",
+    "clothing_store", "department_store", "electronics_store",
+    "furniture_store", "home_goods_store", "hardware_store",
+    "pet_store", "shoe_store", "book_store", "jewelry_store",
+    "liquor_store", "florist",
+    # Auto
+    "gas_station", "car_repair", "car_wash", "car_dealer",
+    # Health & wellness
+    "doctor", "dentist", "hospital", "pharmacy", "veterinary_care",
+    "physiotherapist",
+    # Financial & professional services
+    "bank", "atm", "post_office", "insurance_agency", "accounting",
+    "lawyer", "real_estate_agency",
+    # Personal services
+    "gym", "spa", "beauty_salon", "hair_care",
+    # Hospitality
+    "lodging",
+    # Civic / educational (commonly numbered or intersection-located in Houston)
+    "school", "university", "library", "museum",
+    "church", "place_of_worship",
+})
+
+CLASS_TO_TYPE_MAP: dict[str, frozenset] = {
+    # number_on_street, single_road, intersection: coordinate-naming
+    # conventions for the same destination universe in Houston.
+    "number_on_street": _STREET_ADDRESS_DESTINATIONS,
+    "single_road":      _STREET_ADDRESS_DESTINATIONS,
+    "intersection":     _STREET_ADDRESS_DESTINATIONS,
+    # apartment_complex: residential anchor itself, not commercial neighbors.
+    # Conservative -- protects against no-zoning false-positives where a
+    # commercial POI sits across the street from a residential cluster.
+    "apartment_complex": frozenset({
+        "lodging",
+        "real_estate_agency",
+        "premise",
+    }),
+    # poi: address itself names a destination (airport, university, stadium).
+    "poi": frozenset({
+        "airport", "train_station", "subway_station", "transit_station",
+        "bus_station",
+        "stadium", "tourist_attraction", "amusement_park", "zoo", "museum",
+        "shopping_mall", "university", "school", "library",
+        "hospital", "church", "place_of_worship", "park",
+    }),
+}
+
 # Patch 2b (Phase 2c.2, 2026-05-05): _signal_poi_match Option B
 # noise-gate KEY. Matches leading street number (e.g. "7623 Forum
 # Park Dr" but not "Forum Park Dr"). Per the 2026-05-05 audit (2101
@@ -549,6 +616,58 @@ def _signal_poi_match(
     return winning_score, winning_witness
 
 
+def _signal_poi_type_match(
+    pois: list,
+    address_class: str,
+) -> tuple[bool, Optional[str]]:
+    """Head 4 POI type-match witness signal (Phase 2c.2 Item 2, 2026-05-08).
+
+    Sibling to _signal_poi_match (which matches POI NAME against address);
+    this matches POI TYPE against address_class. Both are witness signals
+    outside _CONFIDENCE_WEIGHTS per Bible Rule 2 -- they corroborate the
+    7 weighted signals' spatial answer, never replace it.
+
+    Algorithm:
+      1. Filter pois to those within POI_RADIUS_M (100m) of cluster.
+      2. Look up the accepted-types set for address_class in CLASS_TO_TYPE_MAP.
+      3. First near-POI with any type in the accepted set -> True + witness.
+      4. No accepted-type match -> False + None.
+
+    First-match-wins semantics: the witness signal is binary, so there's
+    no "best" -- the first qualifying type/POI pair is sufficient
+    corroboration.
+
+    Args:
+        pois: list of POI records (typically from POILookupResult.pois).
+            Distance-prefiltered internally to POI_RADIUS_M (100m).
+        address_class: Uber's address class for the target -- one of
+            "intersection", "single_road", "number_on_street",
+            "apartment_complex", "poi". Unknown classes return False/None.
+
+    Returns:
+        (matched, witness) tuple. matched is bool; witness is
+        f"poi_type:{matched_type}/{poi_name}" when matched=True,
+        else None. Witness format mirrors _signal_poi_match's
+        "fuzzy:" / "branded:" / "airport_type:" patterns.
+    """
+    if not pois or not address_class:
+        return False, None
+    accepted_types = CLASS_TO_TYPE_MAP.get(address_class)
+    if accepted_types is None:
+        return False, None
+
+    near_pois = [p for p in pois if p.dist_m <= POI_RADIUS_M]
+    if not near_pois:
+        return False, None
+
+    for p in near_pois:
+        for t in p.types:
+            if t in accepted_types:
+                return True, f"poi_type:{t}/{p.name}"
+
+    return False, None
+
+
 from dataclasses import dataclass
 
 
@@ -587,12 +706,15 @@ class MatchOutcome:
     # all the way through to the MatchOutcome.
     signals: Optional[dict[str, float]]
 
-    # --- POI co-reference (Patch 2a infra shell, populated by Patch 2c) ---
-    # Both default None so existing tests + production constructions
-    # are unaffected. Patch 2c lands _signal_poi_match logic and
-    # extends _build_outcome to populate these.
+    # --- POI co-reference (Patch 2a infra shell, wired by Item 2) -------
+    # Both pairs default None so existing tests + production constructions
+    # are unaffected. Item 2 lands _signal_poi_match wiring (Patch 2c)
+    # and _signal_poi_type_match (Head 4) via _build_outcome extension.
+    # Both signals are witnesses outside _CONFIDENCE_WEIGHTS per Bible Rule 2.
     poi_match: Optional[float] = None
     poi_witness: Optional[str] = None
+    poi_type_match: Optional[bool] = None
+    poi_type_witness: Optional[str] = None
 
 
 def _weighted_confidence(
@@ -765,6 +887,10 @@ def _build_outcome(
     class_name: str,
     signals: dict[str, float],
     confidence: float,
+    poi_match: Optional[float] = None,
+    poi_witness: Optional[str] = None,
+    poi_type_match: Optional[bool] = None,
+    poi_type_witness: Optional[str] = None,
 ) -> MatchOutcome:
     """Assemble a MatchOutcome from computed signals + confidence.
 
@@ -772,6 +898,12 @@ def _build_outcome(
     clears MIN_REPORT_THRESHOLD (Step 1 Q4 lock); below that, the matcher
     reports "tried but didn't match" so evaluate() can fall through to
     ghost-match or at_unknown_pudo.
+
+    Item 2 (Phase 2c.2, 2026-05-08): added 4 optional witness kwargs.
+    All default None for backward compatibility with callers that don't
+    yet pass them (e.g. _match_poi_stub which constructs MatchOutcome
+    directly). The 4 real per-class matchers populate these from the
+    two witness signal calls (_signal_poi_match + _signal_poi_type_match).
     """
     reason = _render_reason(class_name, signals, confidence)
     return MatchOutcome(
@@ -783,6 +915,10 @@ def _build_outcome(
         pudo_type=None,           # Set by _match_current_pudo orchestrator (Step 5.5)
         target_address=getattr(target, "address", None),
         signals=signals,
+        poi_match=poi_match,
+        poi_witness=poi_witness,
+        poi_type_match=poi_type_match,
+        poi_type_witness=poi_type_witness,
     )
 
 
@@ -790,6 +926,7 @@ def _match_intersection(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an intersection-class target ("Joan St & Settemont Rd")."""
     if (skip := _validate_target(target, "intersection")) is not None:
@@ -798,19 +935,34 @@ def _match_intersection(
     signals = _compute_signals(cluster, topo, target, INTERSECTION_RADIUS_M)
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["intersection"])
 
+    # Item 2 witness signals: outside _CONFIDENCE_WEIGHTS per Bible Rule 2.
+    poi_match_score, poi_witness_str = _signal_poi_match(
+        pois or [], getattr(target, "address", "") or "",
+    )
+    poi_type_match_bool, poi_type_witness_str = _signal_poi_type_match(
+        pois or [], target.address_class,
+    )
+
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
             "[WAI matcher=intersection] %s",
             _render_reason("intersection", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "intersection", signals, confidence)
+    return _build_outcome(
+        cluster, target, "intersection", signals, confidence,
+        poi_match=poi_match_score,
+        poi_witness=poi_witness_str,
+        poi_type_match=poi_type_match_bool,
+        poi_type_witness=poi_type_witness_str,
+    )
 
 
 def _match_single_road(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a single_road target ("fondren rd")."""
     if (skip := _validate_target(target, "single_road")) is not None:
@@ -819,19 +971,34 @@ def _match_single_road(
     signals = _compute_signals(cluster, topo, target, SINGLE_ROAD_RADIUS_M)
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["single_road"])
 
+    # Item 2 witness signals: outside _CONFIDENCE_WEIGHTS per Bible Rule 2.
+    poi_match_score, poi_witness_str = _signal_poi_match(
+        pois or [], getattr(target, "address", "") or "",
+    )
+    poi_type_match_bool, poi_type_witness_str = _signal_poi_type_match(
+        pois or [], target.address_class,
+    )
+
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
             "[WAI matcher=single_road] %s",
             _render_reason("single_road", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "single_road", signals, confidence)
+    return _build_outcome(
+        cluster, target, "single_road", signals, confidence,
+        poi_match=poi_match_score,
+        poi_witness=poi_witness_str,
+        poi_type_match=poi_type_match_bool,
+        poi_type_witness=poi_type_witness_str,
+    )
 
 
 def _match_number_on_street(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a number_on_street target ("1234 Main St").
 
@@ -844,19 +1011,34 @@ def _match_number_on_street(
     signals = _compute_signals(cluster, topo, target, NUMBER_ON_STREET_RADIUS_M)
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["number_on_street"])
 
+    # Item 2 witness signals: outside _CONFIDENCE_WEIGHTS per Bible Rule 2.
+    poi_match_score, poi_witness_str = _signal_poi_match(
+        pois or [], getattr(target, "address", "") or "",
+    )
+    poi_type_match_bool, poi_type_witness_str = _signal_poi_type_match(
+        pois or [], target.address_class,
+    )
+
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
             "[WAI matcher=number_on_street] %s",
             _render_reason("number_on_street", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "number_on_street", signals, confidence)
+    return _build_outcome(
+        cluster, target, "number_on_street", signals, confidence,
+        poi_match=poi_match_score,
+        poi_witness=poi_witness_str,
+        poi_type_match=poi_type_match_bool,
+        poi_type_witness=poi_type_witness_str,
+    )
 
 
 def _match_apartment_complex(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an apartment_complex target.
 
@@ -871,13 +1053,27 @@ def _match_apartment_complex(
     signals = _compute_signals(cluster, topo, target, APARTMENT_RADIUS_M)
     confidence = _weighted_confidence(signals, _CONFIDENCE_WEIGHTS["apartment_complex"])
 
+    # Item 2 witness signals: outside _CONFIDENCE_WEIGHTS per Bible Rule 2.
+    poi_match_score, poi_witness_str = _signal_poi_match(
+        pois or [], getattr(target, "address", "") or "",
+    )
+    poi_type_match_bool, poi_type_witness_str = _signal_poi_type_match(
+        pois or [], target.address_class,
+    )
+
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
             "[WAI matcher=apartment_complex] %s",
             _render_reason("apartment_complex", signals, confidence),
         )
 
-    return _build_outcome(cluster, target, "apartment_complex", signals, confidence)
+    return _build_outcome(
+        cluster, target, "apartment_complex", signals, confidence,
+        poi_match=poi_match_score,
+        poi_witness=poi_witness_str,
+        poi_type_match=poi_type_match_bool,
+        poi_type_witness=poi_type_witness_str,
+    )
 
 
 def _match_poi_stub(
@@ -1279,6 +1475,23 @@ class WhereAmI:
         else:
             cluster_revisit = False
 
+        # Step 3.6: POI lookup -- cluster-scoped, fed to per-class matchers
+        # for witness-signal corroboration (Patch 2c name-match + Head 4
+        # type-match). Mantra-aligned error handling: empty list on any
+        # failure so witnesses just don't testify. Per Bible Rule 2,
+        # both witness signals stay outside _CONFIDENCE_WEIGHTS.
+        try:
+            from poi_service import get_pois_near_cluster
+            pois_result = get_pois_near_cluster(self.cur, cluster)
+            cluster_pois = list(pois_result.pois) if pois_result else []
+        except Exception:
+            log.warning(
+                "[WAI] POI fetch failed for cluster=(%s, %s) -- proceeding without witnesses",
+                cluster.median_lat, cluster.median_lng,
+                exc_info=True,
+            )
+            cluster_pois = []
+
         # Step 4 (Map): generate (target, location_type, offer_id) candidates.
         candidates = []
         for offer in queue:
@@ -1297,7 +1510,7 @@ class WhereAmI:
                     target.address_class, offer_id,
                 )
                 continue
-            outcome = matcher(cluster, topo, target)
+            outcome = matcher(cluster, topo, target, pois=cluster_pois)
             per_target_outcomes.append((offer_id, location_type, outcome))
 
         # Step 6 (Reduce): filter by matched + threshold, then ties at max.

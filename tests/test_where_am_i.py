@@ -1901,3 +1901,180 @@ def test_outcome_for_empty_per_target_outcomes_returns_none():
     match = WAIMatch(offer_id="any", location_type="pickup", confidence=0.0)
 
     assert diag.outcome_for(match) is None
+
+
+# ============================================================================
+# Item 2 (Phase 2c.2, 2026-05-08): witness signal integration tests.
+#
+# Proves that per-class matchers correctly thread `pois` through to
+# _signal_poi_match and _signal_poi_type_match, populating MatchOutcome's
+# witness fields. This is the integration gate between the unit-tested
+# witness signals (test_bead_on_wire.py TestSignalPoi*) and the matcher
+# dispatch path (Step 5 of _evaluate()).
+#
+# Rapidfuzz note: existing _signal_poi_match uses Head 1 fuzzy via rapidfuzz.
+# Bible Rule 2 locks both witness signals as-is for this sprint.
+# ============================================================================
+
+
+class TestWitnessWiring:
+    """Integration tests proving _build_outcome populates witness fields
+    when matchers receive POIs.
+
+    Dormant-wiring reality (Item 2, Phase 2c.2, 2026-05-08):
+    poi_match (Patch 2c name-witness) is currently dormant in production
+    because TargetSpec lacks an `address` field -- production code
+    short-circuits _signal_poi_match to (0.0, None) at function entry.
+    Wiring is confirmed dormant; full activation requires TargetSpec
+    expansion in a future sprint (Phase 2c.3+). These integration tests
+    therefore assert poi_match == 0.0 / poi_witness is None as the
+    expected dormant state, while poi_type_match (Head 4) is the live
+    witness signal verified by the test assertions.
+
+    Item 3 handoff note: when implementing Rule 3b (Lost Mode commit),
+    poi_type_match is the only active semantic witness until the
+    TargetSpec.address plumbing lands.
+    """
+
+    def _build_target(self, address_class="single_road"):
+        """Construct a TargetSpec for matcher tests.
+
+        TargetSpec has 4 fields: lat, lng, address_class, named_roads.
+        It does NOT have an `address` field - production code uses
+        getattr(target, "address", None) defensively in 7 sites,
+        anticipating future `TargetSpec.address` plumbing (Phase 2c.3+).
+        Until then, _signal_poi_match receives empty string and
+        short-circuits to (0.0, None) (dormant wiring).
+        """
+        from pudo_types import TargetSpec
+        return TargetSpec(
+            lat=29.7604,
+            lng=-95.3698,
+            address_class=address_class,
+            named_roads=("Forum Park Dr",),
+        )
+
+    def _build_topo(self):
+        """Construct a minimal RoadTopology for matcher tests."""
+        from where_am_i import RoadTopology
+        return RoadTopology(
+            on_wire=True,
+            current_road="Forum Park Dr",
+            last_named_road="Forum Park Dr",
+            off_wire_duration_s=0,
+            breadcrumb=("Forum Park Dr",),
+            adjacent_roads=(),
+            current_road_class="residential",
+        )
+
+    def _build_cluster(self):
+        """Construct a Cluster centered at the target.
+
+        Honors v2.1 Section III (UTC mandatory) for the `latest` field.
+        """
+        from cluster_detection import Cluster
+        from datetime import datetime, timezone
+        return Cluster(
+            n=10,
+            median_lat=29.7604,
+            median_lng=-95.3698,
+            spread_m=20.0,
+            duration_s=60.0,
+            latest=datetime.now(timezone.utc),
+        )
+
+    def _build_poi(self, name, types, dist_m=50.0):
+        """Construct a POI for integration tests."""
+        from poi_service import POI
+        return POI(
+            place_id=f"ChIJ_test_{name.replace(' ', '_').lower()}",
+            name=name,
+            types=list(types),
+            lat=29.7604,
+            lng=-95.3698,
+            dist_m=dist_m,
+        )
+
+    def test_intersection_matcher_populates_witnesses_when_pois_supplied(self):
+        from where_am_i import _match_intersection
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        target = self._build_target(address_class="intersection")
+        pois = [self._build_poi("Quick Tire Shop", ["car_repair"])]
+
+        outcome = _match_intersection(cluster, topo, target, pois=pois)
+
+        # poi_type_match should fire TRUE (car_repair is in intersection's accepted set)
+        assert outcome.poi_type_match is True
+        assert outcome.poi_type_witness == "poi_type:car_repair/Quick Tire Shop"
+        # poi_match is dormant (TargetSpec lacks `address` field, short-circuits to 0.0/None)
+        assert outcome.poi_match == 0.0
+        assert outcome.poi_witness is None
+
+    def test_single_road_matcher_populates_witnesses(self):
+        from where_am_i import _match_single_road
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        target = self._build_target(address_class="single_road")
+        pois = [self._build_poi("Excel Dental", ["dentist"])]
+
+        outcome = _match_single_road(cluster, topo, target, pois=pois)
+
+        assert outcome.poi_type_match is True
+        assert outcome.poi_type_witness == "poi_type:dentist/Excel Dental"
+        # poi_match is dormant (see class docstring)
+        assert outcome.poi_match == 0.0
+        assert outcome.poi_witness is None
+
+    def test_number_on_street_matcher_populates_witnesses(self):
+        from where_am_i import _match_number_on_street
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        target = self._build_target(address_class="number_on_street")
+        pois = [self._build_poi("Pappasito's Cantina", ["restaurant"])]
+
+        outcome = _match_number_on_street(cluster, topo, target, pois=pois)
+
+        assert outcome.poi_type_match is True
+        assert outcome.poi_type_witness == "poi_type:restaurant/Pappasito's Cantina"
+        # poi_match is dormant (see class docstring)
+        assert outcome.poi_match == 0.0
+        assert outcome.poi_witness is None
+
+    def test_apartment_complex_matcher_populates_witnesses(self):
+        from where_am_i import _match_apartment_complex
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        target = self._build_target(address_class="apartment_complex")
+        pois = [self._build_poi("The Enclave at Sienna", ["lodging"])]
+
+        outcome = _match_apartment_complex(cluster, topo, target, pois=pois)
+
+        assert outcome.poi_type_match is True
+        assert outcome.poi_type_witness == "poi_type:lodging/The Enclave at Sienna"
+
+    def test_matcher_with_pois_none_keeps_witnesses_default(self):
+        # Backward compat: pois=None (legacy 3-arg call) -> no witnesses populated.
+        # Both witness fields default None/None per Bible Rule 2.
+        from where_am_i import _match_intersection
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        target = self._build_target(address_class="intersection")
+
+        outcome = _match_intersection(cluster, topo, target, pois=None)
+
+        # No POIs supplied -> witnesses don't testify.
+        assert outcome.poi_type_match is False  # function returns False, not None, for empty pois
+        assert outcome.poi_type_witness is None
+        assert outcome.poi_match == 0.0
+        assert outcome.poi_witness is None
+
+    def test_matchoutcome_has_12_fields(self):
+        # Arithmetic gate: MatchOutcome should have exactly 12 dataclass fields
+        # after Item 2 (was 10 before, +2 for poi_type_match + poi_type_witness).
+        from where_am_i import MatchOutcome
+        fields = list(MatchOutcome.__dataclass_fields__.keys())
+        assert len(fields) == 12
+        assert "poi_type_match" in fields
+        assert "poi_type_witness" in fields
+
