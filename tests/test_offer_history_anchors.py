@@ -189,3 +189,297 @@ def _find_offer_history_insert(cur):
             params = args[1] if len(args) > 1 else ()
             return (sql, params)
     return None
+
+
+# =============================================================================
+# Phase 2c.2 Item 3b.W: expected_* anchor bindings
+# =============================================================================
+
+def _mock_cursor_with_prev(decision_log_id=42, prev_row=None):
+    """Cursor mock that returns decision_log_id on first fetchone(),
+    prev_row on second.
+
+    Use prev_row=None for idle case (no prior offer in DB).
+    Use prev_row={...} for stacked case.
+    """
+    cur = MagicMock()
+    cur.fetchone.side_effect = [{"id": decision_log_id}, prev_row]
+    return cur
+
+
+class TestExpectedAnchorBindings:
+    """Verify decisions/logger.py log_decision() binds the 4 expected_* anchors.
+
+    Item 3b.W (2026-05-08): chained from prior offer's dropoff anchors when in
+    flight, idle (now-relative) when no prior. Bound NULL when cumulative_miles
+    is None or compute_offer_expectations returns None.
+    """
+
+    def test_idle_case_binds_anchors_relative_to_now(self):
+        """No prior offer -> expected_pickup_eta ~= now + pickup_min minutes."""
+        import datetime as dt
+        from decisions.logger import log_decision
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=None)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        before = dt.datetime.now(dt.timezone.utc)
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        assert "expected_pickup_arrival_time" in sql
+        assert "expected_pickup_distance" in sql
+        assert "expected_dropoff_arrival_time" in sql
+        assert "expected_dropoff_distance" in sql
+
+        # The 4 anchors are the last 4 entries in the params tuple.
+        expected_pickup_eta = params[-4]
+        expected_pickup_dist = params[-3]
+        expected_dropoff_eta = params[-2]
+        expected_dropoff_dist = params[-1]
+
+        assert isinstance(expected_pickup_eta, dt.datetime)
+        assert expected_pickup_eta.tzinfo is not None
+
+        # Idle case: pickup_eta ~= now + 6 minutes (within 5 sec tolerance).
+        delta_pickup_s = (expected_pickup_eta - before).total_seconds()
+        assert 360 - 5 <= delta_pickup_s <= 360 + 5
+
+        # Distance: 100 + 2.5
+        assert expected_pickup_dist == 102.5
+
+        # Dropoff: pickup + 15 minutes; distance + 8.0.
+        delta_dropoff_s = (expected_dropoff_eta - expected_pickup_eta).total_seconds()
+        assert delta_dropoff_s == 900.0
+        assert expected_dropoff_dist == 110.5
+
+    def test_stacked_case_chains_from_prev_dropoff(self):
+        """Prior dropoff_eta in future -> new pickup_eta = prev_dropoff_eta + pickup_min."""
+        import datetime as dt
+        from decisions.logger import log_decision
+
+        prev_dropoff_eta = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)
+        )
+        prev_dropoff_dist = 50.0
+        prev_row = {
+            "oh_id": 99,
+            "created_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20),
+            "pickup_lat": 29.5, "pickup_lng": -95.5,
+            "dropoff_lat": 29.6, "dropoff_lng": -95.6,
+            "expected_dropoff_arrival_time": prev_dropoff_eta,
+            "expected_dropoff_distance": prev_dropoff_dist,
+        }
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=prev_row)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=45.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        expected_pickup_eta = params[-4]
+        expected_pickup_dist = params[-3]
+        expected_dropoff_eta = params[-2]
+        expected_dropoff_dist = params[-1]
+
+        # Stacked: pickup anchored on prev dropoff.
+        assert expected_pickup_eta == prev_dropoff_eta + dt.timedelta(minutes=6)
+        assert expected_pickup_dist == prev_dropoff_dist + 2.5  # 52.5
+
+        # Dropoff: pickup + trip.
+        assert expected_dropoff_eta == expected_pickup_eta + dt.timedelta(minutes=15)
+        assert expected_dropoff_dist == expected_pickup_dist + 8.0  # 60.5
+
+    def test_stacked_orphaned_falls_back_to_idle(self):
+        """Prior dropoff_eta in past -> fall back to idle anchors (now-relative)."""
+        import datetime as dt
+        from decisions.logger import log_decision
+
+        prev_dropoff_eta = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)
+        )
+        prev_row = {
+            "oh_id": 99,
+            "created_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+            "pickup_lat": 29.5, "pickup_lng": -95.5,
+            "dropoff_lat": 29.6, "dropoff_lng": -95.6,
+            "expected_dropoff_arrival_time": prev_dropoff_eta,
+            "expected_dropoff_distance": 50.0,
+        }
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=prev_row)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        before = dt.datetime.now(dt.timezone.utc)
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        expected_pickup_eta = params[-4]
+        expected_pickup_dist = params[-3]
+
+        # Should fall back to idle, NOT chain from orphaned prev (50.0 base).
+        delta_pickup_s = (expected_pickup_eta - before).total_seconds()
+        assert 0 < delta_pickup_s < 7 * 60
+        assert expected_pickup_dist == 102.5  # 100 + 2.5, NOT 52.5
+
+    def test_missing_pickup_min_binds_null(self):
+        """ep['pickup_min']=None -> compute returns None -> all 4 anchors NULL."""
+        from decisions.logger import log_decision
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=None)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=None,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        assert "expected_pickup_arrival_time" in sql
+        assert params[-4] is None
+        assert params[-3] is None
+        assert params[-2] is None
+        assert params[-1] is None
+
+    def test_missing_pickup_miles_binds_null(self):
+        """ep['pickup_miles']=None -> compute returns None -> all 4 NULL."""
+        from decisions.logger import log_decision
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=None)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=None,
+            trip_miles=8.0,
+        )
+
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        assert params[-4] is None
+        assert params[-3] is None
+        assert params[-2] is None
+        assert params[-1] is None
+
+    def test_null_cumulative_miles_skips_compute(self):
+        """ep['cumulative_miles']=None -> skip compute() entirely -> all 4 NULL.
+
+        Distinct from missing_pickup_min: that path calls compute() which returns
+        None. This path short-circuits via the `if cumulative_miles_value is not
+        None` guard, so compute() is never called.
+        """
+        from decisions.logger import log_decision
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=None)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=None,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        assert params[-4] is None
+        assert params[-3] is None
+        assert params[-2] is None
+        assert params[-1] is None
+
+    def test_prev_offer_select_failure_falls_back_to_idle(self):
+        """SELECT raises -> log warning, conn.rollback, idle anchors, INSERT proceeds."""
+        import datetime as dt
+        from decisions.logger import log_decision
+
+        cur = MagicMock()
+        select_called = [False]
+
+        def _execute_side_effect(sql, *args, **kwargs):
+            if "FROM app_private.offer_history oh" in sql:
+                select_called[0] = True
+                raise RuntimeError("simulated SELECT failure")
+            return None
+
+        cur.execute.side_effect = _execute_side_effect
+        cur.fetchone.return_value = {"id": 42}
+
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        before = dt.datetime.now(dt.timezone.utc)
+        log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        assert select_called[0]
+        conn.rollback.assert_called()
+
+        sql, params = _find_offer_history_insert(cur)
+        assert sql is not None  # INSERT executed despite SELECT failure
+        # Idle anchors (no prev_offer because SELECT failed).
+        expected_pickup_eta = params[-4]
+        expected_pickup_dist = params[-3]
+        delta_pickup_s = (expected_pickup_eta - before).total_seconds()
+        assert 0 < delta_pickup_s < 7 * 60
+        assert expected_pickup_dist == 102.5
+
+    def test_compute_raises_binds_null(self):
+        """compute_offer_expectations raises unexpectedly -> all 4 NULL, INSERT proceeds."""
+        from unittest.mock import patch
+        from decisions.logger import log_decision
+
+        cur = _mock_cursor_with_prev(decision_log_id=42, prev_row=None)
+        conn = MagicMock()
+        ep = _ep_with_anchors(
+            cumulative_miles=100.0,
+            pickup_min=6,
+            trip_min=15,
+            pickup_miles=2.5,
+            trip_miles=8.0,
+        )
+
+        with patch(
+            "decisions.logger.compute_offer_expectations",
+            side_effect=RuntimeError("simulated compute failure"),
+        ):
+            log_decision(cur, conn, "drv-1", {}, ep, _result_stub())
+
+        sql, params = _find_offer_history_insert(cur)
+        assert sql is not None
+        assert params[-4] is None
+        assert params[-3] is None
+        assert params[-2] is None
+        assert params[-1] is None
