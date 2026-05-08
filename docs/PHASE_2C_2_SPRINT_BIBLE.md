@@ -99,7 +99,11 @@ _CONFIDENCE_WEIGHTS = {
 
 **You will not modify `_CONFIDENCE_WEIGHTS` in Phase 2. If you think you need to, you don't.**
 
-### Rule 3: Commit threshold is the elevator rule
+### Rule 3: Commit thresholds (Normal Mode + Lost Mode)
+
+Two commit rules apply depending on TAD verdict state. The Normal Mode rule fires when TAD passes (driver in the 85%–115% distance window); the Lost Mode rule fires when TAD signals narrative blindness or violation (see Rule 7 for triggers).
+
+**3a. Normal Mode commit rule** (TAD verdict `passed=True`):
 
 ```
 COMMIT if:
@@ -108,7 +112,18 @@ COMMIT if:
 ELSE skip and log forensically.
 ```
 
-Phase 1 implemented this in `evaluate()`. Phase 2 does not modify it.
+**3b. Lost Mode commit rule** (TAD verdict `passed=None`):
+
+```
+COMMIT if:
+    weighted_confidence >= 0.85
+    AND poi_type_match is TRUE
+ELSE skip and log forensically.
+```
+
+Lost Mode lifts the elevator floor — POI type match becomes mandatory (not optional), and the weighted confidence must clear 0.85 (not 0.80) to qualify. The intent: when the narrative is broken, the system demands stronger spatial corroboration before pricing a location.
+
+Phase 1 implemented Rule 3a in `evaluate()`. Rule 3b lands in Item 3 of the architecture-chat work (the `evaluate()` integration task). Phase 2 does not modify either rule.
 
 ### Rule 4: Best-offer-match already exists
 
@@ -140,6 +155,59 @@ This sprint crosses the miles/meters boundary in two modules. Get this wrong and
 **Critical pairing in `escape_detection.py`:** the distance check uses meters (`haversine_meters(heartbeat_lat, heartbeat_lng, centroid_lat, centroid_lng) > EXIT_VELOCITY_DISTANCE_M`). The exit_odometer write uses miles (`heartbeat.cumulative_miles`). Both are correct; do not normalize one to the other. The test suite must include at least one case that would fail if these were swapped (e.g., a heartbeat at 0.1 miles cumulative odometer that's 200m from centroid — exit detected, exit_odometer=0.1; a swap would either compare 0.1 to 150 and never fire, or compare 200 to 150 and fire on the first heartbeat regardless of cumulative state).
 
 **No unit conversions in this sprint.** Miles stays miles. Meters stays meters. They never multiply or compare to each other. If you find yourself writing `* 1609.34` or `/ 1609.34` somewhere, stop — the architecture doesn't need that conversion in Phase 2c.2.
+
+### Rule 7: Lost Mode triggers and mechanics
+
+Lost Mode is the runtime state TAD enters when it cannot vouch for the driver's narrative. `evaluate_tad_gate()` returns `passed=None` per offer in this state, signaling the caller to apply the Rule 3b commit rule rather than Rule 3a.
+
+Two triggers, categorically different:
+
+**7a. Narrative blindness (caller-driven).** No prior anchor available for distance math. Cases:
+- Queue empty (first offer of session)
+- Prior offer GC'd before pickup confirmation
+- Stacked offer received with no completed prior pickup-confirmation event
+
+The caller passes `lost_mode=True` to `evaluate_tad_gate()`. All offers in the queue receive `passed=None`.
+
+**7b. Narrative violation (data-driven).** Per-offer odometer overshoot. Cases:
+- Driver passed the expected pickup arrival point and kept driving (cumulative miles > 115% of expected pickup distance)
+- Driver passed the expected dropoff arrival point and kept driving (cumulative miles > 115% of expected dropoff distance)
+
+`evaluate_tad_gate()` detects this per-offer; the affected offer receives `passed=None` while other offers in the queue may retain `passed=True`.
+
+**The 85%/115% distance window:**
+
+| Cumulative completion | TAD verdict |
+|-----------------------|-------------|
+| < 85%                 | `passed=False` (driver hasn't arrived; skip candidate) |
+| 85% – 115%            | `passed=True` (Normal Mode; apply Rule 3a) |
+| > 115%                | `passed=None` (Lost Mode via narrative violation; apply Rule 3b) |
+
+**Time signal does NOT trigger Lost Mode.** Time is a volatile signal — traffic, train delays, surge events distort it without affecting spatial reality. Time-completion percentage is captured in the forensic blob (`tad_decision_context`) for diagnostic purposes but never gates the verdict.
+
+Lost Mode commit rule itself: see Rule 3b.
+
+### Rule 8: Inferred-dropoff anchor recovery
+
+Stacked offer chains require a continuous anchor narrative — ride B's TAD math depends on ride A's dropoff being a known point on the odometer timeline. Real-world driving sometimes leaves a dropoff spatially unconfirmable (cluster doesn't form, GPS drift, driver pulls into a parking structure that defeats the spatial signals). Without recovery logic, every subsequent ride in the chain falls into Lost Mode for the rest of the session.
+
+**Inference trigger.** When pickup B confirms (cluster commits via Rule 3), AND ride A meets ALL of:
+- `actual_pickup_at IS NOT NULL` (ride A's pickup was confirmed)
+- `actual_dropoff_at IS NULL` (ride A's dropoff was never spatially confirmed)
+- current UTC time ≥ `ride_A.expected_dropoff_arrival_time` (ride A's dropoff was due)
+- current UTC time ≥ `ride_B.expected_pickup_arrival_time` (ride B's pickup was due — ensures sequential, not overlapping)
+
+…then ride A's dropoff is inferred to have occurred.
+
+**Inferred values:**
+- Inferred dropoff time = current UTC timestamp at the moment pickup B confirms
+- Inferred dropoff location, in priority order:
+  1. **Primary**: last known cluster centroid before pickup B's cluster (the cluster the driver left when departing for pickup B)
+  2. **Fallback**: if no intermediate cluster formed between pickup A's confirmation and pickup B's cluster, use the last GPS coordinate received prior to cluster B formation. This handles the no-intermediate-cluster Lost Mode leg (driver went pickup A → dropoff A → pickup B without lingering long enough to cluster anywhere). No accuracy threshold applies here — heartbeat quality filtering is upstream concern; this fallback's lat/lng is forensic context (TAD chain math anchors on the odometer reading, not the coordinate).
+
+**Persistence requirement.** Inferred dropoffs MUST be persistently distinguishable from spatially-confirmed dropoffs. Future TAD chains use ride A's dropoff as their anchor; downstream Price Radar consumers may apply differential trust (a spatially-confirmed dropoff anchors a stronger price signal than an inferred one). The exact persistence mechanism — column on `offer_history` vs flag in forensic blob vs separate event table — is locked at Item 3 implementation time, not at Bible amendment time.
+
+**Boundary.** Inferred-dropoff is anchor-recovery scaffolding. It does NOT contribute to Price Radar pricing — only spatially-confirmed dropoffs seed POI cache and price signals. The mantra holds: skip rather than pollute. The fallback location's imprecision is therefore safe — TAD chain math anchors on the odometer reading; the lat/lng is forensic context.
 
 ---
 
@@ -207,9 +275,9 @@ These string keys are what `CLASS_TO_TYPE_MAP` uses.
 - Step 3: Stop context (Stop Atlas v1.1 stub)
 - Step 3.5: Memory Eye (cluster revisit check)
 - Step 4 (Map): generate (target, location_type, offer_id) candidates from queue
-- **Step 4.5 (TAD bouncer, Phase 1): filter candidates by `tad.evaluate_tad_gate()`**
+- **Step 4.5 (TAD bouncer, Phase 1): filter candidates by `tad.evaluate_tad_gate()` (tristate verdict — `True`=Normal Mode pass, `False`=skip, `None`=Lost Mode; see Rules 3 and 7)**
 - Step 5 (Evaluate): per-class matcher dispatch on surviving candidates
-- Step 6 (Reduce): elevator rule applied (`>=0.90 OR (>=0.80 AND poi_type_match)`), tie at max
+- Step 6 (Reduce): dual commit rule applied per offer (Rule 3a Normal Mode for `passed=True`, Rule 3b Lost Mode for `passed=None`), tie at max
 
 ### `offer_history` schema (post-Phase 1)
 
@@ -525,6 +593,7 @@ These are session-protocol rules that apply throughout. From `docs/SESSION_PROTO
 - ❌ Removing the existing motion gate or odometer gate from `motion_gate.py` — both stay
 - ❌ INDEX.md update (stale per architecture-chat finding 2026-05-07; separate maintenance task)
 - ❌ Modifying `_CONFIDENCE_WEIGHTS` (do not, will not, must not)
+- ❌ Price Radar weighting for no-show pickups — Phase 2g scope. Phase 2c.2 commits pickups via the elevator rule (Rule 3) regardless of ride outcome; downstream `community_offers` ingestion applies any pickup-confirmation-vs-completion weighting later. The principle is ratified ("confirmed pickup at offer's text location → price binding is valid regardless of whether ride completed, mirroring existing declined-offer 0.3× weighting"); the actual no-show weight and the spatial-confidence-floor question (whether confirmed-but-no-show pickups require stricter spatial corroboration than confirmed-and-completed) are Phase 2g tuning concerns.
 
 ---
 
