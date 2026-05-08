@@ -1,7 +1,10 @@
+import datetime
 import logging
 import json
 import traceback
 
+from pudo_types import Offer, TargetSpec
+from tad import compute_offer_expectations
 
 
 def _safe_numeric(val):
@@ -72,6 +75,107 @@ def log_decision(cur, conn, uid, params, ep, result):
     # ── offer_history (non-blocking) ──────────────────────────────────
     try:
         if decision_log_id:
+            # Phase 2c.2 Item 3b.W: compute the 4 expected_* anchors via
+            # tad.compute_offer_expectations. On any failure (missing prior
+            # row, naive datetime, missing fields), bind NULL — TAD will
+            # downgrade to Lost Mode for that offer at heartbeat time.
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            prev_offer_obj = None
+            prev_dropoff_eta = None
+            prev_dropoff_dist = None
+            try:
+                cur.execute("""
+                    SELECT
+                        oh.id AS oh_id,
+                        oh.created_at,
+                        oh.pickup_lat, oh.pickup_lng,
+                        oh.dropoff_lat, oh.dropoff_lng,
+                        oh.expected_dropoff_arrival_time,
+                        oh.expected_dropoff_distance
+                    FROM app_private.offer_history oh
+                    JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+                    WHERE dl.driver_id = %s
+                      AND oh.expected_dropoff_arrival_time IS NOT NULL
+                    ORDER BY oh.created_at DESC
+                    LIMIT 1
+                """, (uid,))
+                prev_row = cur.fetchone()
+                if prev_row:
+                    prev_eta = prev_row["expected_dropoff_arrival_time"]
+                    # Defensive tz-attach (Q5 ratification): tad.py rejects naive
+                    # datetimes at module entry per Canonical Section III.
+                    if prev_eta and prev_eta.tzinfo is None:
+                        prev_eta = prev_eta.replace(tzinfo=datetime.timezone.utc)
+                    prev_dropoff_eta = prev_eta
+                    prev_dropoff_dist = (
+                        float(prev_row["expected_dropoff_distance"])
+                        if prev_row["expected_dropoff_distance"] is not None
+                        else None
+                    )
+                    prev_offer_obj = Offer(
+                        offer_id=str(prev_row["oh_id"]),
+                        accepted_at=prev_row["created_at"],
+                        pickup=TargetSpec(
+                            lat=prev_row["pickup_lat"], lng=prev_row["pickup_lng"],
+                            address_class="poi", named_roads=(),
+                        ),
+                        dropoff=TargetSpec(
+                            lat=prev_row["dropoff_lat"], lng=prev_row["dropoff_lng"],
+                            address_class="poi", named_roads=(),
+                        ),
+                    )
+            except Exception as prev_err:
+                logging.warning(
+                    f"[3b.W] prev_offer fetch failed (treating as idle): {prev_err}"
+                )
+                # Clear aborted-transaction state so the subsequent INSERT works.
+                # decision_log row was already committed upstream so rollback is safe.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+            expected_pickup_eta = None
+            expected_pickup_dist = None
+            expected_dropoff_eta = None
+            expected_dropoff_dist = None
+            cumulative_miles_value = ep.get("cumulative_miles")
+            if cumulative_miles_value is not None:
+                try:
+                    new_offer_obj = Offer(
+                        offer_id=str(decision_log_id),
+                        accepted_at=now_utc,
+                        pickup=TargetSpec(
+                            lat=ep["p_lat"], lng=ep["p_lng"],
+                            address_class="poi", named_roads=(),
+                        ),
+                        dropoff=TargetSpec(
+                            lat=ep["d_lat"], lng=ep["d_lng"],
+                            address_class="poi", named_roads=(),
+                        ),
+                        pickup_miles=_safe_numeric(ep.get("pickup_miles")),
+                        trip_miles=_safe_numeric(ep.get("trip_miles")),
+                        pickup_minutes=ep.get("pickup_min"),
+                        trip_minutes=ep.get("trip_min"),
+                    )
+                    expectations = compute_offer_expectations(
+                        new_offer=new_offer_obj,
+                        prev_offer=prev_offer_obj,
+                        current_odometer=float(cumulative_miles_value),
+                        now=now_utc,
+                        prev_expected_dropoff_arrival_time=prev_dropoff_eta,
+                        prev_expected_dropoff_distance=prev_dropoff_dist,
+                    )
+                    if expectations is not None:
+                        expected_pickup_eta = expectations.expected_pickup_arrival_time
+                        expected_pickup_dist = expectations.expected_pickup_distance
+                        expected_dropoff_eta = expectations.expected_dropoff_arrival_time
+                        expected_dropoff_dist = expectations.expected_dropoff_distance
+                except Exception as exp_err:
+                    logging.warning(
+                        f"[3b.W] compute_offer_expectations failed (NULL anchors): {exp_err}"
+                    )
+
             cur.execute("""
                 INSERT INTO app_private.offer_history (
                     created_at, day_of_year, day_of_week, hour_of_day,
@@ -86,7 +190,9 @@ def log_decision(cur, conn, uid, params, ep, result):
                     app_verdict, app_reason, mode_at_decision, market_name,
                     leg_start_cumulative_miles_pickup,
                     miles_at_offer_receipt,
-                    lat_at_offer_receipt, lng_at_offer_receipt
+                    lat_at_offer_receipt, lng_at_offer_receipt,
+                    expected_pickup_arrival_time, expected_pickup_distance,
+                    expected_dropoff_arrival_time, expected_dropoff_distance
                 ) VALUES (
                     NOW(),
                     EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
@@ -103,6 +209,8 @@ def log_decision(cur, conn, uid, params, ep, result):
                     %s, %s, %s, %s,
                     %s,
                     %s,
+                    %s, %s,
+                    %s, %s,
                     %s, %s
                 )
             """, (
@@ -124,6 +232,9 @@ def log_decision(cur, conn, uid, params, ep, result):
                 ep.get("cumulative_miles"),                    # leg_start_cumulative_miles_pickup
                 ep.get("cumulative_miles"),                    # miles_at_offer_receipt (same source)
                 ep.get("current_lat"), ep.get("current_lng"),  # lat/lng_at_offer_receipt
+                # Phase 2c.2 Item 3b.W: TAD expected anchors
+                expected_pickup_eta, expected_pickup_dist,
+                expected_dropoff_eta, expected_dropoff_dist,
             ))
             conn.commit()
             logging.info(f"[LOG] Offer history logged -- id: {decision_log_id}")
