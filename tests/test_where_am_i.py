@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import pytest
+from unittest.mock import patch, MagicMock
 
 from cluster_detection import Cluster
 from datetime import datetime as _dt, timezone as _tz, timedelta
@@ -2077,4 +2078,497 @@ class TestWitnessWiring:
         assert len(fields) == 12
         assert "poi_type_match" in fields
         assert "poi_type_witness" in fields
+
+
+# =============================================================================
+# Phase 2c.2 Item 3 — dual commit rule tests
+# =============================================================================
+#
+# These tests cover the three pieces of Item 3 that landed in commit 07a003e:
+#   - Item 3a: Step 4.5 TAD bouncer integration in _evaluate
+#   - Item 3c: Per-leg dispatch + dual commit rule
+#   - Item 3e: Forensic blob assembly (in-memory, via DiagnosticContext.tad_verdicts)
+#
+# Items 3b (caller-layer Lost Mode trigger) and 3d (inferred-dropoff anchor
+# recovery) are deferred to a separate session and live in driver_heartbeat.py
+# rather than where_am_i.py — out of scope for this test suite.
+#
+# Mocking strategy:
+#   - evaluate_tad_gate is patched via unittest.mock.patch — it's a pure
+#     module-level function, ideal target for patch.
+#   - Per-class matchers are patched via patch.dict(_CLASS_DISPATCH, ...) —
+#     swaps in a fake matcher returning a hand-crafted MatchOutcome. This
+#     gives deterministic confidence/poi_type_match values without depending
+#     on real spatial scoring math.
+#   - Cluster, topology, recent_clusters, POI service all use the existing
+#     _fake_*_fn injection patterns from earlier in this file.
+
+
+def _make_outcome(
+    matched: bool = True,
+    confidence: float = 0.95,
+    poi_type_match=None,
+    pudo_type: str = "pickup",
+    target_address: str = "test target",
+):
+    """Construct a MatchOutcome for test fakes.
+
+    Defaults: matched=True, confidence=0.95, poi_type_match=None (default).
+    Tests override per scenario. The four required-non-defaulted fields
+    (corrected_lat/lng, reason, signals) get sensible test values.
+    """
+    from where_am_i import MatchOutcome
+    return MatchOutcome(
+        matched=matched,
+        confidence=confidence,
+        corrected_lat=29.6246 if matched else None,
+        corrected_lng=-95.5102 if matched else None,
+        reason="test_outcome",
+        pudo_type=pudo_type,
+        target_address=target_address,
+        signals={"proximity": confidence},
+        poi_type_match=poi_type_match,
+    )
+
+
+def _make_verdict(passed, leg: str = "pickup", lost_mode_reason: str = None):
+    """Construct a TadVerdict for test fakes.
+
+    passed: tristate Optional[bool]. Other fields default to test-friendly
+    values. Tests override per scenario.
+    """
+    from tad import TadVerdict
+    return TadVerdict(
+        passed=passed,
+        time_boost=0.0,
+        leg_evaluated=leg,
+        lost_mode_reason=lost_mode_reason,
+        distance_gate={"mode": "test", "passed": passed},
+        time_signal=None,
+    )
+
+
+def _wai_with_fakes(cluster, topo):
+    """Build a WhereAmI with fake dependencies for _evaluate exercises.
+
+    Mirrors the kwargs accepted by the existing _fake_pivot() factory in
+    this file (does NOT pass current_road_class — that field is on the
+    real RoadTopology dataclass but not in the fake_pivot dict signature).
+    The _adjacency_fn returns an empty tuple — tests don't exercise the
+    adjacent-road signal.
+    """
+    from where_am_i import WhereAmI
+    return WhereAmI(
+        cur=MagicMock(),  # not actually used — POI fetch fails-closed to []
+        _cluster_fn=_fake_cluster_fn(cluster),
+        _pivot_fn=_fake_pivot(
+            on_wire=topo.on_wire,
+            current_road=topo.current_road,
+            last_named_road=topo.last_named_road,
+            pivot_time=None,
+            breadcrumb=list(topo.breadcrumb),
+        ),
+        _recent_clusters_fn=_fake_recent_clusters_fn([]),
+        _adjacency_fn=lambda cur, c: (),
+    )
+
+
+class TestCommitsHelper:
+    """Pure-function tests for _commits() — the dual commit rule policy."""
+
+    def test_unmatched_outcome_never_commits(self):
+        from where_am_i import _commits
+        outcome = _make_outcome(matched=False, confidence=0.99)
+        # Even a 0.99 confidence with a True verdict can't override matched=False
+        verdict = _make_verdict(passed=True)
+        assert _commits(outcome, verdict) is False
+
+    def test_bridge_state_uses_legacy_floor_above(self):
+        from where_am_i import _commits, WAI_CONFIDENCE_THRESHOLD
+        # Bridge state: verdict=None, confidence above 0.40 floor -> commits
+        outcome = _make_outcome(confidence=0.50)  # above WAI_CONFIDENCE_THRESHOLD
+        assert WAI_CONFIDENCE_THRESHOLD == 0.40
+        assert _commits(outcome, None) is True
+
+    def test_bridge_state_uses_legacy_floor_below(self):
+        from where_am_i import _commits
+        # Bridge state: verdict=None, confidence below 0.40 floor -> skip
+        outcome = _make_outcome(confidence=0.30)
+        assert _commits(outcome, None) is False
+
+    def test_normal_mode_high_floor(self):
+        from where_am_i import _commits
+        # Normal Mode (passed=True): conf >= 0.90 -> commits regardless of poi_type_match
+        verdict = _make_verdict(passed=True)
+        outcome_high = _make_outcome(confidence=0.91, poi_type_match=None)
+        outcome_at = _make_outcome(confidence=0.90, poi_type_match=None)
+        outcome_below = _make_outcome(confidence=0.89, poi_type_match=None)
+        assert _commits(outcome_high, verdict) is True
+        assert _commits(outcome_at, verdict) is True
+        assert _commits(outcome_below, verdict) is False
+
+    def test_normal_mode_elevator_with_poi_type_match(self):
+        from where_am_i import _commits
+        # Normal Mode elevator: 0.80 <= conf < 0.90 AND poi_type_match=True -> commits
+        verdict = _make_verdict(passed=True)
+        outcome_at = _make_outcome(confidence=0.80, poi_type_match=True)
+        outcome_mid = _make_outcome(confidence=0.85, poi_type_match=True)
+        outcome_below = _make_outcome(confidence=0.79, poi_type_match=True)
+        assert _commits(outcome_at, verdict) is True
+        assert _commits(outcome_mid, verdict) is True
+        assert _commits(outcome_below, verdict) is False
+
+    def test_normal_mode_elevator_requires_true_not_truthy(self):
+        from where_am_i import _commits
+        # Normal Mode elevator: poi_type_match must be specifically True.
+        # None and False both fail the elevator clause.
+        verdict = _make_verdict(passed=True)
+        outcome_none = _make_outcome(confidence=0.85, poi_type_match=None)
+        outcome_false = _make_outcome(confidence=0.85, poi_type_match=False)
+        outcome_true = _make_outcome(confidence=0.85, poi_type_match=True)
+        assert _commits(outcome_none, verdict) is False
+        assert _commits(outcome_false, verdict) is False
+        assert _commits(outcome_true, verdict) is True
+
+    def test_lost_mode_strict_floor(self):
+        from where_am_i import _commits
+        # Lost Mode (passed=None): conf >= 0.85 AND poi_type_match=True -> commits.
+        # Either condition missing -> skip.
+        verdict = _make_verdict(passed=None, lost_mode_reason="narrative_blindness")
+        # Both conditions met
+        assert _commits(_make_outcome(confidence=0.85, poi_type_match=True), verdict) is True
+        assert _commits(_make_outcome(confidence=0.99, poi_type_match=True), verdict) is True
+        # poi_type_match missing
+        assert _commits(_make_outcome(confidence=0.99, poi_type_match=None), verdict) is False
+        assert _commits(_make_outcome(confidence=0.99, poi_type_match=False), verdict) is False
+        # confidence below 0.85 floor
+        assert _commits(_make_outcome(confidence=0.84, poi_type_match=True), verdict) is False
+
+
+class TestClassifyCommitRule:
+    """Pure-function tests for classify_commit_rule() — forensic classifier."""
+
+    def test_legacy_floor_when_no_verdict(self):
+        from where_am_i import classify_commit_rule
+        outcome = _make_outcome(confidence=0.50)
+        assert classify_commit_rule(outcome, None) == "legacy_floor"
+
+    def test_normal_high_at_or_above_0_90(self):
+        from where_am_i import classify_commit_rule
+        verdict = _make_verdict(passed=True)
+        assert classify_commit_rule(_make_outcome(confidence=0.95), verdict) == "normal_high"
+        assert classify_commit_rule(_make_outcome(confidence=0.90), verdict) == "normal_high"
+
+    def test_normal_elevator_below_0_90(self):
+        from where_am_i import classify_commit_rule
+        # Below 0.90 with verdict.passed=True -> elevator label.
+        # Note: classify is called only on committed outcomes, so the caller
+        # has already determined this passed _commits. We don't need to
+        # re-verify the poi_type_match condition here — classify just labels.
+        verdict = _make_verdict(passed=True)
+        assert classify_commit_rule(_make_outcome(confidence=0.85, poi_type_match=True), verdict) == "normal_elevator"
+        assert classify_commit_rule(_make_outcome(confidence=0.80, poi_type_match=True), verdict) == "normal_elevator"
+
+    def test_lost_floor_when_passed_is_none(self):
+        from where_am_i import classify_commit_rule
+        verdict = _make_verdict(passed=None, lost_mode_reason="narrative_violation")
+        assert classify_commit_rule(_make_outcome(confidence=0.85, poi_type_match=True), verdict) == "lost_floor"
+        assert classify_commit_rule(_make_outcome(confidence=0.99, poi_type_match=True), verdict) == "lost_floor"
+
+    def test_unknown_when_passed_is_false(self):
+        from where_am_i import classify_commit_rule
+        # Defensive: passed=False shouldn't reach classify_commit_rule in
+        # production (Step 5 skips dispatch), but if it does, label as unknown.
+        verdict = _make_verdict(passed=False)
+        assert classify_commit_rule(_make_outcome(confidence=0.95), verdict) == "unknown"
+
+    def test_classify_matches_commits_decision(self):
+        """Cross-check: every classification corresponds to a True _commits result.
+
+        This is a table-driven sanity check that classify_commit_rule and
+        _commits stay in sync. If the dual rule changes in one but not the
+        other, this test fires.
+
+        Note on tristate handling: cases pass pre-built TadVerdict instances
+        (or None for bridge state) rather than booleans, because the verdict.
+        passed field is itself tristate Optional[bool]. Conflating "no
+        verdict" with "verdict whose .passed is None" was the bug fixed
+        here.
+        """
+        from where_am_i import _commits, classify_commit_rule
+        # Build verdicts explicitly per case. None = no verdict (bridge state);
+        # _make_verdict(passed=True) = Normal Mode; _make_verdict(passed=None) =
+        # Lost Mode. The two None values mean different things — one is the
+        # absence of a TadVerdict object, the other is a TadVerdict whose
+        # .passed field is None.
+        cases = [
+            # (outcome_kwargs, verdict, expected_label)
+            (dict(confidence=0.95), None, "legacy_floor"),
+            (dict(confidence=0.95, poi_type_match=None), _make_verdict(passed=True), "normal_high"),
+            (dict(confidence=0.85, poi_type_match=True), _make_verdict(passed=True), "normal_elevator"),
+            (dict(confidence=0.86, poi_type_match=True), _make_verdict(passed=None), "lost_floor"),
+        ]
+        for outcome_kwargs, verdict, expected_label in cases:
+            outcome = _make_outcome(**outcome_kwargs)
+            assert _commits(outcome, verdict) is True, (
+                f"_commits returned False for case expected to commit: "
+                f"outcome={outcome_kwargs}, verdict={verdict}, label={expected_label}"
+            )
+            assert classify_commit_rule(outcome, verdict) == expected_label
+
+
+class TestItem3DualCommitRule:
+    """Integration tests for _evaluate with TAD context (Items 3a, 3c, 3e)."""
+
+    def _build_cluster(self):
+        return _cluster()
+
+    def _build_topo(self):
+        return _topo()
+
+    def _build_offer(self, offer_id: str = "offer_a", address_class: str = "single_road"):
+        # _offer() builds an Offer; _target() builds the TargetSpec.
+        # Use single_road as default address_class for predictable dispatch.
+        # Note: TargetSpec has no `address` field (Bible Finding 3 — Patch 2c
+        # is dormant until that field lands). _target() accepts only
+        # lat/lng/address_class/named_roads.
+        pickup = _target(address_class=address_class)
+        dropoff = _target(address_class=address_class, lat=29.7000, lng=-95.4000)
+        return _offer(offer_id=offer_id, pickup=pickup, dropoff=dropoff)
+
+    def test_constants_exist_with_correct_values(self):
+        """Module-level constants for the dual commit rule are exported correctly."""
+        from where_am_i import COMMIT_NORMAL_HIGH, COMMIT_NORMAL_ELEVATOR, COMMIT_LOST_FLOOR
+        assert COMMIT_NORMAL_HIGH == 0.90
+        assert COMMIT_NORMAL_ELEVATOR == 0.80
+        assert COMMIT_LOST_FLOOR == 0.85
+
+    def test_bridge_state_preserves_legacy_behavior(self):
+        """No TAD context supplied -> legacy floor, evaluate_tad_gate not called."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        with patch("where_am_i.evaluate_tad_gate") as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.50)}):
+            matches, diag = wai.evaluate_with_diagnostics("driver1", [offer])
+
+        # TAD gate NOT called in bridge state
+        mock_tad.assert_not_called()
+        # Legacy floor (0.40) is cleared by 0.50 confidence -> match commits
+        assert len(matches) >= 1
+        # Forensic field present and empty in bridge state
+        assert diag.tad_verdicts == {}
+
+    def test_step_4_5_calls_evaluate_tad_gate_when_context_supplied(self):
+        """TAD context supplied -> evaluate_tad_gate called once with expected kwargs."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        from tad import OfferTadState
+        from datetime import datetime, timezone
+
+        per_offer_state = {
+            offer.offer_id: OfferTadState(
+                offer_id=offer.offer_id,
+                miles_at_offer_receipt=1.0,
+                accepted_at=DUMMY_ACCEPTED_AT,
+                expected_pickup_arrival_time=datetime(2026, 4, 27, 8, 5, tzinfo=timezone.utc),
+                expected_pickup_distance=2.0,
+                actual_pickup_at=None,
+                cumulative_miles_at_pickup_fire=None,
+                pickup_exit_time=None,
+                exit_velocity_timeout=False,
+            )
+        }
+
+        fake_verdicts = {offer.offer_id: _make_verdict(passed=True)}
+
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts) as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.95)}):
+            matches, diag = wai.evaluate_with_diagnostics(
+                "driver1", [offer],
+                per_offer_state=per_offer_state,
+                current_odometer=1.5,
+            )
+
+        mock_tad.assert_called_once()
+        # Diagnostics carry the verdicts dict for forensic JSONB serialization
+        assert diag.tad_verdicts == fake_verdicts
+
+    def test_step_5_skips_dispatch_for_passed_false_verdict(self):
+        """passed=False verdict -> per-class matcher NOT invoked for that offer."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        from tad import OfferTadState
+        from datetime import datetime, timezone
+
+        per_offer_state = {
+            offer.offer_id: OfferTadState(
+                offer_id=offer.offer_id,
+                miles_at_offer_receipt=1.0,
+                accepted_at=DUMMY_ACCEPTED_AT,
+                expected_pickup_arrival_time=datetime(2026, 4, 27, 8, 5, tzinfo=timezone.utc),
+                expected_pickup_distance=2.0,
+                actual_pickup_at=None,
+                cumulative_miles_at_pickup_fire=None,
+                pickup_exit_time=None,
+                exit_velocity_timeout=False,
+            )
+        }
+
+        fake_verdicts = {offer.offer_id: _make_verdict(passed=False)}
+
+        # Track whether the matcher gets called
+        matcher_calls = []
+        def tracking_matcher(c, t, tg, pois):
+            matcher_calls.append((c, tg))
+            return _make_outcome(confidence=0.99)
+
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": tracking_matcher}):
+            matches, diag = wai.evaluate_with_diagnostics(
+                "driver1", [offer],
+                per_offer_state=per_offer_state,
+                current_odometer=1.5,
+            )
+
+        # Matcher NOT called: TAD bouncer skipped the offer entirely
+        assert len(matcher_calls) == 0, (
+            f"Matcher was called {len(matcher_calls)} times; expected 0 for passed=False verdict"
+        )
+        # No matches produced
+        assert matches == []
+        # Forensic context still carries the verdict for the JSONB blob
+        assert diag.tad_verdicts == fake_verdicts
+
+    def test_step_6_normal_mode_commits_at_high_floor(self):
+        """Normal Mode (passed=True), confidence 0.91 -> commits without poi_type_match."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        from tad import OfferTadState
+        from datetime import datetime, timezone
+
+        per_offer_state = {
+            offer.offer_id: OfferTadState(
+                offer_id=offer.offer_id,
+                miles_at_offer_receipt=1.0,
+                accepted_at=DUMMY_ACCEPTED_AT,
+                expected_pickup_arrival_time=datetime(2026, 4, 27, 8, 5, tzinfo=timezone.utc),
+                expected_pickup_distance=2.0,
+                actual_pickup_at=None,
+                cumulative_miles_at_pickup_fire=None,
+                pickup_exit_time=None,
+                exit_velocity_timeout=False,
+            )
+        }
+
+        fake_verdicts = {offer.offer_id: _make_verdict(passed=True)}
+
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.91, poi_type_match=None)}):
+            matches, _ = wai.evaluate_with_diagnostics(
+                "driver1", [offer],
+                per_offer_state=per_offer_state,
+                current_odometer=1.5,
+            )
+
+        assert len(matches) >= 1, "0.91 confidence in Normal Mode should commit"
+
+    def test_step_6_lost_mode_requires_poi_type_match(self):
+        """Lost Mode (passed=None), confidence 0.86 without poi_type_match -> skip."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        from tad import OfferTadState
+        from datetime import datetime, timezone
+
+        per_offer_state = {
+            offer.offer_id: OfferTadState(
+                offer_id=offer.offer_id,
+                miles_at_offer_receipt=1.0,
+                accepted_at=DUMMY_ACCEPTED_AT,
+                expected_pickup_arrival_time=datetime(2026, 4, 27, 8, 5, tzinfo=timezone.utc),
+                expected_pickup_distance=2.0,
+                actual_pickup_at=None,
+                cumulative_miles_at_pickup_fire=None,
+                pickup_exit_time=None,
+                exit_velocity_timeout=False,
+            )
+        }
+
+        fake_verdicts = {offer.offer_id: _make_verdict(passed=None, lost_mode_reason="narrative_blindness")}
+
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.86, poi_type_match=None)}):
+            matches, _ = wai.evaluate_with_diagnostics(
+                "driver1", [offer],
+                per_offer_state=per_offer_state,
+                current_odometer=1.5,
+                lost_mode=True,
+            )
+
+        # Without poi_type_match=True, Lost Mode rule fails even at 0.86 confidence
+        assert matches == [], "Lost Mode requires poi_type_match=True to commit"
+
+    def test_step_6_lost_mode_commits_with_poi_type_match(self):
+        """Lost Mode (passed=None), confidence 0.86 + poi_type_match=True -> commits."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+        offer = self._build_offer()
+
+        from tad import OfferTadState
+        from datetime import datetime, timezone
+
+        per_offer_state = {
+            offer.offer_id: OfferTadState(
+                offer_id=offer.offer_id,
+                miles_at_offer_receipt=1.0,
+                accepted_at=DUMMY_ACCEPTED_AT,
+                expected_pickup_arrival_time=datetime(2026, 4, 27, 8, 5, tzinfo=timezone.utc),
+                expected_pickup_distance=2.0,
+                actual_pickup_at=None,
+                cumulative_miles_at_pickup_fire=None,
+                pickup_exit_time=None,
+                exit_velocity_timeout=False,
+            )
+        }
+
+        fake_verdicts = {offer.offer_id: _make_verdict(passed=None, lost_mode_reason="narrative_blindness")}
+
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.86, poi_type_match=True)}):
+            matches, _ = wai.evaluate_with_diagnostics(
+                "driver1", [offer],
+                per_offer_state=per_offer_state,
+                current_odometer=1.5,
+                lost_mode=True,
+            )
+
+        assert len(matches) >= 1, "Lost Mode at 0.86 with poi_type_match should commit"
+
+    def test_empty_queue_with_lost_mode_does_not_crash(self):
+        """Empty queue + lost_mode=True -> no verdicts, no exception."""
+        cluster = self._build_cluster()
+        topo = self._build_topo()
+        wai = _wai_with_fakes(cluster, topo)
+
+        with patch("where_am_i.evaluate_tad_gate") as mock_tad:
+            matches, diag = wai.evaluate_with_diagnostics(
+                "driver1", [],
+                per_offer_state={},
+                current_odometer=1.5,
+                lost_mode=True,
+            )
+
+        # TAD gate NOT called for empty queue (the `if queue and ...` guard)
+        mock_tad.assert_not_called()
+        assert matches == []
+        assert diag.tad_verdicts == {}
 
