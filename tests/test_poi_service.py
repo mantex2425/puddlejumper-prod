@@ -659,3 +659,79 @@ def test_cache_write_uses_30_day_ttl_per_proposal_R5(monkeypatch, with_api_key):
     # The TTL is interpolated into the SQL string at module-eval time.
     assert "INTERVAL '30 days'" in insert_sql
     assert "(NOW() AT TIME ZONE 'UTC')" in insert_sql
+
+
+# ─── CALL CONTRACT REGRESSION (Resurrection 2026-05-09) ──────────────────────
+#
+# Tests 18-19 lock in the call signature of get_pois_near_cluster against
+# the argument-swap bug discovered 2026-05-09. The function signature is
+# (cluster, cur, *, radius_m=...) — passing them in reverse order silently
+# produced an AttributeError swallowed by where_am_i.py's try/except,
+# leaving 69,944 PUDO contexts in 7 days without POI witnesses.
+#
+# These tests deliberately import the REAL Cluster dataclass rather than
+# using the file's _make_cluster() MagicMock fixture. A MagicMock returns
+# Mock objects for any attribute access (including .execute()), so a
+# MagicMock-based test would NOT catch the swap. The frozen Cluster has
+# no .execute attribute, which is exactly what makes the swap detectable.
+
+from datetime import datetime, timezone
+
+from cluster_detection import Cluster
+
+
+def _real_cluster(median_lat: float = 29.5800, median_lng: float = -95.5500) -> Cluster:
+    """Construct a real Cluster dataclass for contract testing.
+
+    Required to detect the (cur, cluster) argument swap -- see comment
+    block above. Do NOT replace with _make_cluster() (MagicMock).
+
+    Fields per cluster_detection.py:42 (frozen dataclass, 6 fields):
+      n, median_lat, median_lng, spread_m, duration_s, latest
+    """
+    return Cluster(
+        n=5,
+        median_lat=median_lat,
+        median_lng=median_lng,
+        spread_m=10.0,
+        duration_s=60.0,
+        latest=datetime.now(timezone.utc),
+    )
+
+
+def test_call_contract_correct_order_does_not_raise(with_api_key):
+    """Calling get_pois_near_cluster(cluster, cur) — the documented order —
+    must not raise. Cache miss + API error path returns POILookupResult
+    without raising; that's sufficient to exercise argument unpacking."""
+    cluster = _real_cluster()
+    cur = MagicMock()
+    cur.fetchall.return_value = []  # cache miss
+
+    # API path will fail because no monkeypatch is set; that's fine —
+    # we're testing the call-contract, not the API. A successful call
+    # contract returns POILookupResult(source='api_error') without raising.
+    result = get_pois_near_cluster(cluster, cur)
+
+    assert result is not None
+    assert hasattr(result, "source")
+    assert result.source in ("cache_hit", "api_call", "api_error")
+
+
+def test_call_contract_swapped_order_raises():
+    """Calling get_pois_near_cluster(cur, cluster) — the buggy swapped
+    order from the 2026-05-09 resurrection — MUST raise. This is the
+    direct regression coverage for the bug.
+
+    The frozen Cluster dataclass has no .execute attribute, so when
+    _read_cache tries to call cluster.execute(...), AttributeError fires.
+    If this test ever passes silently, someone has broken the regression
+    coverage and the swap can recur undetected in production.
+    """
+    cluster = _real_cluster()
+    cur = MagicMock()
+
+    with pytest.raises(AttributeError):
+        # Deliberately swapped — this is what where_am_i.py:1630 was
+        # doing before the resurrection fix. The frozen Cluster lacks
+        # .execute, so _read_cache's first cur.execute(...) call fails.
+        get_pois_near_cluster(cur, cluster)

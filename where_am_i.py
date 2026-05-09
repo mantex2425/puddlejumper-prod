@@ -37,6 +37,12 @@ from poi_service import POI
 
 log = logging.getLogger(__name__)
 
+# Resurrection alert: per-process flag flipped to True on the first POI
+# lookup that returns a non-empty witness list. Logged once per Cloud Run
+# container start. Removed once production data confirms the resurrection
+# is stable — see Phase 2c.2 sprint completion criteria.
+_first_poi_success_logged: bool = False
+
 
 # =============================================================================
 # Module-level constants (locked in Steps 1-3 of Phase D)
@@ -1627,8 +1633,19 @@ class WhereAmI:
         # both witness signals stay outside _CONFIDENCE_WEIGHTS.
         try:
             from poi_service import get_pois_near_cluster
-            pois_result = get_pois_near_cluster(self.cur, cluster)
+            pois_result = get_pois_near_cluster(cluster, self.cur)
             cluster_pois = list(pois_result.pois) if pois_result else []
+            # Resurrection alert: log the first non-empty POI return per
+            # process. High-signal forensic marker that the call-contract
+            # bug fix has taken effect on this Cloud Run container.
+            global _first_poi_success_logged
+            if cluster_pois and not _first_poi_success_logged:
+                log.info(
+                    "[RESURRECTION] First successful POI lookup at call site: "
+                    "found %d witnesses at cluster=(%s, %s)",
+                    len(cluster_pois), cluster.median_lat, cluster.median_lng,
+                )
+                _first_poi_success_logged = True
         except Exception:
             log.warning(
                 "[WAI] POI fetch failed for cluster=(%s, %s) -- proceeding without witnesses",
