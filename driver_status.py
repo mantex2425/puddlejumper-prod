@@ -108,7 +108,6 @@ def get_driver_status():
                 dispatch_executed,
                 dispatch_error,
                 current_offer_id_at_eval,
-                wai_status,
                 wai_pudo_type,
                 wai_target_address,
                 wai_reason,
@@ -191,7 +190,6 @@ def get_driver_status():
 
             # Latest WAI evaluation (lifted from newest pudo_decision_context row)
             "last_wai_evaluation": {
-                "wai_status":         last_3_dispatch_actions[0]["wai_status"]         if last_3_dispatch_actions else None,
                 "wai_pudo_type":      last_3_dispatch_actions[0]["wai_pudo_type"]      if last_3_dispatch_actions else None,
                 "wai_target_address": last_3_dispatch_actions[0]["wai_target_address"] if last_3_dispatch_actions else None,
                 "wai_reason":         last_3_dispatch_actions[0]["wai_reason"]         if last_3_dispatch_actions else None,
@@ -209,7 +207,6 @@ def get_driver_status():
                 "dispatch_executed":  a["dispatch_executed"],
                 "dispatch_error":     a["dispatch_error"],
                 "current_offer_id_at_eval": a["current_offer_id_at_eval"],
-                "wai_status":         a["wai_status"],
                 "wai_pudo_type":      a["wai_pudo_type"],
                 "wai_target_address": a["wai_target_address"],
                 "wai_reason":         a["wai_reason"],
