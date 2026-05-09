@@ -27,8 +27,9 @@ def log_decision(cur, conn, uid, params, ep, result):
     """
     trace_payload = json.dumps({
         **(ep["_raw_trace"]),
-        "arc_band":    ep["_arc_band_trace"],
-        "gps_age_sec": ep["gps_age_sec"],
+        "arc_band":         ep["_arc_band_trace"],
+        "gps_age_sec":      ep["gps_age_sec"],
+        "cumulative_miles": ep["cumulative_miles"],
     })
 
     cur.execute("""
