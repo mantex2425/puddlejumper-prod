@@ -1341,6 +1341,13 @@ class DiagnosticContext:
     # serializes this into pudo_decision_context.tad_decision_context.
     tad_verdicts: dict = field(default_factory=dict)
 
+    # Phase 2c.2 forensic wiring (2026-05-09): cluster-scoped POI
+    # names for pudo_decision_context.poi_top_names. Top 3 by
+    # distance, formatted as "Name (Xm)". Defaulted to empty list
+    # so legacy constructors keep working without modification
+    # (same discipline as tad_verdicts above).
+    cluster_poi_names: list = field(default_factory=list)
+
     def outcome_for(self, match) -> "Optional[MatchOutcome]":
         """Return the MatchOutcome for a WAIMatch, by (offer_id, location_type).
 
@@ -1618,6 +1625,7 @@ class WhereAmI:
                 stop_context="unknown_stop",
                 per_target_outcomes=[],
                 tad_verdicts={},
+                cluster_poi_names=[],
             )
 
         # Step 2: Topology (single pivot_context call, reused in Evaluate)
@@ -1647,6 +1655,15 @@ class WhereAmI:
             from poi_service import get_pois_near_cluster
             pois_result = get_pois_near_cluster(cluster, self.cur)
             cluster_pois = list(pois_result.pois) if pois_result else []
+            # Phase 2c.2 forensic wiring: project top-3 POI names by
+            # distance for cluster-scoped logging. Format "Name (Xm)"
+            # matches Gemini's psql-scannability ratification — at-a-
+            # glance disambiguation between nearby establishments in
+            # dense commercial clusters.
+            cluster_poi_names = [
+                f"{p.name} ({p.dist_m:.0f}m)"
+                for p in sorted(cluster_pois, key=lambda x: x.dist_m)[:3]
+            ]
             # Resurrection alert: log the first non-empty POI return per
             # process. High-signal forensic marker that the call-contract
             # bug fix has taken effect on this Cloud Run container.
@@ -1665,6 +1682,7 @@ class WhereAmI:
                 exc_info=True,
             )
             cluster_pois = []
+            cluster_poi_names = []
 
         # Step 4 (Map): generate (target, location_type, offer_id) candidates.
         candidates = []
@@ -1738,6 +1756,7 @@ class WhereAmI:
             stop_context=stop_context,
             per_target_outcomes=per_target_outcomes,
             tad_verdicts=tad_verdicts,
+            cluster_poi_names=cluster_poi_names,
         )
         return matches, diagnostics
 

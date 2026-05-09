@@ -728,9 +728,9 @@ def _log_decision_context(
             cluster.median_lng if cluster else None,
             cluster.n if cluster else None,
             cluster.duration_s if cluster else None,
-            None,  # poi_lookup_source (Phase 2)
-            None,  # poi_match_score (Phase 2)
-            None,  # poi_top_names (Phase 2)
+            top_outcome.poi_witness if top_outcome else None,
+            top_outcome.poi_match if top_outcome else None,
+            diagnostics.cluster_poi_names if diagnostics.cluster_poi_names else None,
             action_str,
             dispatch_executed,
             dispatch_error_msg,
