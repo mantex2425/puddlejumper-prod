@@ -1086,8 +1086,20 @@ def _match_poi_stub(
     cluster: Cluster,
     topo: RoadTopology,
     target,
+    pois=None,
 ) -> MatchOutcome:
     """Stub for poi-class targets (airports, named businesses).
+
+    Note: `pois` accepted for _CLASS_DISPATCH contract conformance only —
+    the dispatch site at where_am_i.py:1700 passes pois=cluster_pois to
+    every matcher. The stub does not consume it. Production bug
+    2026-05-09 (50+ TypeErrors during 75-minute drive validation) was
+    caused by this kwarg missing here while every other matcher had it.
+    L-6 corollary regression: dispatch-call contract changed without
+    grepping every dispatch entry's signature. Locked-in by
+    TestClassDispatchContract in tests/test_where_am_i.py.
+
+    Original behavior:
 
     Per Step 1 Q4 lock and Gemini Step 5.4 Q3 ratification: returns
     not_at_pudo semantics with WARN log. The cluster falls through to

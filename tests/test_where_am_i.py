@@ -1027,6 +1027,79 @@ class TestMatchPoiStub:
 
 
 # =============================================================================
+# TestClassDispatchContract - 1 test (L-6 corollary regression)
+# =============================================================================
+#
+# Production bug 2026-05-09 16:00-17:15 UTC: _match_poi_stub missing
+# `pois` kwarg, causing TypeError on every heartbeat post-resurrection
+# (commit fb56175).
+#
+# Pre-resurrection: cluster_pois was always [] (POI service swallowed
+# exceptions). _match_poi_stub's missing pois kwarg was latent — never
+# triggered because pois=[] was never actually passed to the matcher
+# (the dispatch site WAS already passing pois=cluster_pois, but every
+# heartbeat returned cluster=None earlier in the pipeline so dispatch
+# was unreachable).
+#
+# Post-resurrection: cluster_pois populates with real values. Dispatch
+# hits _match_poi_stub. TypeError. 50+ errors in 75 minutes. Android
+# backoff, cluster starvation, no PUDO commits.
+#
+# This class locks in the dispatch-call contract: every matcher in
+# _CLASS_DISPATCH MUST accept (cluster, topo, target, pois=...).
+#
+# CRITICAL: do NOT "simplify" this test by using MagicMock for
+# cluster/topo/target. MagicMock accepts any signature and would let
+# this regression class slip through silently — same trap that motivated
+# the real-Cluster fixture in tests/test_poi_service.py contract tests
+# (resurrection commit fb56175). Real types only.
+
+
+class TestClassDispatchContract:
+    """L-6 corollary regression: dispatch-call signature contract.
+
+    where_am_i.py:1700 calls every matcher in _CLASS_DISPATCH with the
+    signature (cluster, topo, target, pois=cluster_pois). This test
+    asserts every dispatch entry accepts that contract. Failure here
+    catches the regression class that hit production 2026-05-09 BEFORE
+    the bug ships.
+    """
+
+    def test_every_dispatch_matcher_accepts_pois_kwarg(self):
+        """Every _CLASS_DISPATCH entry must accept pois=... per the
+        dispatch contract. TypeError here means a matcher signature has
+        drifted from the where_am_i.py:1700 call site — same regression
+        class as the 2026-05-09 _match_poi_stub production bug.
+
+        We pass pois=[] (empty list) because that's the common production
+        case (residential pickups, no POIs nearby) and it lets matchers
+        either consume or ignore the kwarg without depending on POI-
+        handling correctness — this test is about the signature contract,
+        not POI logic.
+        """
+        cluster = _cluster()
+        topo = _topo()
+        target = _target()
+
+        for address_class, matcher in _CLASS_DISPATCH.items():
+            try:
+                outcome = matcher(cluster, topo, target, pois=[])
+            except TypeError as e:
+                raise AssertionError(
+                    f"_CLASS_DISPATCH[{address_class!r}] -> "
+                    f"{matcher.__name__} does not accept dispatch contract "
+                    f"(cluster, topo, target, pois=...): {e}. "
+                    f"L-6 corollary regression — see "
+                    f"TestClassDispatchContract module docstring."
+                )
+            assert isinstance(outcome, MatchOutcome), (
+                f"_CLASS_DISPATCH[{address_class!r}] -> "
+                f"{matcher.__name__} returned {type(outcome).__name__}, "
+                f"expected MatchOutcome"
+            )
+
+
+# =============================================================================
 # TestClassDispatch - 3 tests
 # =============================================================================
 
