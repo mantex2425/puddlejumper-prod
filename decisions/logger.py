@@ -81,6 +81,7 @@ def log_decision(cur, conn, uid, params, ep, result):
             # row, naive datetime, missing fields), bind NULL — TAD will
             # downgrade to Lost Mode for that offer at heartbeat time.
             now_utc = datetime.datetime.now(datetime.timezone.utc)
+            prev_row = None  # init for outer-scope read by Horizon gate
             prev_offer_obj = None
             prev_dropoff_eta = None
             prev_dropoff_dist = None
@@ -141,6 +142,102 @@ def log_decision(cur, conn, uid, params, ep, result):
             expected_dropoff_eta = None
             expected_dropoff_dist = None
             cumulative_miles_value = ep.get("cumulative_miles")
+
+            # ──────────────────────────────────────────────────────
+            # Horizon Budget GC (TAD Anchor Snowball Killer)
+            # ──────────────────────────────────────────────────────
+            # Runs AFTER the prev_row try/except so
+            # cumulative_miles_value is in scope. Verdict-agnostic;
+            # OR-semantics on the gate. Per CANONICAL_RULES II
+            # (now_utc is tz-aware UTC) and V (forensic logging on
+            # every evaluation, not just GC events).
+            # Best-Effort Physics: two-axis gate when both signals are
+            # available, time-only fallback when distance signal is
+            # missing (legacy rows pre-Item-3b.W, malformed cursor
+            # rows). Only created_at is a hard dependency — without
+            # it we cannot evaluate any axis, so GC. The forensic
+            # log surfaces `distance_axis=on/off` so post-deploy log
+            # analysis can separate two-axis verdicts from time-only
+            # verdicts when tuning the 1.25 multiplier.
+            if prev_row and cumulative_miles_value is not None:
+                try:
+                    elapsed_minutes = (
+                        now_utc - prev_row["created_at"]
+                    ).total_seconds() / 60.0
+                except (KeyError, TypeError) as _ce:
+                    logging.warning(
+                        f"[3b.W][HORIZON] missing created_at "
+                        f"(treating as GC): {_ce}"
+                    )
+                    prev_row = None
+                    prev_offer_obj = None
+                    prev_dropoff_eta = None
+                    prev_dropoff_dist = None
+                else:
+                    # Distance axis: only evaluable when prev row has
+                    # a miles_at_offer_receipt value. NULL/missing =>
+                    # axis off; fall back to time-only.
+                    miles_at_receipt = prev_row.get("miles_at_offer_receipt")
+                    distance_axis_available = miles_at_receipt is not None
+
+                    if distance_axis_available:
+                        elapsed_miles = (
+                            float(cumulative_miles_value)
+                            - float(miles_at_receipt)
+                        )
+                    else:
+                        elapsed_miles = None
+
+                    # Remaining T&D depends on lifecycle phase of prev.
+                    if prev_row.get("actual_pickup_at") is None:
+                        # Still en route to pickup: full pickup + trip.
+                        rem_min = (
+                            (prev_row.get("pickup_minutes") or 30)
+                            + (prev_row.get("trip_minutes") or 20)
+                        )
+                        rem_mi = (
+                            float(prev_row.get("pickup_miles") or 5)
+                            + float(prev_row.get("trip_miles") or 10)
+                        )
+                    else:
+                        # Picked up, mid-trip: only dropoff leg remains.
+                        rem_min = prev_row.get("trip_minutes") or 20
+                        rem_mi = float(prev_row.get("trip_miles") or 10)
+
+                    new_pickup_min = ep.get("pickup_min") or 15
+                    new_pickup_mi = float(ep.get("pickup_miles") or 5)
+
+                    horizon_min = (rem_min + new_pickup_min) * 1.25
+                    horizon_mi = (rem_mi + new_pickup_mi) * 1.25
+
+                    time_exceeded = elapsed_minutes > horizon_min
+                    distance_exceeded = (
+                        distance_axis_available
+                        and elapsed_miles > horizon_mi
+                    )
+                    exceeded = time_exceeded or distance_exceeded
+
+                    elapsed_mi_str = (
+                        f"{elapsed_miles:.2f}"
+                        if distance_axis_available else "N/A"
+                    )
+                    logging.info(
+                        f"[3b.W][HORIZON] driver={uid} "
+                        f"prev_offer_id={prev_row.get('oh_id')} "
+                        f"prev_picked_up={prev_row.get('actual_pickup_at') is not None} "
+                        f"elapsed_min={elapsed_minutes:.1f} "
+                        f"elapsed_mi={elapsed_mi_str} "
+                        f"horizon_min={horizon_min:.1f} "
+                        f"horizon_mi={horizon_mi:.2f} "
+                        f"distance_axis={'on' if distance_axis_available else 'off'} "
+                        f"verdict={'GC' if exceeded else 'KEEP'}"
+                    )
+
+                    if exceeded:
+                        prev_row = None
+                        prev_offer_obj = None
+                        prev_dropoff_eta = None
+                        prev_dropoff_dist = None
             if cumulative_miles_value is not None:
                 try:
                     new_offer_obj = Offer(
