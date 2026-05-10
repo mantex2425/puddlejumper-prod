@@ -155,7 +155,16 @@ def test_offer_ids_only_multiple_offers_preserves_order():
 
 
 def test_offer_ids_only_query_uses_canonical_gc_constants():
-    """Regression guard: the GC tuning constants must thread into the query."""
+    """Regression guard: the GC tuning constants must thread into the query
+    via the canonical LIVE_OFFER_PREDICATE_SQL params helper.
+
+    Updated 2026-05-10 (P0 GC predicate apply): previously asserted a
+    6-element tuple matching the inline GC clause. Post-apply,
+    offer_ids_only routes through live_offer_predicate_params(), so the
+    bind tuple is driver_id plus the 12-element canonical params
+    (5 time-axis + 7 distance-axis; distance short-circuits to None
+    when current_cumulative_miles is None).
+    """
     q = DriverQueue(DRIVER_ID)
     cur = make_cursor()
     cur.fetchall.return_value = []
@@ -163,15 +172,7 @@ def test_offer_ids_only_query_uses_canonical_gc_constants():
     q.offer_ids_only(cur)
 
     _, params = cur.execute.call_args[0]
-    # Params: (driver_id, NULL_PICKUP_MIN, NULL_TRIP_MIN, BUFFER_MULT, MIN, MAX)
-    assert params == (
-        DRIVER_ID,
-        GC_NULL_PICKUP_MIN,
-        GC_NULL_TRIP_MIN,
-        GC_BUFFER_MULT,
-        GC_MIN_MINUTES,
-        GC_MAX_MINUTES,
-    )
+    assert params == (DRIVER_ID,) + _dq_module.live_offer_predicate_params(None)
 
 
 # =============================================================================
