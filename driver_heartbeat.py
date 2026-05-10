@@ -41,6 +41,7 @@ from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import write_nailed_position
 from where_am_i import WhereAmI, classify_commit_rule
 from tad import OfferTadState
+from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from dispatch import (
     dispatch,
     FirePickup, FireDropoff,
@@ -505,31 +506,39 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
     return out
 
 
-def _get_last_known_anchor_id(cur, driver_id):
-    """Find most recent offer_id with confirmed PUDO. [3b.R]
+def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles=None):
+    """Find most recent LIVE offer_id with confirmed PUDO. [3b.R, GC-aware]
 
-    Forensic field per tad.evaluate_tad_gate signature — does not gate
-    behavior. Used to enrich Lost Mode JSONB blobs with which prior
-    offer the system was last anchored to.
+    P0 fix 2026-05-10: applies LIVE_OFFER_PREDICATE_SQL. Stale offers
+    (past wall-clock or distance horizon) are excluded — they would
+    corrupt TAD distance computations by anchoring against ancient
+    odometer values (root cause of the 2026-05-08 dispatch silence).
 
     Source-of-truth path: queries offer_history.actual_pickup_at /
     actual_dropoff_at directly, joining decision_log for driver
-    identity. Avoids derivative pudo_decision_context.planner_action
-    lookback (one layer removed from truth).
+    identity. Same wall-clock + distance horizon as
+    DriverQueue._project_offers per CANONICAL_RULES Section IV addendum.
 
-    Returns str(offer_id) or None.
+    Args:
+        cur: psycopg2 cursor.
+        driver_id: Firebase UID.
+        current_cumulative_miles: float or None. When None, distance
+            axis degrades to time-only.
+
+    Returns str(offer_id) or None when no live anchor exists.
     """
     cur.execute(
-        """
+        f"""
         SELECT oh.id
         FROM app_private.offer_history oh
         JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
         WHERE dl.driver_id = %s
           AND (oh.actual_pickup_at IS NOT NULL OR oh.actual_dropoff_at IS NOT NULL)
+          AND {LIVE_OFFER_PREDICATE_SQL}
         ORDER BY COALESCE(oh.actual_dropoff_at, oh.actual_pickup_at) DESC
         LIMIT 1
         """,
-        (driver_id,),
+        (driver_id,) + live_offer_predicate_params(current_cumulative_miles),
     )
     row = cur.fetchone()
     return str(row["id"]) if row else None
@@ -864,7 +873,7 @@ def post_heartbeat():
     # bridge-state preservation per Item 3 contract.
     queue_ids_int = [int(oid) for oid in snap.offer_ids]
     per_offer_state = _assemble_per_offer_state(cur, driver_id, queue_ids_int)
-    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id)
+    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles=cumulative_miles)
     lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int)
 
     wai = WhereAmI(cur)

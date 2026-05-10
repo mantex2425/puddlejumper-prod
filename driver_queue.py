@@ -60,6 +60,13 @@ log = logging.getLogger(__name__)
 # driver_heartbeat imports these from here rather than duplicating them.
 GC_NULL_PICKUP_MIN = 15   # Default pickup_minutes when offer_history.pickup_minutes IS NULL
 GC_NULL_TRIP_MIN = 30     # Default trip_minutes when offer_history.trip_minutes IS NULL
+
+# Distance-axis defaults — mirror the time-axis pattern. Used when
+# pickup_miles / trip_miles are NULL on offer_history rows.
+GC_NULL_PICKUP_MI = 4.0   # Default pickup_miles fallback (75th-percentile-ish)
+GC_NULL_TRIP_MI = 8.0     # Default trip_miles fallback
+GC_MIN_DIST_MI = 2.0      # Floor for distance horizon
+GC_MAX_DIST_MI = 50.0     # Ceiling for distance horizon
 # Houston Tax: 25% dynamic buffer on (pickup_minutes + trip_minutes) sized
 # to keep an offer live in the queue while the driver waits out real
 # Houston-area traffic (Sienna Pkwy, McKeever Rd, the Arcola crawl).
@@ -131,6 +138,86 @@ class QueueSnapshot:
 
 
 # =============================================================================
+# Atomic Liveness Predicate — exported, canonical
+# =============================================================================
+#
+# Per CANONICAL_RULES Section IV addendum (2026-05-10): every production
+# hot-path query against app_private.offer_history MUST apply this
+# predicate. The predicate enforces a Time horizon (always) and a
+# Distance horizon (when current_cumulative_miles is supplied AND the
+# row has miles_at_offer_receipt). Distance axis gracefully degrades to
+# time-only when either signal is NULL.
+#
+# Two consumers as of P0 patch (2026-05-10):
+#   - DriverQueue._project_offers  (queue projection)
+#   - driver_heartbeat._get_last_known_anchor_id  (TAD anchor)
+#   - decisions.logger prev_offer SELECT  (compute_offer_expectations
+#                                          anchor source)
+#
+# New consumers must use this predicate or document a CANONICAL_RULES
+# justification for why the row's freshness is not relevant to the
+# call site.
+
+LIVE_OFFER_PREDICATE_SQL = """
+    oh.actual_dropoff_at IS NULL
+    AND oh.created_at + (
+            LEAST(
+                GREATEST(
+                    (COALESCE(oh.pickup_minutes, %s) + COALESCE(oh.trip_minutes, %s)) * %s,
+                    %s
+                ),
+                %s
+            ) * INTERVAL '1 minute'
+          ) > NOW()
+    AND (
+        %s::numeric IS NULL
+        OR oh.miles_at_offer_receipt IS NULL
+        OR (%s::numeric - oh.miles_at_offer_receipt) < LEAST(
+            GREATEST(
+                (COALESCE(oh.pickup_miles, %s) + COALESCE(oh.trip_miles, %s)) * %s,
+                %s
+            ),
+            %s
+        )
+    )
+"""
+
+
+def live_offer_predicate_params(current_cumulative_miles):
+    """Build the params tuple for LIVE_OFFER_PREDICATE_SQL.
+
+    Args:
+        current_cumulative_miles: float or None. When None, the distance
+            axis short-circuits to TRUE (time-only fallback). Production
+            heartbeat path always supplies a value; test fixtures and
+            legacy callers may pass None.
+
+    Returns:
+        12-tuple to splice into the params list at the call site.
+    """
+    return (
+        # Time axis — SELECT raw_min coalesces are not part of this
+        # predicate (they're outside the WHERE in _project_offers's
+        # SELECT clause). The 5 values below are the WHERE-clause
+        # time horizon.
+        GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,
+        GC_BUFFER_MULT,
+        GC_MIN_MINUTES,
+        GC_MAX_MINUTES,
+        # Distance axis — pass the current odometer reading TWICE
+        # (once for the NULL guard, once for the math). Postgres has
+        # no syntactic way to reference a parameter twice in the same
+        # statement; we duplicate.
+        current_cumulative_miles,
+        current_cumulative_miles,
+        # Distance horizon math (same shape as time math, distance units)
+        GC_NULL_PICKUP_MI, GC_NULL_TRIP_MI,
+        GC_BUFFER_MULT,
+        GC_MIN_DIST_MI,
+        GC_MAX_DIST_MI,
+    )
+
+# =============================================================================
 # DriverQueue — the Workload Manager
 # =============================================================================
 
@@ -164,7 +251,7 @@ class DriverQueue:
     # Reads
     # -------------------------------------------------------------------------
 
-    def snapshot(self, cur) -> QueueSnapshot:
+    def snapshot(self, cur, current_cumulative_miles=None) -> QueueSnapshot:
         """Project the queue and read the bound hint in one logical operation.
 
         Two SELECTs run on the caller's cursor. In Postgres READ COMMITTED
@@ -191,7 +278,7 @@ class DriverQueue:
                 objects should use `offer_ids_only()` and
                 `bound_offer_id()` instead.
         """
-        offers = self._project_offers(cur)
+        offers = self._project_offers(cur, current_cumulative_miles=current_cumulative_miles)
         raw_bound = self._select_bound_offer_id(cur)
 
         # Apply L-19 invariant.
@@ -211,7 +298,7 @@ class DriverQueue:
 
         return QueueSnapshot(offers=offers, bound_offer_id=raw_bound)
 
-    def offers(self, cur) -> tuple[Offer, ...]:
+    def offers(self, cur, current_cumulative_miles=None) -> tuple[Offer, ...]:
         """Just the queue projection. For non-heartbeat callers (replay,
         scenarios) that need full Offer objects but don't need the bound
         hint or the L-19 invariant. Requires a target_spec_builder.
@@ -220,40 +307,31 @@ class DriverQueue:
             RuntimeError: if no target_spec_builder was supplied at
                 construction time.
         """
-        return self._project_offers(cur)
+        return self._project_offers(cur, current_cumulative_miles=current_cumulative_miles)
 
-    def offer_ids_only(self, cur) -> tuple[str, ...]:
+    def offer_ids_only(self, cur, current_cumulative_miles=None) -> tuple[str, ...]:
         """Project just the queue's offer_ids — no coord building, no
         TargetSpec construction. For monitor/status/forensic callers that
         only need to know "which offers are live for this driver right
         now." Does NOT require a target_spec_builder.
 
         Same GC math as the full projection.
+
+        P0 fix 2026-05-10: refactored to use LIVE_OFFER_PREDICATE_SQL
+        for source-textual identity with _project_offers (enforced by
+        test_offer_ids_only_and_project_offers_share_where_clause).
         """
-        cur.execute("""
+        cur.execute(f"""
             SELECT id::text AS offer_id
-            FROM app_private.offer_history
+            FROM app_private.offer_history oh
             WHERE decision_log_id IN (
                 SELECT id FROM app_private.decision_log WHERE driver_id = %s
             )
-              AND actual_dropoff_at IS NULL
-              AND created_at + (
-                    LEAST(
-                        GREATEST(
-                            (COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s)) * %s,
-                            %s
-                        ),
-                        %s
-                    ) * INTERVAL '1 minute'
-                  ) > NOW()
+              AND {LIVE_OFFER_PREDICATE_SQL}
             ORDER BY created_at DESC
         """, (
             self.driver_id,
-            GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,
-            GC_BUFFER_MULT,
-            GC_MIN_MINUTES,
-            GC_MAX_MINUTES,
-        ))
+        ) + live_offer_predicate_params(current_cumulative_miles))
         return tuple(r['offer_id'] for r in cur.fetchall())
 
     def bound_offer_id(self, cur) -> Optional[str]:
@@ -364,7 +442,7 @@ class DriverQueue:
     # Internals
     # -------------------------------------------------------------------------
 
-    def _project_offers(self, cur) -> tuple[Offer, ...]:
+    def _project_offers(self, cur, current_cumulative_miles=None) -> tuple[Offer, ...]:
         """The full GC-survivor projection. Query lifted from
         driver_heartbeat._project_queue (commit 7fe4391-era body) and
         unchanged here — recon-first, no behavior change in Commit 1.
@@ -393,7 +471,7 @@ class DriverQueue:
                 "need full Offer objects."
             )
 
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 id, pickup_address, dropoff_address,
                 pickup_lat, pickup_lng,
@@ -404,30 +482,16 @@ class DriverQueue:
                 leg_start_cumulative_miles_pickup,
                 leg_start_cumulative_miles_dropoff,
                 COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
-            FROM app_private.offer_history
+            FROM app_private.offer_history oh
             WHERE decision_log_id IN (
                 SELECT id FROM app_private.decision_log WHERE driver_id = %s
             )
-              AND actual_dropoff_at IS NULL
-              AND created_at + (
-                    LEAST(
-                        GREATEST(
-                            (COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s)) * %s,
-                            %s
-                        ),
-                        %s
-                    ) * INTERVAL '1 minute'
-                  ) > NOW()
+              AND {LIVE_OFFER_PREDICATE_SQL}
             ORDER BY created_at DESC
         """, (
             GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
             self.driver_id,                           # FK lookup
-            GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # WHERE coalesces (must duplicate;
-                                                      #   PG can't reuse SELECT alias here)
-            GC_BUFFER_MULT,
-            GC_MIN_MINUTES,
-            GC_MAX_MINUTES,
-        ))
+        ) + live_offer_predicate_params(current_cumulative_miles))
 
         offers: list[Offer] = []
         for o in cur.fetchall():

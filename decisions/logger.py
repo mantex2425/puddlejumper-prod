@@ -5,6 +5,7 @@ import traceback
 
 from pudo_types import Offer, TargetSpec
 from tad import compute_offer_expectations
+from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 
 
 def _safe_numeric(val):
@@ -87,7 +88,8 @@ def log_decision(cur, conn, uid, params, ep, result):
             prev_dropoff_eta = None
             prev_dropoff_dist = None
             try:
-                cur.execute("""
+                cur.execute(
+                    f"""
                     SELECT
                         oh.id AS oh_id,
                         oh.created_at,
@@ -99,9 +101,12 @@ def log_decision(cur, conn, uid, params, ep, result):
                     JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
                     WHERE dl.driver_id = %s
                       AND oh.expected_dropoff_arrival_time IS NOT NULL
+                      AND {LIVE_OFFER_PREDICATE_SQL}
                     ORDER BY oh.created_at DESC
                     LIMIT 1
-                """, (uid,))
+                    """,
+                    (uid,) + live_offer_predicate_params(ep.get("cumulative_miles")),
+                )
                 prev_row = cur.fetchone()
                 if prev_row:
                     prev_eta = prev_row["expected_dropoff_arrival_time"]
