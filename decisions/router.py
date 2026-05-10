@@ -9,6 +9,7 @@ import logging
 
 from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
+import uuid
 from psycopg2.extras import RealDictCursor
 
 # 🟢 RESTORING ORIGINAL WORKING IMPORTS
@@ -203,6 +204,12 @@ def parse_request(p, uid):
     cumulative_miles = p.get("cumulativeMiles")
     if cumulative_miles is not None: cumulative_miles = float(cumulative_miles)
 
+    # Sprint 1 (Identity Genesis, server-side): capture offerId UUIDv7
+    # from Android. Validation happens in the route handler — parse_request
+    # remains never-fails per its docstring contract. See
+    # docs/SERVER_SIDE_SPRINT_1_BRIEF_2026-05-09.md.
+    offer_id = p.get("offerId")
+
     market_id                   = p.get("marketId")
     towards_active              = bool(p.get("towardsActive", False))
     towards_target_lat          = p.get("towardsTargetLat")
@@ -241,6 +248,7 @@ def parse_request(p, uid):
         "current_lat": current_lat, "current_lng": current_lng,
         "gps_age_sec": gps_age_sec, "market_id": market_id,
         "cumulative_miles": cumulative_miles,
+        "offer_id": offer_id,
         "towards_active": towards_active,
         "towards_target_lat": towards_target_lat,
         "towards_target_lng": towards_target_lng,
@@ -281,6 +289,43 @@ def make_decision():
 
     # ── Stage 1: Parse request (never fails) ──────────────────────────
     params = parse_request(p, uid)
+
+    # ── Stage 1b: Validate offerId (UUIDv7 per RFC 9562 §5.7) ─────────
+    # Sprint 1 (Identity Genesis, server-side). Android APK 1.1.20+
+    # mints a v7 UUID at OCR parse time and sends it on every decision
+    # request. Server enforces format as defense-in-depth — see X3 doc:
+    # producer-side guarantees do not eliminate consumer-side validation.
+    # All rejections logged with [OFFER_ID_REJECT] tag for grep'ing
+    # Cloud Run logs to surface contract violations in the wild.
+    raw_offer_id = params.get("offer_id")
+    if raw_offer_id is None:
+        logging.warning(
+            f"[OFFER_ID_REJECT] missing offerId from driver={uid} -- "
+            f"likely pre-1.1.20 APK or non-Android client"
+        )
+        return jsonify({"error": "missing required field: offerId"}), 400
+    try:
+        parsed_uuid = uuid.UUID(raw_offer_id)
+        if parsed_uuid.version != 7:
+            logging.warning(
+                f"[OFFER_ID_REJECT] non-v7 UUID from driver={uid} -- "
+                f"version={parsed_uuid.version} value={raw_offer_id}"
+            )
+            return jsonify({
+                "error": "offerId must be UUID v7 (RFC 9562 5.7)",
+                "got_version": parsed_uuid.version,
+            }), 400
+        params["offer_id"] = str(parsed_uuid)  # canonical form
+    except (ValueError, AttributeError, TypeError) as e:
+        truncated = raw_offer_id[:50] if isinstance(raw_offer_id, str) else type(raw_offer_id).__name__
+        logging.warning(
+            f"[OFFER_ID_REJECT] unparseable offerId from driver={uid} -- "
+            f"value={truncated} error_type={type(e).__name__}"
+        )
+        return jsonify({
+            "error": "offerId is not a valid UUID",
+            "got": truncated,
+        }), 400
 
     conn = get_db()
     cur  = conn.cursor(cursor_factory=RealDictCursor)
