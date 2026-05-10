@@ -30,6 +30,7 @@ def log_decision(cur, conn, uid, params, ep, result):
         "arc_band":         ep["_arc_band_trace"],
         "gps_age_sec":      ep["gps_age_sec"],
         "cumulative_miles": ep["cumulative_miles"],
+        "offer_id":         ep.get("offer_id"),
     })
 
     cur.execute("""
