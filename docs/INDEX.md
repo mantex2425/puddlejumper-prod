@@ -43,6 +43,40 @@ Consult when working on the specific component.
 
 ---
 
+## Identity Genesis (Sprint 1 server-side SHIPPED 2026-05-10)
+
+UUID v7 as canonical offer identity, edge-generated on Android. Replaces
+the legacy dual-integer-sequence identity model that caused the X3
+incident. Producer side (Android APK 1.1.20) shipped via PR #1 on
+mantex2425/Puddle_Jumper. Server-side Sprint 1 (forward-compat: accept,
+validate, persist into trace_data JSONB) shipped on commits a5618e6
+through 0bfc166 on phase-2c-2-tad-exit-4tools. Sprint 2 (canonical-column
+schema migration) is the next major sprint, blocked on the 5-real-offer
+verification gate completing.
+
+- **IDENTITY_GENESIS_DESIGN_2026-05-09.md** — The architectural decision,
+  ratified by Gemini. UUID v7 / RFC 9562 §5.7 / edge-generated. Full
+  schema-migration plan in §5, sprint plan in §8. **Note §11.4's
+  forward-compat column proposal was superseded by the JSONB-only
+  approach in the Sprint 1 brief — the brief is authoritative.**
+
+- **SERVER_SIDE_SPRINT_1_BRIEF_2026-05-09.md** — Authoritative Sprint 1
+  scope: accept offerId, validate UUIDv7, persist into trace_data JSONB.
+  Forward-compat only — no schema migration. Includes verification SQL
+  for the 5-real-offer gate.
+
+- **SERVER_SIDE_SPRINT_1_EVIDENCE_2026-05-09.md** — Empirical evidence
+  from 2026-05-09 evening device validation. Three real production v7
+  UUIDs on Andrew's phone, OCR'd from real Uber offer cards. Used as
+  test fixtures in tests/test_decisions_router_offer_id.py.
+
+- **X3_FINDINGS_2026-05-09.md** — Root-cause forensic from the X3
+  incident: dual-integer-sequence identity debt, α-fix translation
+  subqueries, zero actual_pickup_at writes across 11 ACCEPTed offers.
+  The reason Identity Genesis exists.
+
+---
+
 ## Forensic / empirical record (load when relevant)
 
 Field-test findings and audit results that inform future design.
