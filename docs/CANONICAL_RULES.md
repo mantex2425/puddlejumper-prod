@@ -317,6 +317,24 @@ Code edits land via Python `str.replace` scripts, never `sed`-based patches.
 
 For new Sprint A code: when in doubt, route through `app_private.coords_to_*` (lat-first ordering) and `(NOW() AT TIME ZONE 'UTC')`. Any direct `ST_MakePoint` or local-time SQL is a code-review blocker.
 
+### H. Wall-Clock GC Predicate (canonical)
+
+`LIVE_OFFER_PREDICATE_SQL` (defined in `driver_queue.py`) is the single source of truth for "is this offer still live." Every production hot-path query against `app_private.offer_history` MUST compose this predicate; no bespoke freshness rules at call sites.
+
+**Alias contract.** The predicate is alias-qualified to `oh`. Every consumer must alias the table as `oh`:
+
+```sql
+FROM app_private.offer_history oh
+```
+
+Bare-table FROM clauses (no alias) will fail at runtime with `AmbiguousColumn` whenever the query also JOINs `decision_log` (which shares column names like `created_at`). This was bug-4, diagnosed 2026-05-10 via the first live-DB test in the suite.
+
+**Bind tuple.** Use `live_offer_predicate_params(current_cumulative_miles)` from `driver_queue.py`. The helper returns the 12-element tuple in the exact order the predicate expects. Production hot-path callers should pass a real odometer reading; legacy/test paths may pass `None` (graceful degradation to time-only).
+
+**Drift gate.** `tests/test_driver_queue.py::test_offer_ids_only_and_project_offers_share_where_clause` enforces source-textual identity between the two driver_queue call sites. Adding a third call site in driver_queue.py requires extending this test or factoring out a similar guard.
+
+**Exceptions.** Out-of-band scripts (replay, backtest, harvest, drive_review) may query historical data without the predicate. Each such call site must be documented in `docs/out_of_band_offer_history_queries.md` with the reason for exception. (This file does not yet exist; the first out-of-band script to claim an exception creates it.)
+
 ---
 
 ## Notes
