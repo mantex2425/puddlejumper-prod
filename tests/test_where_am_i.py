@@ -2247,7 +2247,7 @@ def _wai_with_fakes(cluster, topo):
 
 
 class TestCommitsHelper:
-    """Pure-function tests for _commits() — the dual commit rule policy."""
+    """Pure-function tests for _commits() — Fix B (POI as lifter, 2026-05-11)."""
 
     def test_unmatched_outcome_never_commits(self):
         from where_am_i import _commits
@@ -2269,84 +2269,96 @@ class TestCommitsHelper:
         outcome = _make_outcome(confidence=0.30)
         assert _commits(outcome, None) is False
 
-    def test_normal_mode_high_floor(self):
-        from where_am_i import _commits
-        # Normal Mode (passed=True): conf >= 0.90 -> commits regardless of poi_type_match
+    def test_normal_mode_at_floor_commits(self):
+        from where_am_i import _commits, COMMIT_NORMAL_FLOOR
+        # Normal Mode (passed=True): conf >= COMMIT_NORMAL_FLOOR -> commits.
+        # TAD's three-signal corroboration is sufficient; POI not required.
         verdict = _make_verdict(passed=True)
-        outcome_high = _make_outcome(confidence=0.91, poi_type_match=None)
-        outcome_at = _make_outcome(confidence=0.90, poi_type_match=None)
-        outcome_below = _make_outcome(confidence=0.89, poi_type_match=None)
-        assert _commits(outcome_high, verdict) is True
+        assert COMMIT_NORMAL_FLOOR == 0.40
+        outcome_above = _make_outcome(confidence=0.50, poi_type_match=None)
+        outcome_at = _make_outcome(confidence=0.40, poi_type_match=None)
+        outcome_real = _make_outcome(confidence=0.41, poi_type_match=None)  # §10 A1 empirical
+        outcome_below = _make_outcome(confidence=0.39, poi_type_match=None)
+        assert _commits(outcome_above, verdict) is True
         assert _commits(outcome_at, verdict) is True
+        assert _commits(outcome_real, verdict) is True  # restores the 4224-row drive
         assert _commits(outcome_below, verdict) is False
 
-    def test_normal_mode_elevator_with_poi_type_match(self):
-        from where_am_i import _commits
-        # Normal Mode elevator: 0.80 <= conf < 0.90 AND poi_type_match=True -> commits
+    def test_normal_mode_poi_lift_clears_borderline(self):
+        from where_am_i import _commits, POI_ELEVATOR_LIFT
+        # POI lift: poi_type_match=True adds POI_ELEVATOR_LIFT (0.10) to conf.
+        # A 0.31 outcome below the 0.40 floor clears with POI lift (0.31 + 0.10 = 0.41).
         verdict = _make_verdict(passed=True)
-        outcome_at = _make_outcome(confidence=0.80, poi_type_match=True)
-        outcome_mid = _make_outcome(confidence=0.85, poi_type_match=True)
-        outcome_below = _make_outcome(confidence=0.79, poi_type_match=True)
-        assert _commits(outcome_at, verdict) is True
-        assert _commits(outcome_mid, verdict) is True
-        assert _commits(outcome_below, verdict) is False
+        assert POI_ELEVATOR_LIFT == 0.10
+        # Below floor, no POI -> skip
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=None), verdict) is False
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=False), verdict) is False
+        # Below floor, POI True -> commits via lift
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=True), verdict) is True
+        # Far below floor, POI True insufficient -> skip
+        assert _commits(_make_outcome(confidence=0.20, poi_type_match=True), verdict) is False
 
-    def test_normal_mode_elevator_requires_true_not_truthy(self):
+    def test_poi_lift_requires_true_not_truthy(self):
         from where_am_i import _commits
-        # Normal Mode elevator: poi_type_match must be specifically True.
-        # None and False both fail the elevator clause.
+        # POI lift only fires when poi_type_match is specifically True.
+        # None and False give no lift. A 0.31 outcome stays below floor for both.
         verdict = _make_verdict(passed=True)
-        outcome_none = _make_outcome(confidence=0.85, poi_type_match=None)
-        outcome_false = _make_outcome(confidence=0.85, poi_type_match=False)
-        outcome_true = _make_outcome(confidence=0.85, poi_type_match=True)
-        assert _commits(outcome_none, verdict) is False
-        assert _commits(outcome_false, verdict) is False
-        assert _commits(outcome_true, verdict) is True
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=None), verdict) is False
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=False), verdict) is False
+        assert _commits(_make_outcome(confidence=0.31, poi_type_match=True), verdict) is True
 
-    def test_lost_mode_strict_floor(self):
-        from where_am_i import _commits
-        # Lost Mode (passed=None): conf >= 0.85 AND poi_type_match=True -> commits.
-        # Either condition missing -> skip.
+    def test_lost_mode_floor(self):
+        from where_am_i import _commits, COMMIT_LOST_FLOOR
+        # Lost Mode (passed=None): conf >= COMMIT_LOST_FLOOR (0.55).
+        # Stricter than Normal Mode because narrative is broken.
         verdict = _make_verdict(passed=None, lost_mode_reason="narrative_blindness")
-        # Both conditions met
-        assert _commits(_make_outcome(confidence=0.85, poi_type_match=True), verdict) is True
-        assert _commits(_make_outcome(confidence=0.99, poi_type_match=True), verdict) is True
-        # poi_type_match missing
-        assert _commits(_make_outcome(confidence=0.99, poi_type_match=None), verdict) is False
-        assert _commits(_make_outcome(confidence=0.99, poi_type_match=False), verdict) is False
-        # confidence below 0.85 floor
-        assert _commits(_make_outcome(confidence=0.84, poi_type_match=True), verdict) is False
+        assert COMMIT_LOST_FLOOR == 0.55
+        # Above floor, no POI -> commits (POI not mandatory under Fix B)
+        assert _commits(_make_outcome(confidence=0.60, poi_type_match=None), verdict) is True
+        assert _commits(_make_outcome(confidence=0.55, poi_type_match=None), verdict) is True
+        # Below floor, no POI -> skip
+        assert _commits(_make_outcome(confidence=0.54, poi_type_match=None), verdict) is False
+        # POI lift applies in Lost Mode too: 0.46 + 0.10 = 0.56 >= 0.55
+        assert _commits(_make_outcome(confidence=0.46, poi_type_match=True), verdict) is True
+        # POI lift insufficient if confidence too far below floor
+        assert _commits(_make_outcome(confidence=0.40, poi_type_match=True), verdict) is False
 
 
 class TestClassifyCommitRule:
-    """Pure-function tests for classify_commit_rule() — forensic classifier."""
+    """Pure-function tests for classify_commit_rule() — Fix B labels (2026-05-11)."""
 
     def test_legacy_floor_when_no_verdict(self):
         from where_am_i import classify_commit_rule
         outcome = _make_outcome(confidence=0.50)
         assert classify_commit_rule(outcome, None) == "legacy_floor"
 
-    def test_normal_high_at_or_above_0_90(self):
+    def test_normal_floor_without_poi(self):
         from where_am_i import classify_commit_rule
+        # Normal Mode, no POI lift -> "normal_floor"
         verdict = _make_verdict(passed=True)
-        assert classify_commit_rule(_make_outcome(confidence=0.95), verdict) == "normal_high"
-        assert classify_commit_rule(_make_outcome(confidence=0.90), verdict) == "normal_high"
+        assert classify_commit_rule(_make_outcome(confidence=0.50, poi_type_match=None), verdict) == "normal_floor"
+        assert classify_commit_rule(_make_outcome(confidence=0.41, poi_type_match=False), verdict) == "normal_floor"
 
-    def test_normal_elevator_below_0_90(self):
+    def test_normal_floor_with_poi_lift(self):
         from where_am_i import classify_commit_rule
-        # Below 0.90 with verdict.passed=True -> elevator label.
-        # Note: classify is called only on committed outcomes, so the caller
-        # has already determined this passed _commits. We don't need to
-        # re-verify the poi_type_match condition here — classify just labels.
+        # Normal Mode, POI True -> "normal_floor_with_poi_lift"
         verdict = _make_verdict(passed=True)
-        assert classify_commit_rule(_make_outcome(confidence=0.85, poi_type_match=True), verdict) == "normal_elevator"
-        assert classify_commit_rule(_make_outcome(confidence=0.80, poi_type_match=True), verdict) == "normal_elevator"
+        assert classify_commit_rule(_make_outcome(confidence=0.50, poi_type_match=True), verdict) == "normal_floor_with_poi_lift"
+        assert classify_commit_rule(_make_outcome(confidence=0.31, poi_type_match=True), verdict) == "normal_floor_with_poi_lift"
 
-    def test_lost_floor_when_passed_is_none(self):
+    def test_lost_floor_without_poi(self):
         from where_am_i import classify_commit_rule
+        # Lost Mode, no POI lift -> "lost_floor"
         verdict = _make_verdict(passed=None, lost_mode_reason="narrative_violation")
-        assert classify_commit_rule(_make_outcome(confidence=0.85, poi_type_match=True), verdict) == "lost_floor"
-        assert classify_commit_rule(_make_outcome(confidence=0.99, poi_type_match=True), verdict) == "lost_floor"
+        assert classify_commit_rule(_make_outcome(confidence=0.60, poi_type_match=None), verdict) == "lost_floor"
+        assert classify_commit_rule(_make_outcome(confidence=0.55, poi_type_match=False), verdict) == "lost_floor"
+
+    def test_lost_floor_with_poi_lift(self):
+        from where_am_i import classify_commit_rule
+        # Lost Mode, POI True -> "lost_floor_with_poi_lift"
+        verdict = _make_verdict(passed=None, lost_mode_reason="narrative_violation")
+        assert classify_commit_rule(_make_outcome(confidence=0.60, poi_type_match=True), verdict) == "lost_floor_with_poi_lift"
+        assert classify_commit_rule(_make_outcome(confidence=0.46, poi_type_match=True), verdict) == "lost_floor_with_poi_lift"
 
     def test_unknown_when_passed_is_false(self):
         from where_am_i import classify_commit_rule
@@ -2358,28 +2370,22 @@ class TestClassifyCommitRule:
     def test_classify_matches_commits_decision(self):
         """Cross-check: every classification corresponds to a True _commits result.
 
-        This is a table-driven sanity check that classify_commit_rule and
-        _commits stay in sync. If the dual rule changes in one but not the
-        other, this test fires.
+        Table-driven sanity check that classify_commit_rule and _commits stay
+        in sync. If the dual rule changes in one but not the other, this fires.
 
-        Note on tristate handling: cases pass pre-built TadVerdict instances
-        (or None for bridge state) rather than booleans, because the verdict.
-        passed field is itself tristate Optional[bool]. Conflating "no
-        verdict" with "verdict whose .passed is None" was the bug fixed
-        here.
+        Fix B (2026-05-11): cases cover bridge state, Normal Mode (with and
+        without POI lift), and Lost Mode (with and without POI lift). Bridge-
+        state semantics (verdict is None) remain distinct from Lost Mode
+        (verdict.passed is None) — the two None values mean different things.
         """
         from where_am_i import _commits, classify_commit_rule
-        # Build verdicts explicitly per case. None = no verdict (bridge state);
-        # _make_verdict(passed=True) = Normal Mode; _make_verdict(passed=None) =
-        # Lost Mode. The two None values mean different things — one is the
-        # absence of a TadVerdict object, the other is a TadVerdict whose
-        # .passed field is None.
         cases = [
             # (outcome_kwargs, verdict, expected_label)
-            (dict(confidence=0.95), None, "legacy_floor"),
-            (dict(confidence=0.95, poi_type_match=None), _make_verdict(passed=True), "normal_high"),
-            (dict(confidence=0.85, poi_type_match=True), _make_verdict(passed=True), "normal_elevator"),
-            (dict(confidence=0.86, poi_type_match=True), _make_verdict(passed=None), "lost_floor"),
+            (dict(confidence=0.50), None, "legacy_floor"),
+            (dict(confidence=0.41, poi_type_match=None), _make_verdict(passed=True), "normal_floor"),
+            (dict(confidence=0.31, poi_type_match=True), _make_verdict(passed=True), "normal_floor_with_poi_lift"),
+            (dict(confidence=0.60, poi_type_match=None), _make_verdict(passed=None), "lost_floor"),
+            (dict(confidence=0.46, poi_type_match=True), _make_verdict(passed=None), "lost_floor_with_poi_lift"),
         ]
         for outcome_kwargs, verdict, expected_label in cases:
             outcome = _make_outcome(**outcome_kwargs)
@@ -2411,10 +2417,10 @@ class TestItem3DualCommitRule:
 
     def test_constants_exist_with_correct_values(self):
         """Module-level constants for the dual commit rule are exported correctly."""
-        from where_am_i import COMMIT_NORMAL_HIGH, COMMIT_NORMAL_ELEVATOR, COMMIT_LOST_FLOOR
-        assert COMMIT_NORMAL_HIGH == 0.90
-        assert COMMIT_NORMAL_ELEVATOR == 0.80
-        assert COMMIT_LOST_FLOOR == 0.85
+        from where_am_i import COMMIT_NORMAL_FLOOR, COMMIT_LOST_FLOOR, POI_ELEVATOR_LIFT
+        assert COMMIT_NORMAL_FLOOR == 0.40
+        assert COMMIT_LOST_FLOOR == 0.55
+        assert POI_ELEVATOR_LIFT == 0.10
 
     def test_bridge_state_preserves_legacy_behavior(self):
         """No TAD context supplied -> legacy floor, evaluate_tad_gate not called."""
@@ -2518,8 +2524,19 @@ class TestItem3DualCommitRule:
         # Forensic context still carries the verdict for the JSONB blob
         assert diag.tad_verdicts == fake_verdicts
 
-    def test_step_6_normal_mode_commits_at_high_floor(self):
-        """Normal Mode (passed=True), confidence 0.91 -> commits without poi_type_match."""
+    def test_step_6_normal_mode_commits_at_floor_without_poi(self):
+        """Fix B (2026-05-11): Normal Mode (passed=True), confidence at the
+        empirical §10 A1 boundary (0.41) commits without poi_type_match.
+
+        Replaces the legacy 'high floor' test which asserted 0.91 commits
+        standalone — under the dead Rule 3a contract, 0.91 was the boundary
+        between 'standalone commit' and 'elevator-with-POI commit'. Under
+        Fix B, the meaningful boundary is COMMIT_NORMAL_FLOOR (0.40) where
+        TAD verdict.passed=True provides three-signal corroboration that
+        is sufficient for commit. Empirical: §10 A1 documents 13 heartbeats
+        scoring 0.404-0.409 against a real PUDO; this test asserts they
+        commit under Fix B.
+        """
         cluster = self._build_cluster()
         topo = self._build_topo()
         wai = _wai_with_fakes(cluster, topo)
@@ -2544,17 +2561,32 @@ class TestItem3DualCommitRule:
 
         fake_verdicts = {offer.offer_id: _make_verdict(passed=True)}
 
-        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.91, poi_type_match=None)}):
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.41, poi_type_match=None)}):
             matches, _ = wai.evaluate_with_diagnostics(
                 "driver1", [offer],
                 per_offer_state=per_offer_state,
                 current_odometer=1.5,
             )
 
-        assert len(matches) >= 1, "0.91 confidence in Normal Mode should commit"
+        assert len(matches) >= 1, (
+            "Normal Mode at §10 A1 empirical confidence (0.41) should commit "
+            "without POI lift under Fix B; TAD passed=True is sufficient."
+        )
 
-    def test_step_6_lost_mode_requires_poi_type_match(self):
-        """Lost Mode (passed=None), confidence 0.86 without poi_type_match -> skip."""
+    def test_step_6_lost_mode_commits_above_floor_without_poi(self):
+        """Fix B (2026-05-11): Lost Mode (passed=None), confidence 0.86
+        above COMMIT_LOST_FLOOR (0.55) commits without poi_type_match.
+
+        INVERTED from the legacy test that asserted Lost Mode required POI.
+        Under the dead Rule 3b contract, Lost Mode demanded mandatory POI
+        corroboration to compensate for broken narrative. Fix B replaces
+        this with a stricter Lost Mode floor (0.55 vs Normal Mode's 0.40)
+        that itself compensates for the broken narrative — POI is no longer
+        mandatory in any mode.
+
+        A separate test (test_step_6_lost_mode_below_floor_skips) covers
+        the below-floor skip case.
+        """
         cluster = self._build_cluster()
         topo = self._build_topo()
         wai = _wai_with_fakes(cluster, topo)
@@ -2587,11 +2619,25 @@ class TestItem3DualCommitRule:
                 lost_mode=True,
             )
 
-        # Without poi_type_match=True, Lost Mode rule fails even at 0.86 confidence
-        assert matches == [], "Lost Mode requires poi_type_match=True to commit"
+        # Fix B: 0.86 >= 0.55 Lost Floor; commits without requiring POI
+        assert len(matches) >= 1, (
+            "Lost Mode at 0.86 confidence (well above 0.55 floor) should commit "
+            "without POI lift under Fix B; stricter floor compensates for broken narrative."
+        )
 
-    def test_step_6_lost_mode_commits_with_poi_type_match(self):
-        """Lost Mode (passed=None), confidence 0.86 + poi_type_match=True -> commits."""
+    def test_step_6_lost_mode_with_poi_lift_commits(self):
+        """Fix B (2026-05-11): Lost Mode (passed=None), confidence 0.86 +
+        poi_type_match=True -> commits with POI lift contributing.
+
+        Renamed from test_step_6_lost_mode_commits_with_poi_type_match.
+        Under Fix B, POI is no longer required to commit in Lost Mode;
+        this test now demonstrates that POI lift (the +0.10 bonus to
+        effective confidence) is captured when present — forensic visibility
+        into POI contribution. The match still commits without POI per
+        test_step_6_lost_mode_commits_above_floor_without_poi; the
+        difference under Fix B is whether classify_commit_rule labels the
+        match as 'lost_floor' or 'lost_floor_with_poi_lift'.
+        """
         cluster = self._build_cluster()
         topo = self._build_topo()
         wai = _wai_with_fakes(cluster, topo)
@@ -2624,7 +2670,10 @@ class TestItem3DualCommitRule:
                 lost_mode=True,
             )
 
-        assert len(matches) >= 1, "Lost Mode at 0.86 with poi_type_match should commit"
+        assert len(matches) >= 1, (
+            "Lost Mode at 0.86 + POI lift should commit under Fix B "
+            "(0.86 + 0.10 = 0.96 effective, well above 0.55 floor)."
+        )
 
     def test_empty_queue_with_lost_mode_does_not_crash(self):
         """Empty queue + lost_mode=True -> no verdicts, no exception."""

@@ -1180,9 +1180,16 @@ from tad import evaluate_tad_gate, OfferTadState, TadVerdict
 #
 # Tuning: these are Phase 2g concerns. Constants are module-local because the
 # commit policy is internal to this module (per Gemini ratification 2026-05-08).
-COMMIT_NORMAL_HIGH = 0.90       # Bible Rule 3a, standalone (no Head 4 needed)
-COMMIT_NORMAL_ELEVATOR = 0.80   # Bible Rule 3a, with poi_type_match=True
-COMMIT_LOST_FLOOR = 0.85        # Bible Rule 3b, mandatory poi_type_match=True
+# Phase 2c.2 Item 3c — dual commit rule thresholds (Fix B, 2026-05-11):
+# POI reframed as a LIFTER, not a gate. TAD verdict's three-signal corroboration
+# (proximity + time + odometer) is sufficient for commit at the floor; POI, when
+# available, lifts borderline matches over the floor. Restores dispatch under
+# real-world Houston confidence ceiling (~0.41 per §10 A1 empirical) while
+# preserving forward compatibility with Operation Strip Mall (poi_type_match
+# will start returning True once the matcher ships; lift kicks in automatically).
+COMMIT_NORMAL_FLOOR = 0.40      # Normal Mode (verdict.passed=True): TAD is sufficient
+COMMIT_LOST_FLOOR = 0.55        # Lost Mode (verdict.passed=None): stricter floor
+POI_ELEVATOR_LIFT = 0.10        # POI corroboration lifts effective confidence
 
 
 # Ghost cache SELECT — read-only per Q12. Phase A schema:
@@ -1382,25 +1389,29 @@ class DiagnosticContext:
 
 
 def _commits(outcome, verdict) -> bool:
-    """Phase 2c.2 Item 3c — dual commit rule (Bible Rules 3a + 3b).
+    """Phase 2c.2 Item 3c — dual commit rule (Fix B, 2026-05-11).
 
     Pure policy function. Returns True if `outcome` should commit given the
     TAD `verdict` for the same offer. No side effects.
 
+    Fix B reframing: POI is a LIFTER (additive bonus), not a GATE (precondition).
+    TAD verdict's three-signal corroboration (proximity + time + odometer) is
+    sufficient for commit at the floor. POI, when available, adds POI_ELEVATOR_LIFT
+    to the effective confidence, helping borderline matches clear the floor.
+
     Three branches (in priority order):
       1. verdict is None (bridge state, caller hasn't wired Item 3b):
-            legacy WAI_CONFIDENCE_THRESHOLD floor. Once Item 3b ships and
-            every production caller supplies TAD context, this branch is
-            unreachable in production but remains for graceful degradation
-            and test fixtures.
+            legacy WAI_CONFIDENCE_THRESHOLD floor. Preserved for graceful
+            degradation and test fixtures.
       2. verdict.passed is True (Normal Mode):
-            Rule 3a elevator. Commit if confidence >= COMMIT_NORMAL_HIGH (0.90)
-            OR (confidence >= COMMIT_NORMAL_ELEVATOR (0.80) AND
-                outcome.poi_type_match is True).
+            Commit if (confidence + lift) >= COMMIT_NORMAL_FLOOR (0.40).
+            POI_ELEVATOR_LIFT (0.10) is added to confidence when
+            outcome.poi_type_match is True; otherwise no lift.
       3. verdict.passed is None (Lost Mode):
-            Rule 3b strict floor. Commit if confidence >= COMMIT_LOST_FLOOR
-            (0.85) AND outcome.poi_type_match is True (mandatory Head 4
-            corroboration when narrative is broken).
+            Commit if (confidence + lift) >= COMMIT_LOST_FLOOR (0.55).
+            POI lift applies in Lost Mode as well — Lost Mode's higher floor
+            already compensates for broken narrative; POI further corroborates
+            when available.
 
     verdict.passed is False is unreachable here — Step 5 skips dispatch for
     those offers, so per_target_outcomes never contains them. Defensive
@@ -1409,18 +1420,20 @@ def _commits(outcome, verdict) -> bool:
     if not outcome.matched:
         return False
     conf = outcome.confidence
+    # POI lift: when POI type matches the address class, add the elevator bonus.
+    # Operation Strip Mall ships -> poi_type_match starts returning True ->
+    # borderline matches automatically clear the floor. No code change needed.
+    if outcome.poi_type_match is True:
+        conf += POI_ELEVATOR_LIFT
     if verdict is None:
         # Bridge state: legacy floor.
         return conf >= WAI_CONFIDENCE_THRESHOLD
     if verdict.passed is True:
-        # Normal Mode elevator.
-        return (
-            conf >= COMMIT_NORMAL_HIGH
-            or (conf >= COMMIT_NORMAL_ELEVATOR and outcome.poi_type_match is True)
-        )
+        # Normal Mode: TAD's three-signal corroboration is sufficient.
+        return conf >= COMMIT_NORMAL_FLOOR
     if verdict.passed is None:
-        # Lost Mode strict floor.
-        return conf >= COMMIT_LOST_FLOOR and outcome.poi_type_match is True
+        # Lost Mode: stricter floor compensates for broken narrative.
+        return conf >= COMMIT_LOST_FLOOR
     # passed=False: defensive (Step 5 already skipped this offer)
     return False
 
@@ -1433,25 +1446,25 @@ def classify_commit_rule(outcome, verdict) -> str:
     pudo_decision_context serializer) invokes this only on committed outcomes.
 
     Returns one of:
-      "normal_high"       — verdict.passed=True, conf >= 0.90 (no Head 4 needed)
-      "normal_elevator"   — verdict.passed=True, conf in [0.80, 0.90), Head 4 lifted
-      "lost_floor"        — verdict.passed=None, conf >= 0.85 with Head 4
-      "legacy_floor"      — verdict is None (bridge state), conf >= 0.40
-      "unknown"           — defensive (verdict.passed=False; should be unreachable)
+      "legacy_floor"              — verdict is None (bridge state), conf >= 0.40
+      "normal_floor"              — verdict.passed=True, conf >= 0.40, no POI lift
+      "normal_floor_with_poi_lift"— verdict.passed=True, POI lifted match over floor
+      "lost_floor"                — verdict.passed=None, conf >= 0.55, no POI lift
+      "lost_floor_with_poi_lift"  — verdict.passed=None, POI lifted match over floor
+      "unknown"                   — defensive (verdict.passed=False; unreachable)
 
     NOT a decision function — _commits() owns the decision. This labels the
-    decision after the fact for forensic queries like "how often did Head 4
+    decision after the fact for forensic queries like "how often does POI lift
     save the day?" (Phase 2g tuning input).
     """
     conf = outcome.confidence
+    poi_lifted = outcome.poi_type_match is True
     if verdict is None:
         return "legacy_floor"
     if verdict.passed is True:
-        if conf >= COMMIT_NORMAL_HIGH:
-            return "normal_high"
-        return "normal_elevator"
+        return "normal_floor_with_poi_lift" if poi_lifted else "normal_floor"
     if verdict.passed is None:
-        return "lost_floor"
+        return "lost_floor_with_poi_lift" if poi_lifted else "lost_floor"
     return "unknown"
 
 

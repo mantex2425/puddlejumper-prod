@@ -328,8 +328,11 @@ class TestBuildTadDecisionContext:
         assert v["distance_gate"]["completion"] == 0.92
         assert len(parsed["committed"]) == 1
         assert parsed["committed"][0]["offer_id"] == "7771"
-        # Normal Mode + conf >= 0.90 → normal_high (no Head 4 needed)
-        assert parsed["committed"][0]["commit_rule"] == "normal_high"
+        # Fix B (2026-05-11): Normal Mode + verdict.passed=True →
+        # "normal_floor". POI lift is not active (poi_type_match=False),
+        # so no _with_poi_lift suffix. The old "normal_high" label and its
+        # 0.90 threshold were retired when POI became a lifter, not a gate.
+        assert parsed["committed"][0]["commit_rule"] == "normal_floor"
 
     def test_lost_mode_propagates(self):
         verdict = _make_verdict(passed=None, leg="pickup",
@@ -349,8 +352,16 @@ class TestBuildTadDecisionContext:
         assert parsed["verdicts"]["7771"]["lost_mode_reason"] == "narrative_blindness"
         assert parsed["committed"] == []
 
-    def test_commit_rule_classification_normal_elevator(self):
-        """conf in [0.80, 0.90) with passed=True + poi_type_match → normal_elevator."""
+    def test_commit_rule_classification_normal_floor_with_poi_lift(self):
+        """Fix B (2026-05-11): passed=True + poi_type_match=True →
+        normal_floor_with_poi_lift. Replaces the legacy normal_elevator
+        label which was retired when POI became a lifter, not a gate.
+
+        The fixture confidence (0.85) is well above COMMIT_NORMAL_FLOOR (0.40),
+        so this would commit under Fix B even without POI lift. The label
+        captures that POI corroboration was present at decision time —
+        forensic visibility into POIs contribution per Phase 2g tuning input.
+        """
         verdict = _make_verdict(passed=True)
         outcome = _FakeOutcome(confidence=0.85, poi_type_match=True)
         match = _FakeMatch(offer_id="7771", confidence=0.85)
@@ -363,7 +374,7 @@ class TestBuildTadDecisionContext:
             last_known_anchor_id=None,
         )
         parsed = json.loads(result)
-        assert parsed["committed"][0]["commit_rule"] == "normal_elevator"
+        assert parsed["committed"][0]["commit_rule"] == "normal_floor_with_poi_lift"
 
     def test_no_committed_matches_keeps_committed_empty(self):
         """TAD evaluation occurred but no candidate cleared the elevator —
