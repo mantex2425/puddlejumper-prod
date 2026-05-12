@@ -172,10 +172,19 @@ def parse_request(p, uid):
     trip_miles      = float(p.get("tripMiles") or 0)
     trip_min        = float(p.get("tripMinutes") or 0)
     pickup_min      = float(p.get("pickupMinutes") or 0)
-    pickup_miles    = float(p.get("pickupMiles") or (pickup_min * 0.33))
+    # 2026-05-12 trust-input-distances: respect Android NULL instead of
+    # heuristic. Stored proc handles NULL via its GPS fallback (gated
+    # on IS NULL OR < 0.1 after the same-day migration).
+    _raw_pickup_miles = p.get("pickupMiles")
+    pickup_miles = float(_raw_pickup_miles) if _raw_pickup_miles is not None else None
+    if pickup_miles is None:
+        logging.warning(
+            "[router/parse_request] /decide offer missing pickupMiles \u2014 "
+            "pre-fix Android build. Passing NULL to engine."
+        )
 
     yolo_swap_suspected = False
-    if pickup_min > 0 and pickup_miles > 0:
+    if pickup_min > 0 and pickup_miles is not None and pickup_miles > 0:
         max_realistic_miles = pickup_min * 0.75
         if pickup_miles > max_realistic_miles:
             yolo_swap_suspected = True

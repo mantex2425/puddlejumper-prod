@@ -1,0 +1,635 @@
+-- =============================================================================
+-- 2026-05-12_trust_input_distances.sql
+-- =============================================================================
+--
+-- Sprint:   pickup_miles truth-flow (Identity Genesis adjacent)
+-- Branch:   phase-2c-2-tad-exit-4tools
+-- Date:     2026-05-12
+-- Ratified: Claude proposes -> Gemini ratifies (Rule VII bundling)
+--
+-- Purpose:
+--   Replace decision_engine_v2 to trust the client-reported pickup_miles_in
+--   and trip_miles_in values when they are present, and fall back to the
+--   GPS-derived "haversine * 1.3" estimate ONLY when input is missing
+--   (NULL) or implausibly small (< 0.1).
+--
+-- Background:
+--   For six weeks, decisions/router.py:175 has been substituting
+--   pickup_miles = pickup_minutes * 0.33 when Android omitted pickupMiles
+--   from /decide payloads. The stored procedure's GPS-1.3x override
+--   (lines 166-168 of deployed body) silently masked this by replacing
+--   the corrupted heuristic with a different approximation whenever
+--   v_gps_pickup_dist > pickup_miles_in. The net effect: TAD's pickup-leg
+--   gate consumed garbage, while top-line economic decisions stayed in
+--   the right ballpark by coincidence of two cancelling approximations.
+--
+--   With Android now plumbing real pickupMiles through the API
+--   (companion Android patch, ScreenshotMonitorService.kt:844), the
+--   GPS-second-guess clause must be removed so we don't override a
+--   correct OCR value with GPS_haversine * 1.3. The same architectural
+--   sin exists three lines below for trip_miles; per Rule VII it is
+--   fixed in this same migration for symmetry.
+--
+-- Behavioral semantics after this migration:
+--
+--   pickup_miles_in path:
+--     - input present and >= 0.1   -> trust the input verbatim
+--     - input NULL or < 0.1        -> fall back to v_gps_pickup_dist * 1.3
+--                                     when GPS is available
+--     - input NULL/<0.1 AND GPS<0.1-> v_effective_pickup_miles stays at 0
+--                                     (existing downstream NULLIF guards
+--                                     prevent divide-by-zero)
+--
+--   trip_miles_in path:           (symmetrical, same gates)
+--
+-- Idempotency:
+--   CREATE OR REPLACE FUNCTION is atomic — applying twice is a no-op.
+--   Wrapped in BEGIN/COMMIT for transactional safety. No DDL outside
+--   the function body.
+--
+-- Apply:
+--   psql -h 10.128.0.2 -U postgres -d puddlejumper \
+--        -f migrations/2026-05-12_trust_input_distances.sql
+--
+-- Rollback:
+--   Re-apply the prior function body. Captured at:
+--     tmp/decision_engine_v2_pre_2026-05-12.sql
+--   (captured via pg_get_functiondef before this migration is applied)
+--
+-- =============================================================================
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION app_private.decision_engine_v2(user_id_in text, pickup_lat_in numeric, pickup_lng_in numeric, dropoff_lat_in numeric, dropoff_lng_in numeric, gross_payout_in numeric, trip_miles_in numeric, trip_minutes_in numeric, pickup_minutes_in numeric DEFAULT 0, pickup_miles_in numeric DEFAULT 0, market_id_in text DEFAULT NULL::text, towards_active boolean DEFAULT false, towards_target_lat numeric DEFAULT NULL::numeric, towards_target_lng numeric DEFAULT NULL::numeric, towards_market_id text DEFAULT NULL::text, current_lat_in numeric DEFAULT NULL::numeric, current_lng_in numeric DEFAULT NULL::numeric, towards_backtrack_tolerance numeric DEFAULT 3.0, is_puddle_jump_mode boolean DEFAULT true)
+ RETURNS TABLE(verdict text, reason text, net_pay numeric, hourly_rate numeric, dollars_per_mile numeric, deadhead_miles numeric, deadhead_cost numeric, arrival_detected boolean, switch_to_mode text, switch_to_market_id text, threshold_source text, trace_data jsonb)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_settings               jsonb;
+    v_calc_method            text;
+    v_global_per_hour        numeric;
+    v_global_per_mile        numeric;
+    v_threshold_per_hour     numeric;
+    v_threshold_per_mile     numeric;
+    v_deadhead_percent       numeric;
+    v_deadhead_basis         text;
+    v_max_pickup_miles       numeric;
+    H3_RES                   constant integer := 8;
+    v_pickup_hex             text;
+    v_dropoff_hex            text;
+    v_active_market          jsonb;
+    v_local_green_zones      text[];
+    v_red_zones              jsonb;
+    v_current_to_target      numeric := 0;
+    v_pickup_to_target       numeric := 0;
+    v_dropoff_to_target      numeric := 0;
+    v_backtrack_miles        numeric := 0;
+    v_net_progress           numeric := 0;
+    v_return_miles           numeric := 0;
+    v_return_minutes         numeric := 0;
+    v_calculated_cost        numeric := 0;
+    v_total_time_hr          numeric;
+    v_net_pay                numeric;
+    v_hourly_rate            numeric;
+    v_dollars_per_mile       numeric;
+    v_verdict                text;
+    v_reason                 text;
+    v_pass_hourly            boolean := TRUE;
+    v_pass_mileage           boolean := TRUE;
+    v_arrival_detected       boolean := FALSE;
+    v_switch_to_mode         text := NULL;
+    v_switch_to_market_id    text := NULL;
+    v_threshold_source       text := 'global';
+    v_gps_pickup_dist        numeric := 0;
+    v_effective_pickup_miles numeric := 0;
+    v_gps_trip_dist          numeric := 0;
+    v_effective_trip_miles   numeric := 0;
+    v_target_hex             h3index;
+    v_target_cluster         h3index[];
+    v_target_market_zones    text[];
+    v_overshoot_h3_dist      integer := 0;
+    v_overshoot_miles        numeric := 0;
+    v_overshoot_cost         numeric := 0;
+    v_overshoot_return_min   numeric := 0;
+    v_overshoot_total_time   numeric := 0;
+    v_overshoot_net_pay      numeric := 0;
+    v_overshoot_hourly       numeric := 0;
+    v_efficiency             numeric := 0;
+    v_total_work_miles       numeric := 0;
+    v_trace_data             jsonb;
+    v_shift                  jsonb := NULL;
+    v_shift_id               text := NULL;
+    v_shift_name             text := NULL;
+    v_current_hour           integer;
+    v_current_dow            integer;
+    v_towards_efficiency_threshold numeric;
+    v_timezone               text;
+    v_auto_optimize          boolean;
+    v_nearest_hex            text;
+    v_nearest_hex_lat        numeric;
+    v_nearest_hex_lng        numeric;
+    v_cost_per_mile          numeric;
+    v_towards_market         jsonb;
+    v_towards_green_zones    text[];
+    v_dynamic_target_lat     numeric;
+    v_dynamic_target_lng     numeric;
+    v_dynamic_target_hex     text;
+    v_has_towards_target     boolean := FALSE;
+    v_pulse_multiplier       numeric := 1.0;
+    v_pulse_applied          boolean := FALSE;
+    v_pre_pulse_hourly       numeric;
+    v_pre_pulse_mileage      numeric;
+    v_hex_cache_applied      boolean := FALSE;
+    v_hex_cache_samples      integer := 0;
+    v_market_hourly          numeric;
+    v_market_mileage         numeric;
+    v_mileage_floor_config   jsonb;
+    v_mf_base_per_mile       numeric;
+    v_mf_min_per_mile        numeric;
+    v_mf_discount_start      numeric;
+    v_mf_discount_per_mile   numeric;
+    v_mf_extra_miles         numeric := 0;
+    v_mf_discount            numeric := 0;
+    v_effective_per_mile     numeric;
+
+BEGIN
+    SELECT settings INTO v_settings FROM app_private.driver_settings_new WHERE driver_id = user_id_in;
+
+    IF v_settings IS NULL THEN
+        RETURN QUERY SELECT 'ERROR'::text, 'No settings found'::text, 0.0::numeric, 0.0::numeric, 0.0::numeric,
+                            0.0::numeric, 0.0::numeric, FALSE, NULL::text, NULL::text, 'error'::text, '{}'::jsonb;
+        RETURN;
+    END IF;
+
+    SELECT elem INTO v_active_market
+    FROM jsonb_array_elements(v_settings->'markets') elem
+    WHERE (elem->>'id') = market_id_in LIMIT 1;
+
+    v_calc_method           := COALESCE(v_settings->>'calculation_method', 'both');
+    v_global_per_hour       := COALESCE((v_settings->>'min_effective_hourly_rate')::numeric, 22.0);
+    v_global_per_mile       := COALESCE((v_settings->>'min_effective_dollar_per_mile')::numeric, 1.67);
+    v_deadhead_percent      := COALESCE((v_settings->>'deadhead_percent')::numeric, 1.0);
+    v_deadhead_basis        := COALESCE(v_settings->>'deadhead_basis', 'hourly');
+    v_cost_per_mile         := COALESCE((v_settings->>'cost_per_mile')::numeric, 0.67);
+    v_max_pickup_miles      := COALESCE((v_settings->>'max_pickup_miles')::numeric, 25.0);
+    v_red_zones             := v_settings->'redZones';
+    v_timezone              := COALESCE(v_settings->>'timezone', 'America/Chicago');
+    v_auto_optimize         := COALESCE((v_settings->>'autoOptimizeEnabled')::boolean, true);
+    v_towards_efficiency_threshold := COALESCE((v_settings->>'towardsEfficiencyThreshold')::numeric, 0.40);
+
+    v_current_hour := EXTRACT(HOUR FROM NOW() AT TIME ZONE v_timezone)::integer;
+    v_current_dow := EXTRACT(DOW FROM NOW() AT TIME ZONE v_timezone)::integer;
+
+    IF v_settings->'shifts' IS NOT NULL THEN
+        SELECT elem INTO v_shift
+        FROM jsonb_array_elements(v_settings->'shifts') elem
+        WHERE
+            EXISTS (SELECT 1 FROM jsonb_array_elements_text(elem->'days') d WHERE d::integer = v_current_dow)
+            AND (
+                ((elem->>'startHour')::integer <= (elem->>'endHour')::integer AND v_current_hour >= (elem->>'startHour')::integer AND v_current_hour < (elem->>'endHour')::integer)
+                OR
+                ((elem->>'startHour')::integer > (elem->>'endHour')::integer AND (v_current_hour >= (elem->>'startHour')::integer OR v_current_hour < (elem->>'endHour')::integer))
+            )
+        ORDER BY
+            jsonb_array_length(elem->'days') ASC,
+            CASE WHEN (elem->>'startHour')::integer <= (elem->>'endHour')::integer
+                 THEN (elem->>'endHour')::integer - (elem->>'startHour')::integer
+                 ELSE 24 - (elem->>'startHour')::integer + (elem->>'endHour')::integer
+            END ASC
+        LIMIT 1;
+
+        IF v_shift IS NOT NULL THEN
+            v_shift_id := v_shift->>'id';
+            v_shift_name := v_shift->>'name';
+        END IF;
+    END IF;
+
+    IF v_active_market IS NOT NULL THEN
+        SELECT array_agg(elem) INTO v_local_green_zones
+        FROM jsonb_array_elements_text(v_active_market->'greenZones') elem;
+    END IF;
+
+    v_pickup_hex  := app_private.coords_to_h3(pickup_lat_in, pickup_lng_in);
+    v_dropoff_hex := app_private.coords_to_h3(dropoff_lat_in, dropoff_lng_in);
+
+    IF v_red_zones IS NOT NULL AND jsonb_array_length(v_red_zones) > 0 THEN
+        IF EXISTS (SELECT 1 FROM jsonb_array_elements_text(v_red_zones) r(hex) WHERE r.hex IN (v_pickup_hex, v_dropoff_hex)) THEN
+            RETURN QUERY SELECT 'DECLINE'::text, 'Location in Red Zone'::text, 0.0::numeric, 0.0::numeric, 0.0::numeric,
+                                0.0::numeric, 0.0::numeric, FALSE, NULL::text, NULL::text, 'n/a'::text, '{}'::jsonb;
+            RETURN;
+        END IF;
+    END IF;
+
+    IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL AND pickup_lat_in IS NOT NULL AND pickup_lng_in IS NOT NULL THEN
+        v_gps_pickup_dist := app_private.distance_miles(current_lat_in, current_lng_in, pickup_lat_in, pickup_lng_in);
+    END IF;
+
+    -- ----- TRUST INPUT DISTANCES (2026-05-12) -----
+    -- Trust pickup_miles_in when present; GPS-1.3x fallback only when
+    -- input is NULL or implausibly small (< 0.1).
+    v_effective_pickup_miles := pickup_miles_in;
+    IF pickup_miles_in IS NULL OR pickup_miles_in < 0.1 THEN
+        IF v_gps_pickup_dist > 0.1 THEN v_effective_pickup_miles := v_gps_pickup_dist * 1.3; END IF;
+    END IF;
+
+    IF pickup_lat_in IS NOT NULL AND pickup_lng_in IS NOT NULL AND dropoff_lat_in IS NOT NULL AND dropoff_lng_in IS NOT NULL THEN
+        v_gps_trip_dist := app_private.distance_miles(pickup_lat_in, pickup_lng_in, dropoff_lat_in, dropoff_lng_in);
+    END IF;
+
+    -- Trust trip_miles_in when present; GPS-1.3x fallback only when
+    -- input is NULL or implausibly small (< 0.1).
+    v_effective_trip_miles := trip_miles_in;
+    IF trip_miles_in IS NULL OR trip_miles_in < 0.1 THEN
+        IF v_gps_trip_dist > 0.1 THEN v_effective_trip_miles := v_gps_trip_dist * 1.3; END IF;
+    END IF;
+    -- ----- END TRUST INPUT DISTANCES -----
+
+    IF v_effective_pickup_miles > v_max_pickup_miles THEN
+        RETURN QUERY SELECT
+            'DECLINE'::text,
+            format('Pickup too far: %s mi (max %s mi)', round(v_effective_pickup_miles, 1), round(v_max_pickup_miles, 1))::text,
+            0.0::numeric, 0.0::numeric, 0.0::numeric,
+            0.0::numeric, 0.0::numeric, FALSE, NULL::text, NULL::text, 'max_pickup'::text,
+            jsonb_build_object(
+                'effectivePickupMiles', round(v_effective_pickup_miles, 2),
+                'maxPickupMiles', v_max_pickup_miles,
+                'gpsPickupDist', round(v_gps_pickup_dist, 2),
+                'ocrPickupMiles', pickup_miles_in
+            );
+        RETURN;
+    END IF;
+
+    v_total_work_miles := v_effective_pickup_miles + v_effective_trip_miles;
+    v_total_time_hr := (trip_minutes_in + pickup_minutes_in) / 60.0;
+    v_net_pay := gross_payout_in;
+    v_hourly_rate := gross_payout_in / NULLIF(v_total_time_hr, 0);
+    v_dollars_per_mile := gross_payout_in / NULLIF(v_total_work_miles, 0);
+
+    IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
+        SELECT m.market_hourly, m.market_mileage
+        INTO v_market_hourly, v_market_mileage
+        FROM app_private.get_market_rate(
+            current_lat_in, current_lng_in,
+            user_id_in, NOW()
+        ) m;
+    END IF;
+
+    IF towards_active THEN
+        IF towards_market_id IS NOT NULL AND current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL THEN
+            SELECT elem INTO v_towards_market
+            FROM jsonb_array_elements(v_settings->'markets') elem
+            WHERE (elem->>'id') = towards_market_id LIMIT 1;
+
+            IF v_towards_market IS NOT NULL THEN
+                SELECT array_agg(gz) INTO v_towards_green_zones
+                FROM jsonb_array_elements_text(v_towards_market->'greenZones') gz;
+
+                IF v_towards_green_zones IS NOT NULL AND array_length(v_towards_green_zones, 1) > 0 THEN
+                    BEGIN
+                        SELECT
+                            g_hex,
+                            app_private.h3_to_lat(g_hex),
+                            app_private.h3_to_lng(g_hex)
+                        INTO v_dynamic_target_hex, v_dynamic_target_lat, v_dynamic_target_lng
+                        FROM unnest(v_towards_green_zones) g_hex
+                        ORDER BY app_private.distance_miles(
+                            current_lat_in, current_lng_in,
+                            app_private.h3_to_lat(g_hex),
+                            app_private.h3_to_lng(g_hex)
+                        )
+                        LIMIT 1;
+
+                        IF v_dynamic_target_lat IS NOT NULL THEN
+                            v_has_towards_target := TRUE;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN
+                        v_has_towards_target := FALSE;
+                    END;
+                END IF;
+            END IF;
+        END IF;
+
+        IF NOT v_has_towards_target AND towards_target_lat IS NOT NULL AND towards_target_lng IS NOT NULL THEN
+            v_dynamic_target_lat := towards_target_lat;
+            v_dynamic_target_lng := towards_target_lng;
+            v_dynamic_target_hex := 'legacy_target';
+            v_has_towards_target := TRUE;
+        END IF;
+
+        IF v_has_towards_target THEN
+            v_current_to_target := app_private.distance_miles(current_lat_in, current_lng_in, v_dynamic_target_lat, v_dynamic_target_lng);
+            v_pickup_to_target  := app_private.distance_miles(pickup_lat_in, pickup_lng_in, v_dynamic_target_lat, v_dynamic_target_lng);
+            v_dropoff_to_target := app_private.distance_miles(dropoff_lat_in, dropoff_lng_in, v_dynamic_target_lat, v_dynamic_target_lng);
+
+            v_backtrack_miles := v_pickup_to_target - v_current_to_target;
+            v_net_progress := v_current_to_target - v_dropoff_to_target;
+
+            IF v_total_work_miles > 0 THEN v_efficiency := v_net_progress / v_total_work_miles;
+            ELSE v_efficiency := 1.0; END IF;
+
+            IF towards_market_id IS NOT NULL AND v_towards_market IS NOT NULL THEN
+                IF v_towards_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_towards_green_zones) THEN
+                    v_arrival_detected := TRUE;
+                    v_switch_to_mode := 'puddle_jump';
+                    v_switch_to_market_id := towards_market_id;
+                END IF;
+            ELSIF v_dynamic_target_lat IS NOT NULL AND v_dynamic_target_hex != 'legacy_target' THEN
+                v_target_hex := app_private.coords_to_h3(v_dynamic_target_lat, v_dynamic_target_lng)::h3index;
+                SELECT array_agg(hex) INTO v_target_cluster FROM h3_grid_disk(v_target_hex, 1) hex;
+                IF v_dropoff_hex::h3index = ANY(v_target_cluster) THEN
+                    v_arrival_detected := TRUE;
+                END IF;
+            ELSIF v_dynamic_target_hex = 'legacy_target' THEN
+                v_target_hex := app_private.coords_to_h3(v_dynamic_target_lat, v_dynamic_target_lng)::h3index;
+                SELECT array_agg(hex) INTO v_target_cluster FROM h3_grid_disk(v_target_hex, 1) hex;
+                IF v_dropoff_hex::h3index = ANY(v_target_cluster) THEN
+                    v_arrival_detected := TRUE;
+                END IF;
+            END IF;
+
+            IF v_arrival_detected THEN
+                v_verdict := 'ACCEPT';
+                v_reason := format('Arrived in target (%s mi progress)', round(v_net_progress, 1));
+
+            ELSIF v_net_progress > 0 AND v_backtrack_miles <= towards_backtrack_tolerance THEN
+                v_towards_efficiency_threshold := CASE
+                    WHEN v_current_to_target >= 200 THEN 0.15
+                    WHEN v_current_to_target >= 100 THEN 0.20
+                    WHEN v_current_to_target >= 50  THEN 0.30
+                    WHEN v_current_to_target >= 20  THEN 0.35
+                    WHEN v_current_to_target >= 10  THEN 0.40
+                    WHEN v_current_to_target >= 5   THEN 0.50
+                    ELSE 0.65
+                END;
+
+                IF v_efficiency < v_towards_efficiency_threshold THEN
+                    v_verdict := 'DECLINE';
+                    v_reason := format('Inefficient route: %s%% vs %s%% required at %s mi out (%s mi gained on %s mi trip)',
+                                       round(v_efficiency * 100, 0),
+                                       round(v_towards_efficiency_threshold * 100, 0),
+                                       round(v_current_to_target, 1),
+                                       round(v_net_progress, 1),
+                                       round(v_total_work_miles, 1));
+                ELSE
+                    v_overshoot_h3_dist := 0;
+                    IF v_dropoff_to_target > 0.5 AND v_gps_trip_dist > v_pickup_to_target THEN
+                        v_overshoot_miles := v_dropoff_to_target;
+                        v_overshoot_h3_dist := 1;
+                    END IF;
+
+                    IF v_overshoot_h3_dist > 0 THEN
+                        v_overshoot_cost := v_overshoot_miles * v_cost_per_mile * v_deadhead_percent;
+                        v_overshoot_return_min := v_overshoot_miles * 2.0;
+                        v_overshoot_total_time := (trip_minutes_in + pickup_minutes_in + v_overshoot_return_min) / 60.0;
+                        v_overshoot_net_pay := gross_payout_in - v_overshoot_cost;
+                        v_overshoot_hourly := v_overshoot_net_pay / NULLIF(v_overshoot_total_time, 0);
+
+                        IF v_overshoot_hourly >= v_global_per_hour THEN
+                            v_verdict := 'ACCEPT';
+                            v_reason := format('%s mi progress, %s mi overshoot ($%s/hr after return)', round(v_net_progress, 1), round(v_overshoot_miles, 1), round(v_overshoot_hourly, 2));
+                            v_return_miles := v_overshoot_miles;
+                            v_calculated_cost := v_overshoot_cost;
+                            v_net_pay := v_overshoot_net_pay;
+                            v_hourly_rate := v_overshoot_hourly;
+                        ELSE
+                            v_verdict := 'DECLINE';
+                            v_reason := format('Overshoot %s mi kills profit ($%s/hr after return)', round(v_overshoot_miles, 1), round(v_overshoot_hourly, 2));
+                            v_net_pay := v_overshoot_net_pay;
+                            v_hourly_rate := v_overshoot_hourly;
+                        END IF;
+                    ELSE
+                        IF v_hourly_rate < (v_global_per_hour * 0.5) THEN
+                            v_verdict := 'DECLINE';
+                            v_reason := format('Rate too low for TOWARDS ($%s/hr, floor $%s/hr). %s mi progress wasted.',
+                                               round(v_hourly_rate, 2),
+                                               round(v_global_per_hour * 0.5, 2),
+                                               round(v_net_progress, 1));
+                        ELSE
+                            v_verdict := 'ACCEPT';
+                            v_reason := format('%s mi net progress (%s mi backtrack)', round(v_net_progress, 1), round(v_backtrack_miles, 1));
+                        END IF;
+                    END IF;
+                END IF;
+
+            ELSE
+                v_verdict := 'DECLINE';
+                IF v_net_progress <= 0 THEN
+                    v_reason := format('Ride moves away from target (would earn $%s/hr, $%s/mi)', round(v_hourly_rate, 2), round(v_dollars_per_mile, 2));
+                ELSE
+                    v_reason := format('Backtrack (%s mi) exceeds tolerance (would earn $%s/hr, $%s/mi)', round(v_backtrack_miles, 1), round(v_hourly_rate, 2), round(v_dollars_per_mile, 2));
+                END IF;
+            END IF;
+
+        ELSE
+            v_verdict := 'DECLINE';
+            v_reason := 'TOWARDS mode active but no target could be resolved (missing market zones or GPS)';
+        END IF;
+
+    ELSE
+        v_threshold_per_hour := v_global_per_hour;
+        v_threshold_per_mile := v_global_per_mile;
+
+        IF NOT is_puddle_jump_mode THEN
+            v_return_miles := 0;
+            v_threshold_per_hour := COALESCE(v_market_hourly, (v_settings->>'dignity_hourly')::numeric, v_global_per_hour);
+            v_threshold_per_mile := COALESCE(v_market_mileage, (v_settings->>'dignity_mileage')::numeric, v_global_per_mile);
+            v_threshold_source := CASE WHEN v_market_hourly IS NOT NULL THEN 'market_rate' ELSE 'dignity_floor' END;
+
+        ELSIF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
+            v_return_miles := 0;
+            IF v_market_hourly IS NOT NULL THEN
+                v_threshold_per_hour := v_market_hourly;
+                v_threshold_per_mile := v_market_mileage;
+                v_threshold_source   := 'market_rate';
+                v_hex_cache_applied  := TRUE;
+            END IF;
+            IF NOT v_hex_cache_applied THEN
+                v_threshold_source := COALESCE(v_active_market->>'name', 'current_market');
+                v_threshold_per_hour := COALESCE(v_market_hourly, (v_settings->>'dignity_hourly')::numeric, v_global_per_hour);
+                v_threshold_per_mile := COALESCE(v_market_mileage, (v_settings->>'dignity_mileage')::numeric, v_global_per_mile);
+                v_threshold_source := v_threshold_source || ':dignity_floor';
+            END IF;
+
+        ELSE
+            BEGIN
+                    SELECT g_hex INTO v_nearest_hex
+                    FROM unnest(v_local_green_zones) g_hex
+                    ORDER BY h3_grid_distance(v_dropoff_hex::h3index, g_hex::h3index)
+                    LIMIT 1;
+
+                    IF v_nearest_hex IS NOT NULL THEN
+                        v_nearest_hex_lat := app_private.h3_to_lat(v_nearest_hex);
+                        v_nearest_hex_lng := app_private.h3_to_lng(v_nearest_hex);
+                        v_return_miles := app_private.distance_miles(
+                            dropoff_lat_in, dropoff_lng_in,
+                            v_nearest_hex_lat, v_nearest_hex_lng
+                        ) * 1.4;
+                    ELSE
+                        v_return_miles := 20.0;
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN
+                    v_return_miles := 20.0;
+                END;
+
+                IF v_active_market IS NOT NULL THEN
+                    v_threshold_source := 'leaving_market:' || COALESCE(v_active_market->>'name', 'current');
+                    v_threshold_per_hour := COALESCE(v_market_hourly, (v_settings->>'dignity_hourly')::numeric, v_global_per_hour);
+                    v_threshold_per_mile := COALESCE(v_market_mileage, (v_settings->>'dignity_mileage')::numeric, v_global_per_mile);
+                    v_threshold_source := v_threshold_source || CASE
+                        WHEN v_market_hourly IS NOT NULL THEN ':market_rate'
+                        ELSE ':dignity_floor'
+                    END;
+                END IF;
+        END IF;
+
+        IF current_lat_in IS NOT NULL AND current_lng_in IS NOT NULL
+           AND v_threshold_source NOT LIKE '%manual%'
+           AND is_puddle_jump_mode
+           AND NOT v_hex_cache_applied THEN
+            IF v_market_hourly IS NOT NULL THEN
+                v_threshold_per_hour := v_market_hourly;
+                v_threshold_per_mile := v_market_mileage;
+                v_threshold_source   := v_threshold_source || '+market_rate';
+                v_hex_cache_applied  := TRUE;
+            END IF;
+        END IF;
+
+        v_pre_pulse_hourly := v_threshold_per_hour;
+        v_pre_pulse_mileage := v_threshold_per_mile;
+
+        v_return_minutes := v_return_miles * 2.0;
+
+        IF v_deadhead_basis = 'hourly' THEN
+            v_calculated_cost := (v_return_minutes / 60.0) * v_threshold_per_hour * v_deadhead_percent;
+        ELSE
+            v_calculated_cost := v_return_miles * v_cost_per_mile * v_deadhead_percent;
+        END IF;
+
+        v_total_time_hr := (trip_minutes_in + COALESCE(pickup_minutes_in, 0) + v_return_minutes) / 60.0;
+        v_net_pay := gross_payout_in - v_calculated_cost;
+        v_hourly_rate := v_net_pay / NULLIF(v_total_time_hr, 0);
+        v_dollars_per_mile := v_net_pay / NULLIF((v_effective_pickup_miles + v_effective_trip_miles + v_return_miles), 0);
+
+        v_mileage_floor_config := v_settings->'mileageFloorConfig';
+        v_mf_base_per_mile     := COALESCE((v_mileage_floor_config->>'basePerMile')::numeric, v_threshold_per_mile);
+        v_mf_min_per_mile      := COALESCE((v_mileage_floor_config->>'minPerMile')::numeric, 0.35);
+        v_mf_discount_start    := COALESCE((v_mileage_floor_config->>'discountStartMiles')::numeric, 10.0);
+        v_mf_discount_per_mile := COALESCE((v_mileage_floor_config->>'discountPerExtraMile')::numeric, 0.015);
+
+        v_mf_extra_miles   := GREATEST(v_effective_trip_miles - v_mf_discount_start, 0);
+        v_mf_discount      := v_mf_extra_miles * v_mf_discount_per_mile;
+        v_effective_per_mile := GREATEST(v_mf_base_per_mile - v_mf_discount, v_mf_min_per_mile);
+
+        v_pulse_multiplier := app_private.get_pulse_multiplier(user_id_in, v_pickup_hex);
+
+        IF v_pulse_multiplier > 1.0 THEN
+            IF v_hourly_rate >= (v_pre_pulse_hourly * 1.20)
+               AND v_dollars_per_mile >= v_pre_pulse_mileage THEN
+                v_threshold_per_hour := v_threshold_per_hour * v_pulse_multiplier;
+                v_threshold_per_mile := v_threshold_per_mile * v_pulse_multiplier;
+                v_pulse_applied := TRUE;
+            ELSE
+                v_pulse_multiplier := 1.0;
+                v_pulse_applied := FALSE;
+            END IF;
+        END IF;
+
+        v_pass_hourly := TRUE;
+        v_pass_mileage := TRUE;
+
+        IF v_hourly_rate >= v_pre_pulse_hourly
+           AND v_dollars_per_mile >= v_effective_per_mile THEN
+            v_pass_hourly := TRUE;
+            v_pass_mileage := TRUE;
+        ELSE
+            IF v_calc_method IN ('per_hour', 'both') AND (v_hourly_rate IS NULL OR v_hourly_rate < v_threshold_per_hour) THEN v_pass_hourly := FALSE; END IF;
+            IF v_calc_method IN ('per_mile', 'both') AND (v_dollars_per_mile IS NULL OR v_dollars_per_mile < v_effective_per_mile) THEN v_pass_mileage := FALSE; END IF;
+        END IF;
+
+        IF v_pass_hourly AND v_pass_mileage THEN
+            v_verdict := 'ACCEPT';
+            IF v_return_miles = 0 THEN
+                IF is_puddle_jump_mode THEN
+                    IF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
+                        v_reason := 'Stays in market';
+                    ELSE
+                        v_reason := 'Rates met';
+                    END IF;
+                ELSE v_reason := 'Rates met'; END IF;
+            ELSE v_reason := 'Rates met'; END IF;
+        ELSE
+            v_verdict := 'DECLINE';
+            IF NOT v_pass_hourly AND NOT v_pass_mileage THEN
+                v_reason := format('Both rates too low ($%s/hr, $%s/mi)', round(v_hourly_rate, 2), round(v_dollars_per_mile, 2));
+            ELSIF NOT v_pass_hourly THEN
+                v_reason := format('Hourly rate too low ($%s/hr)', round(v_hourly_rate, 2));
+            ELSE
+                v_reason := format('Mileage rate too low ($%s/mi)', round(v_dollars_per_mile, 2));
+            END IF;
+        END IF;
+
+        IF v_calculated_cost > (gross_payout_in * 0.2) AND v_return_miles > 0 THEN
+            v_reason := v_reason || format('. High return cost: $%s', round(v_calculated_cost, 2));
+        END IF;
+    END IF;
+
+    v_trace_data := jsonb_build_object(
+        'tripMiles', round(v_effective_trip_miles, 2),
+        'pickupMiles', round(v_effective_pickup_miles, 2),
+        'totalWorkMiles', round(v_effective_pickup_miles + v_effective_trip_miles + v_return_miles, 2),
+        'returnMiles', round(v_return_miles, 2),
+        'calculatedCost', round(v_calculated_cost, 2),
+        'grossPayout', gross_payout_in,
+        'netProgress', round(v_net_progress, 2),
+        'backtrackMiles', round(v_backtrack_miles, 2),
+        'efficiencyPct', round(v_efficiency, 2),
+        'distanceToTarget', round(v_current_to_target, 2),
+        'dropoffToTarget', round(v_dropoff_to_target, 2),
+        'targetLat', v_dynamic_target_lat,
+        'targetLng', v_dynamic_target_lng,
+        'targetHex', v_dynamic_target_hex,
+        'targetSource', CASE
+            WHEN v_dynamic_target_hex = 'legacy_target' THEN 'app_passed'
+            WHEN v_dynamic_target_hex IS NOT NULL THEN 'nearest_green_hex'
+            ELSE 'none'
+        END,
+        'activeShiftId', v_shift_id,
+        'activeShiftName', v_shift_name,
+        'towardsEfficiencyThreshold', v_towards_efficiency_threshold,
+        'timezone', v_timezone,
+        'autoOptimizeEnabled', v_auto_optimize,
+        'deadheadBasis', v_deadhead_basis,
+        'deadheadPercent', v_deadhead_percent,
+        'nearestGreenHex', v_nearest_hex,
+        'threshold_hourly', v_threshold_per_hour,
+        'threshold_mileage', v_threshold_per_mile,
+        'source', v_threshold_source,
+        'cache_value', v_threshold_per_hour,
+        'pulse_multiplier', v_pulse_multiplier,
+        'pulse_applied', v_pulse_applied,
+        'pre_pulse_hourly', round(v_pre_pulse_hourly, 2),
+        'pre_pulse_mileage', round(v_pre_pulse_mileage, 2),
+        'hexCacheApplied', v_hex_cache_applied,
+        'hexCacheSamples', v_hex_cache_samples,
+        'mileageFloorConfig', v_mileage_floor_config,
+        'basePerMile', round(v_mf_base_per_mile, 4),
+        'effectivePerMile', round(v_effective_per_mile, 4),
+        'mileageDiscountApplied', round(v_mf_discount, 4),
+        'extraMiles', round(v_mf_extra_miles, 2),
+        'minPerMileFloor', round(v_mf_min_per_mile, 4),
+        'maxPickupMiles', v_max_pickup_miles,
+        'gpsPickupDist', round(v_gps_pickup_dist, 2),
+        'gpsTripDist', round(v_gps_trip_dist, 2),
+        'ocrPickupMiles', pickup_miles_in,
+        'ocrTripMiles', trip_miles_in,
+        'towardsRateFloor', round(v_global_per_hour * 0.5, 2)
+    );
+
+    RETURN QUERY SELECT v_verdict, v_reason, round(v_net_pay, 2), round(v_hourly_rate, 2), round(v_dollars_per_mile, 2),
+                        round(v_return_miles, 1), round(v_calculated_cost, 2), v_arrival_detected, v_switch_to_mode,
+                        v_switch_to_market_id, v_threshold_source, v_trace_data;
+END;
+$function$
+;
+
+COMMIT;
