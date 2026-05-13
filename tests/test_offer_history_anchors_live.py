@@ -60,7 +60,8 @@ def test_get_last_known_anchor_id_returns_none_when_only_stale_anchor_exists(
         miles_at_offer_receipt=100.0,
     )
 
-    result = _get_last_known_anchor_id(db_cur, test_driver_id)
+    _test_now = datetime.datetime.now(datetime.timezone.utc)
+    result = _get_last_known_anchor_id(db_cur, test_driver_id, None, _test_now)
 
     assert result is None, (
         f"Expected None (stale anchor excluded by GC predicate), "

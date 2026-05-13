@@ -17,6 +17,24 @@ already lives in test_where_am_i.py (DiagnosticContext + dual commit
 rule) and test_tad.py (evaluate_tad_gate semantics). 3b.R wires the
 two halves together; this file proves the wiring helpers individually.
 """
+# RULE VII MIGRATION 2026-05-12:
+# _detect_lost_mode semantics changed. Old rule used
+# `actual_pickup_at IS NULL` + `interval '2 hours'` as proxies.
+# New rule uses LIVE_OFFER_PREDICATE_SQL — pure horizon physics.
+#
+# Existing tests in this file MAY need fixture review:
+#   - Tests that fire a pickup and assert lost_mode=False should
+#     still pass IF the offer's horizon hasn't blown, but the
+#     semantic meaning has shifted: it's the horizon (not the
+#     pickup fire) that decides.
+#   - Tests that insert a recently-accepted no-pickup offer and
+#     assert lost_mode=True should still pass (offer is in horizon,
+#     so it's still flagged as orphan).
+#
+# See tests/test_lost_mode_horizon.py for the new canonical
+# behavioral cases (Houston Miss, Calhoun Zombie, etc).
+#
+
 from __future__ import annotations
 
 import datetime
@@ -41,6 +59,10 @@ from tad import OfferTadState, TadVerdict
 # ============================================================================
 
 UTC = datetime.timezone.utc
+
+
+import datetime as _dt
+_T_NOW = _dt.datetime.now(_dt.timezone.utc)
 
 
 def _aware(year, month, day, hour=0, minute=0):
@@ -226,11 +248,11 @@ class TestGetLastKnownAnchorId:
 
     def test_no_anchors_returns_none(self):
         cur = _mock_cursor(fetchone_value=None)
-        assert _get_last_known_anchor_id(cur, "driver-x") is None
+        assert _get_last_known_anchor_id(cur, "driver-x", None, _T_NOW) is None
 
     def test_anchor_present_returns_string(self):
         cur = _mock_cursor(fetchone_value={"id": 7700})
-        result = _get_last_known_anchor_id(cur, "driver-x")
+        result = _get_last_known_anchor_id(cur, "driver-x", None, _T_NOW)
         assert result == "7700"
         assert isinstance(result, str)
 
@@ -238,7 +260,7 @@ class TestGetLastKnownAnchorId:
         """Source-of-truth path: query offer_history actual_*_at directly,
         not the derivative pudo_decision_context.planner_action history."""
         cur = _mock_cursor(fetchone_value=None)
-        _get_last_known_anchor_id(cur, "driver-x")
+        _get_last_known_anchor_id(cur, "driver-x", None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
         assert "offer_history" in sql_text
         assert "actual_pickup_at" in sql_text
@@ -246,7 +268,7 @@ class TestGetLastKnownAnchorId:
 
     def test_sql_orders_by_most_recent_pudo(self):
         cur = _mock_cursor(fetchone_value=None)
-        _get_last_known_anchor_id(cur, "driver-x")
+        _get_last_known_anchor_id(cur, "driver-x", None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
         assert "ORDER BY" in sql_text
         assert "DESC" in sql_text
@@ -262,27 +284,37 @@ class TestDetectLostMode:
 
     def test_no_orphan_returns_false(self):
         cur = _mock_cursor(fetchone_value=None)
-        assert _detect_lost_mode(cur, "driver-x", [7771]) is False
+        assert _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW) is False
 
     def test_orphan_present_returns_true(self):
         cur = _mock_cursor(fetchone_value={"id": 7770})
-        assert _detect_lost_mode(cur, "driver-x", [7771]) is True
+        assert _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW) is True
 
     def test_sql_filters_to_accept_verdict(self):
         """Declined offers carry no narrative obligation; they must not
         force lost mode."""
         cur = _mock_cursor(fetchone_value=None)
-        _detect_lost_mode(cur, "driver-x", [7771])
+        _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
         assert "ACCEPT" in sql_text
 
-    def test_sql_uses_two_hour_recency_window(self):
-        """Stale orphans (technical glitches days prior) must not force a
-        fresh shift into Lost Mode."""
+    def test_sql_uses_live_offer_predicate(self):
+        """Post-2026-05-12 Rule VII migration: orphan-recency is governed
+        by LIVE_OFFER_PREDICATE_SQL (horizon physics), not by a crude
+        wall-clock window.
+
+        See tests/test_lost_mode_horizon.py for the behavioral spec and
+        tests/test_live_offer_predicate_imports.py for the structural
+        contract."""
         cur = _mock_cursor(fetchone_value=None)
-        _detect_lost_mode(cur, "driver-x", [7771])
+        _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
-        assert "interval '2 hours'" in sql_text
+        # Horizon predicate must be spliced in
+        assert "oh.actual_dropoff_at IS NULL" in sql_text
+        assert "oh.miles_at_offer_receipt" in sql_text
+        # Old proxies must be absent
+        assert "interval '2 hours'" not in sql_text
+        assert "actual_pickup_at IS NULL" not in sql_text
 
 
 # ============================================================================

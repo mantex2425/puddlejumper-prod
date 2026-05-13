@@ -160,6 +160,12 @@ class QueueSnapshot:
 
 LIVE_OFFER_PREDICATE_SQL = """
     oh.actual_dropoff_at IS NULL
+    -- Causality Guard (2026-05-12): an offer cannot be "live" before
+    -- it exists. Production server-clock was silently safe because
+    -- wall-clock is always >= created_at. Replay against a historical
+    -- reference_time is not — without this clause, future offers leak
+    -- into the live set. See Houston Playback.
+    AND oh.created_at <= %s::timestamptz
     AND oh.created_at + (
             LEAST(
                 GREATEST(
@@ -168,7 +174,7 @@ LIVE_OFFER_PREDICATE_SQL = """
                 ),
                 %s
             ) * INTERVAL '1 minute'
-          ) > NOW()
+          ) > %s::timestamptz
     AND (
         %s::numeric IS NULL
         OR oh.miles_at_offer_receipt IS NULL
@@ -183,19 +189,44 @@ LIVE_OFFER_PREDICATE_SQL = """
 """
 
 
-def live_offer_predicate_params(current_cumulative_miles):
+def _now():
+    """Capture the current UTC time. Wrapping in a function makes it
+    trivially mockable in tests and gives us a single audit point if
+    we ever need to swap the clock source (e.g., for replay harnesses).
+    """
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def live_offer_predicate_params(current_cumulative_miles, reference_time):
     """Build the params tuple for LIVE_OFFER_PREDICATE_SQL.
 
+    2026-05-12 Rule VII refactor: reference_time is REQUIRED. The
+    predicate SQL no longer references NOW() server-side; the clock
+    is explicit data. This makes LIVE_OFFER_PREDICATE_SQL a pure
+    function — same inputs always produce the same answer regardless
+    of when Postgres evaluates the query. Required for the Houston
+    Playback test to anchor against historical drive data.
+
     Args:
-        current_cumulative_miles: float or None. When None, the distance
-            axis short-circuits to TRUE (time-only fallback). Production
-            heartbeat path always supplies a value; test fixtures and
-            legacy callers may pass None.
+        current_cumulative_miles: float or None. When None, the
+            distance axis short-circuits to TRUE (time-only fallback).
+            Production heartbeat path always supplies a value; test
+            fixtures may pass None to bypass the distance check.
+        reference_time: datetime, REQUIRED. The "now" against which
+            the time horizon is evaluated. Production captures
+            `datetime.now(timezone.utc)` once at the top of each
+            heartbeat and threads through. Tests pass any UTC
+            datetime to replay against historical moments.
 
     Returns:
-        12-tuple to splice into the params list at the call site.
+        13-tuple to splice into the params list at the call site.
     """
     return (
+        # Causality Guard (2026-05-12): reference_time bound to the
+        # `oh.created_at <= %s::timestamptz` clause. Prevents future
+        # offers from leaking into the live set during replay.
+        reference_time,
         # Time axis — SELECT raw_min coalesces are not part of this
         # predicate (they're outside the WHERE in _project_offers's
         # SELECT clause). The 5 values below are the WHERE-clause
@@ -204,6 +235,8 @@ def live_offer_predicate_params(current_cumulative_miles):
         GC_BUFFER_MULT,
         GC_MIN_MINUTES,
         GC_MAX_MINUTES,
+        # Reference time — replaces NOW() in the predicate. Required.
+        reference_time,
         # Distance axis — pass the current odometer reading TWICE
         # (once for the NULL guard, once for the math). Postgres has
         # no syntactic way to reference a parameter twice in the same
@@ -331,7 +364,7 @@ class DriverQueue:
             ORDER BY created_at DESC
         """, (
             self.driver_id,
-        ) + live_offer_predicate_params(current_cumulative_miles))
+        ) + live_offer_predicate_params(current_cumulative_miles, _now()))
         return tuple(r['offer_id'] for r in cur.fetchall())
 
     def bound_offer_id(self, cur) -> Optional[str]:
@@ -491,7 +524,7 @@ class DriverQueue:
         """, (
             GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
             self.driver_id,                           # FK lookup
-        ) + live_offer_predicate_params(current_cumulative_miles))
+        ) + live_offer_predicate_params(current_cumulative_miles, _now()))
 
         offers: list[Offer] = []
         for o in cur.fetchall():

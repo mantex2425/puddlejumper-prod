@@ -506,7 +506,7 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
     return out
 
 
-def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles=None):
+def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, reference_time):
     """Find most recent LIVE offer_id with confirmed PUDO. [3b.R, GC-aware]
 
     P0 fix 2026-05-10: applies LIVE_OFFER_PREDICATE_SQL. Stale offers
@@ -538,44 +538,81 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles=None):
         ORDER BY COALESCE(oh.actual_dropoff_at, oh.actual_pickup_at) DESC
         LIMIT 1
         """,
-        (driver_id,) + live_offer_predicate_params(current_cumulative_miles),
+        (driver_id,) + live_offer_predicate_params(current_cumulative_miles, reference_time),
     )
     row = cur.fetchone()
     return str(row["id"]) if row else None
 
 
-def _detect_lost_mode(cur, driver_id, queue_offer_ids):
-    """Detect narrative_blindness (Bible Rule 7a). [3b.R]
+def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time):
+    """Detect narrative_blindness via HORIZON physics. [Rule VII, 2026-05-12]
 
-    Captures cases 2 (prior offer GC'd before pickup confirmation) and
-    3 (stacked offer with no prior pickup-confirmation) by querying for
-    an accepted prior offer (excluded from current queue) without
-    pickup confirmation, recent enough to indicate broken narrative.
+    REWRITE (2026-05-12): the previous implementation used
+    `actual_pickup_at IS NULL` as a proxy for "narrative broken" plus
+    a crude `interval '2 hours'` wall-clock window. Both were wrong.
 
-    Filters:
-      - app_verdict = 'ACCEPT': declined offers carry no narrative
-        obligation, so they don't constitute lost mode.
-      - 2-hour window: prevents stale orphans (technical glitches days
-        prior) from forcing a fresh shift into Lost Mode.
-      - id != ALL(queue): exclude offers currently being evaluated.
+    Failure modes the old rule produced on the 2026-05-12 drive:
 
-    Case 1 (queue empty post-GC) reduces to no-evaluation-needed inside
-    where_am_i.evaluate; not detected here.
+      Houston Miss (offers 7848, 7853): AAI missed the pickup
+        observation, but dropoff fired cleanly. Old rule treated the
+        offer as a permanent ghost for 2 hours after dropoff fired,
+        poisoning every subsequent heartbeat with lost_mode=true and
+        forcing the dispatcher into conservative commit mode. This
+        cascaded — pickups missed because of lost_mode-conservative
+        commit produced new ghosts, extending lost_mode further.
+
+      Calhoun Zombie: pickup fires successfully but the dropoff
+        address Uber gave doesn't exist where navigation took you.
+        AAI never observes dropoff. Driver moves to next ride. Old
+        rule's `actual_pickup_at IS NULL` clause excluded the Calhoun
+        offer entirely (wrong direction — Calhoun is exactly the kind
+        of ghost the rule was supposed to catch).
+
+    The new rule uses LIVE_OFFER_PREDICATE_SQL — the same predicate
+    DriverQueue uses to decide which offers are "alive" in the
+    Diagnose-side queue. Physics, not fire state, decides:
+
+        An offer triggers lost_mode iff
+          accepted
+          AND not currently in the active queue
+          AND still inside its time/distance horizon
+          (LIVE_OFFER_PREDICATE_SQL — see driver_queue.py)
+
+    The predicate already contains `oh.actual_dropoff_at IS NULL` as
+    its first clause, so dropoff-fired offers are excluded
+    automatically (Houston Miss → not orphan, correct).
+
+    Pickup-fired-no-dropoff offers stay live until the time OR
+    distance horizon blows. Once physics terminates them, they stop
+    poisoning lost_mode. The Calhoun Zombie self-resolves after the
+    driver crosses the trip-miles horizon.
+
+    Args:
+        cur: psycopg2 cursor.
+        driver_id: Firebase UID.
+        queue_offer_ids: int list of offers currently in the active
+            queue; these are excluded (already being evaluated).
+        current_cumulative_miles: float or None. When None, the
+            distance axis of the predicate short-circuits to TRUE
+            (time-only fallback). Production heartbeat path always
+            supplies a value.
+
+    Returns True iff at least one live orphaned offer exists.
     """
     cur.execute(
-        """
+        f"""
         SELECT oh.id
         FROM app_private.offer_history oh
         JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
         WHERE dl.driver_id = %s
           AND oh.id != ALL(%s::bigint[])
-          AND oh.actual_pickup_at IS NULL
           AND oh.app_verdict = 'ACCEPT'
-          AND oh.created_at > NOW() - interval '2 hours'
+          AND {LIVE_OFFER_PREDICATE_SQL}
         ORDER BY oh.created_at DESC
         LIMIT 1
         """,
-        (driver_id, queue_offer_ids or [0]),
+        (driver_id, queue_offer_ids or [0])
+        + live_offer_predicate_params(current_cumulative_miles, reference_time),
     )
     return cur.fetchone() is not None
 
@@ -873,8 +910,12 @@ def post_heartbeat():
     # bridge-state preservation per Item 3 contract.
     queue_ids_int = [int(oid) for oid in snap.offer_ids]
     per_offer_state = _assemble_per_offer_state(cur, driver_id, queue_ids_int)
-    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles=cumulative_miles)
-    lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int)
+    # Capture the reference clock ONCE for this heartbeat. All
+    # predicate evaluations in this turn share the same "now",
+    # making the dispatch decision deterministic and replayable.
+    _heartbeat_now = datetime.datetime.now(datetime.timezone.utc)
+    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, cumulative_miles, _heartbeat_now)
+    lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int, cumulative_miles, _heartbeat_now)
 
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(

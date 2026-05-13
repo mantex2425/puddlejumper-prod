@@ -85,6 +85,10 @@ def null_returning_builder(address, lat, lng):
 # Construction & guards
 # =============================================================================
 
+import datetime as _datetime
+_NOW_FOR_TEST = _datetime.datetime.now(_datetime.timezone.utc)
+
+
 def test_construct_without_builder_succeeds():
     q = DriverQueue(DRIVER_ID)
     assert q.driver_id == DRIVER_ID
@@ -172,7 +176,47 @@ def test_offer_ids_only_query_uses_canonical_gc_constants():
     q.offer_ids_only(cur)
 
     _, params = cur.execute.call_args[0]
-    assert params == (DRIVER_ID,) + _dq_module.live_offer_predicate_params(None)
+    # Structural shape check: production captures _now() at call
+    # time, so timestamp slots are non-deterministic at the
+    # microsecond level. Tuple shape (post-Causality-Guard 2026-05-12):
+    #   [0]    DRIVER_ID
+    #   [1]    reference_time (Causality Guard slot — NEW)
+    #   [2:7]  5 time-axis constants
+    #   [7]    reference_time (time-horizon slot)
+    #   [8:]   distance-axis params
+    # The 14-element params helper tuple plus DRIVER_ID = 15 total.
+    import datetime as _dt
+    expected = (DRIVER_ID,) + _dq_module.live_offer_predicate_params(None, _NOW_FOR_TEST)
+    assert len(params) == len(expected)
+    assert params[0] == expected[0]
+
+    # Causality Guard reference_time slot
+    assert isinstance(params[1], _dt.datetime), "causality reference_time slot must be datetime"
+    assert params[1].tzinfo is not None, "causality reference_time must be timezone-aware"
+    drift_causality = abs((params[1] - _NOW_FOR_TEST).total_seconds())
+    assert drift_causality < 60, f"causality reference_time drift {drift_causality}s — capture race?"
+
+    # 5 time-axis constants
+    assert params[2:7] == expected[2:7], "time-axis constants drifted"
+
+    # Time-horizon reference_time slot
+    assert isinstance(params[7], _dt.datetime), "time-horizon reference_time slot must be datetime"
+    assert params[7].tzinfo is not None, "time-horizon reference_time must be timezone-aware"
+    drift_horizon = abs((params[7] - _NOW_FOR_TEST).total_seconds())
+    assert drift_horizon < 60, f"time-horizon reference_time drift {drift_horizon}s — capture race?"
+
+    # NEW invariant (2026-05-12 Causality Guard): both reference_time
+    # slots in a single helper call must bind the SAME _now() capture.
+    # If they diverge, the helper accidentally called _now() twice
+    # instead of using the passed-in reference_time argument.
+    assert params[1] == params[7], (
+        "Causality Guard and time-horizon reference_time slots must bind "
+        "the same _now() capture (both come from the single reference_time "
+        "argument to live_offer_predicate_params)"
+    )
+
+    # Distance-axis params
+    assert params[8:] == expected[8:], "distance-axis params drifted"
 
 
 # =============================================================================
