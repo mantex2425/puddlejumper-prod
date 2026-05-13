@@ -328,3 +328,293 @@ def test_derive_post_offer_id_log_actions_unchanged():
     log_actions = [LogNoMatch(), LogPickupRematch("offer_A"), LogAmbiguousMatch((), "test_ambiguous")]
     assert _derive_post_offer_id(log_actions, None) is None
     assert _derive_post_offer_id(log_actions, "offer_A") == "offer_A"
+
+
+# ============================================================================
+# Phase 5 — §XIV.I Observation Before Narrative (Rule XV) regression tests
+# ============================================================================
+#
+# Added 2026-05-13 per v3 implementation plan items 13 + 14. Covers the
+# new dispatch behavior introduced in Phase 2 commit b7068f7 and the
+# Rule III construction guard introduced in Phase 1 commit 9a88e57.
+#
+# Empirical grounding: the Houston Playback test at the bottom of this
+# section reproduces the production failure from 2026-05-12 18:42:31 UTC
+# where offers 7849 (declined, created 18:33:44.374548) and 7850
+# (accepted, created 18:35:15.501361) both reached WAI as tied pickup
+# matches at byte-identical geocodes (29.715533, -95.513665). Old §5.3
+# returned LogAmbiguousMatch and no PUDO fired; new §XIV.I behavior
+# resolves the tie via recency.
+
+
+# ----------------------------------------------------------------------------
+# Rule III regression net — OfferMeta rejects naive datetimes at construction
+# ----------------------------------------------------------------------------
+
+def test_offer_meta_rejects_naive_datetime():
+    """OfferMeta.__post_init__ raises ValueError on naive datetime (Rule III).
+
+    Per CANONICAL_RULES.md §III (UTC-Mandatory) and §XIV.I temporal
+    invariant: OfferMeta.created_at must be timezone-aware UTC. The
+    constructor guard fails loud at the source rather than allowing
+    silent ordering bugs downstream from tzinfo stripping.
+    """
+    import pytest
+    naive = datetime(2026, 5, 12, 18, 35, 15)  # No tzinfo
+    with pytest.raises(ValueError, match="timezone-aware"):
+        OfferMeta(created_at=naive)
+
+
+def test_offer_meta_accepts_utc_aware_datetime():
+    """OfferMeta constructs cleanly with a UTC-aware datetime.
+
+    Positive-path sanity check paired with the negative-path test above.
+    Confirms the guard's predicate is `tzinfo is None`, not some
+    over-broad check that would reject valid UTC values.
+    """
+    aware = datetime(2026, 5, 12, 18, 35, 15, tzinfo=timezone.utc)
+    meta = OfferMeta(created_at=aware)
+    assert meta.created_at == aware
+    assert meta.created_at.tzinfo is timezone.utc
+
+
+# ----------------------------------------------------------------------------
+# §5.3 pickup case — recency tiebreaker
+# ----------------------------------------------------------------------------
+
+def test_dispatch_two_pickups_recency_winner():
+    """§XIV.I §5.3 pickup: newest created_at wins, older fires observation.
+
+    Two tied pickup matches with distinct timestamps. Dispatch must
+    emit FirePickup for the newer offer and FirePickupObservation for
+    the older. Border filter must allow both through (both in queue_metadata).
+    """
+    from dispatch import FirePickup, FirePickupObservation, dispatch
+
+    older_ts = datetime(2026, 5, 12, 18, 33, 44, 374548, tzinfo=timezone.utc)
+    newer_ts = datetime(2026, 5, 12, 18, 35, 15, 501361, tzinfo=timezone.utc)
+
+    matches = [
+        _wm("OLDER", "pickup"),
+        _wm("NEWER", "pickup"),
+    ]
+    queue_metadata = {
+        "OLDER": _meta(older_ts),
+        "NEWER": _meta(newer_ts),
+    }
+
+    actions = dispatch(matches, None, queue_metadata)
+    assert actions == [
+        FirePickup("NEWER"),
+        FirePickupObservation("OLDER"),
+    ]
+
+
+def test_dispatch_two_pickups_tied_microsecond():
+    """§XIV.I §5.3 pickup: microsecond-tied created_at falls to sort stability.
+
+    When two pickups have IDENTICAL created_at (microsecond precision tie),
+    Python's stable sort preserves input order. The match listed first
+    wins. This is implementation-defined behavior documented here so a
+    future refactor doesn't change it silently — if the team wants a
+    different secondary tiebreaker (e.g. offer_id ASC), that's a separate
+    amendment.
+    """
+    from dispatch import FirePickup, FirePickupObservation, dispatch
+
+    ts = datetime(2026, 5, 12, 18, 35, 15, 501361, tzinfo=timezone.utc)
+
+    matches = [
+        _wm("FIRST", "pickup"),
+        _wm("SECOND", "pickup"),
+    ]
+    queue_metadata = {
+        "FIRST": _meta(ts),
+        "SECOND": _meta(ts),
+    }
+
+    actions = dispatch(matches, None, queue_metadata)
+    # Stable sort: with reverse=True and identical keys, input order
+    # preserved → "FIRST" remains first → "FIRST" wins.
+    assert actions == [
+        FirePickup("FIRST"),
+        FirePickupObservation("SECOND"),
+    ]
+
+
+# ----------------------------------------------------------------------------
+# §5.3-mirror dropoff case — observe both, clear narrative
+# ----------------------------------------------------------------------------
+
+def test_dispatch_two_dropoffs_clears_narrative():
+    """§XIV.I §5.3-mirror dropoff: both observe, ClearNarrative emitted.
+
+    Two tied dropoff matches with a current_offer_id set. Dispatch must
+    emit FireDropoffObservation for both and ClearNarrative to unbind
+    current_offer_id. No FireDropoff is emitted — the dispatcher
+    explicitly refuses to commit a narrative dropoff (per §XIV.I:
+    'we'd rather be lost and right than certain and wrong').
+    """
+    from dispatch import (
+        ClearNarrative,
+        FireDropoffObservation,
+        dispatch,
+    )
+
+    older_ts = datetime(2026, 5, 12, 18, 0, 0, tzinfo=timezone.utc)
+    newer_ts = datetime(2026, 5, 12, 18, 30, 0, tzinfo=timezone.utc)
+
+    matches = [
+        _wm("RIDE_A", "dropoff"),
+        _wm("RIDE_B", "dropoff"),
+    ]
+    queue_metadata = {
+        "RIDE_A": _meta(older_ts),
+        "RIDE_B": _meta(newer_ts),
+    }
+
+    actions = dispatch(matches, "RIDE_A", queue_metadata)
+    assert actions == [
+        FireDropoffObservation("RIDE_A"),
+        FireDropoffObservation("RIDE_B"),
+        ClearNarrative(),
+    ]
+
+
+def test_dispatch_two_dropoffs_clear_with_null_current():
+    """§XIV.I §5.3-mirror dropoff with current_offer_id=None.
+
+    Same as above but no active narrative. ClearNarrative still emits
+    per Phase 4 amendment open question #2: always emit for forensic
+    consistency. The handler is an idempotent UPDATE so the no-op cost
+    is negligible.
+    """
+    from dispatch import (
+        ClearNarrative,
+        FireDropoffObservation,
+        dispatch,
+    )
+
+    ts_a = datetime(2026, 5, 12, 18, 0, 0, tzinfo=timezone.utc)
+    ts_b = datetime(2026, 5, 12, 18, 30, 0, tzinfo=timezone.utc)
+
+    matches = [
+        _wm("RIDE_A", "dropoff"),
+        _wm("RIDE_B", "dropoff"),
+    ]
+    queue_metadata = {
+        "RIDE_A": _meta(ts_a),
+        "RIDE_B": _meta(ts_b),
+    }
+
+    actions = dispatch(matches, None, queue_metadata)
+    assert actions == [
+        FireDropoffObservation("RIDE_A"),
+        FireDropoffObservation("RIDE_B"),
+        ClearNarrative(),
+    ]
+
+
+# ----------------------------------------------------------------------------
+# 3+ matches — unenumerated path unchanged
+# ----------------------------------------------------------------------------
+
+def test_dispatch_three_plus_pickups_logs_ambiguous():
+    """§XIV.I three-or-more matches: hard ambiguous, no auto-resolve.
+
+    Three pickups at the same cluster. Per amendment open question #1
+    resolution, N≥3 stays unenumerated — emit LogAmbiguousMatch with
+    reason='unenumerated_multi_match'. No recency tiebreaker applies.
+    If three same-leg matches ever appear in production, that data
+    motivates a separate amendment.
+    """
+    from dispatch import LogAmbiguousMatch, dispatch
+
+    ts = datetime(2026, 5, 12, 18, 0, 0, tzinfo=timezone.utc)
+
+    matches = [
+        _wm("A", "pickup"),
+        _wm("B", "pickup"),
+        _wm("C", "pickup"),
+    ]
+    queue_metadata = {
+        "A": _meta(ts),
+        "B": _meta(ts),
+        "C": _meta(ts),
+    }
+
+    actions = dispatch(matches, None, queue_metadata)
+    assert len(actions) == 1
+    assert isinstance(actions[0], LogAmbiguousMatch)
+    assert actions[0].reason == "unenumerated_multi_match"
+
+
+# ----------------------------------------------------------------------------
+# Houston Playback v2 — the regression net for 7849/7850
+# ----------------------------------------------------------------------------
+#
+# Reproduces the 2026-05-12 18:42:31 UTC production failure. The driver
+# paused 22.7 seconds at 0.0 mph on Bonhomme Rd, cluster confidence rose
+# to 0.94, WAI emitted both 7849 (declined) and 7850 (accepted) as tied
+# pickup matches at byte-identical geocodes. Old §5.3 returned
+# LogAmbiguousMatch — no PUDO fired, current_offer_id never set,
+# actual_pickup_at never stamped on either row.
+#
+# Empirical timestamps (from app_private.offer_history production data):
+#   7849.created_at = 2026-05-12 18:33:44.374548 UTC  (DECLINE)
+#   7850.created_at = 2026-05-12 18:35:15.501361 UTC  (ACCEPT)
+#   Δ = +91.126813 seconds
+#   Pickup geocode: 29.715533, -95.513665 (byte-identical)
+#   Fares: $3.60 → $5.16 (Uber re-bid surcharge)
+#
+# If this test ever fails, Auto Nail It just regressed on the re-bid
+# scenario. That's the production-blocking bug class this entire
+# amendment exists to prevent.
+
+def test_houston_playback_7849_7850_redispatch():
+    """Houston Playback v2: real 7849/7850 timestamps reproduce §XIV.I behavior.
+
+    Replays the 2026-05-12 18:42:31 dispatch state with the actual
+    OfferHistory.created_at values from production. Asserts that the
+    accepted offer 7850 (newer) wins the narrative and the declined
+    offer 7849 (older) fires observation-only.
+
+    This is the regression net. Auto Nail It restoration for the re-bid
+    class of failures rests on this test continuing to pass.
+    """
+    from dispatch import FirePickup, FirePickupObservation, dispatch
+
+    # Real production timestamps. NEVER fabricate these — they are the
+    # empirical anchor that proves the dispatch behavior matches the
+    # 7849/7850 scenario byte-for-byte.
+    ts_7849 = datetime(2026, 5, 12, 18, 33, 44, 374548, tzinfo=timezone.utc)
+    ts_7850 = datetime(2026, 5, 12, 18, 35, 15, 501361, tzinfo=timezone.utc)
+
+    # Both matches at tied confidence (the production state — both
+    # cleared the lost-mode floor with POI lift). Dispatch doesn't
+    # inspect confidence per §3 step 3d; the value is irrelevant to
+    # this test's assertion.
+    matches = [
+        _wm("7849", "pickup", confidence=0.94),
+        _wm("7850", "pickup", confidence=0.94),
+    ]
+    queue_metadata = {
+        "7849": _meta(ts_7849),
+        "7850": _meta(ts_7850),
+    }
+
+    # Driver had not yet committed to any offer's narrative when the
+    # cluster fired at 18:42:31 — current_offer_id was None.
+    actions = dispatch(matches, None, queue_metadata)
+
+    # The fix in action: 7850 (later created_at) wins, 7849 observes.
+    assert actions == [
+        FirePickup("7850"),
+        FirePickupObservation("7849"),
+    ], (
+        f"Houston Playback 7849/7850 regression: expected "
+        f"[FirePickup('7850'), FirePickupObservation('7849')], got {actions!r}. "
+        f"This test reproduces the 2026-05-12 18:42:31 production failure; "
+        f"a regression here means Auto Nail It is broken on the re-bid scenario."
+    )
+
