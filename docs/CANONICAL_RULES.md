@@ -416,6 +416,199 @@ When the `ClearNarrative` path fires (the §5.3-mirror dropoff case), the JSONB 
 
 ---
 
+## §XIV.J — Live-PG Test Floor
+
+**Status:** Canonical (ratified 2026-05-13)
+**Date:** 2026-05-13 (revised)
+**Origin:** Rule XVI B-2 RealDictRow positional-unpack bug, which shipped to
+production despite 611 passing tests because every test mocked
+`cur.fetchone()` to return tuples rather than using real RealDictRow.
+**Precedent:** Test infrastructure for real-PG already exists in
+`tests/conftest.py` — `db_cur` fixture (SAVEPOINT/ROLLBACK per test),
+`pg_conn` (session-scoped connection), `_janitor` (autouse session
+teardown), sentinel discipline (`TEST_GC_<datestamp>_<uuid>`). The
+infrastructure is exemplary; the rule formalizes WHEN to use it.
+
+---
+
+## The Rule
+
+Tests that exercise database-touching code paths MUST use the
+`db_cur` fixture (or equivalent SAVEPOINT-isolated real-PG cursor),
+not MagicMock cursors.
+
+## The Three Rationales (priority order)
+
+### 1. Row-shape correctness
+
+Cursor row classes (`RealDictRow`, `NamedTupleCursor.Record`, default tuple)
+have different iteration, indexing, and unpacking semantics. Mocks model
+only one of these and pass when production code uses another. A mock
+configured with `cur.fetchone.return_value = ("ts", 5.0)` will pass for any
+test that uses positional unpack, regardless of whether production code
+runs against a RealDictCursor where the same unpack yields keys.
+
+The B-2 hotfix bug demonstrates this directly. The line
+`arrest_started_at_post, arrest_counter_s_post = cur.fetchone()`
+worked in 611 tests because every mock returned a tuple. In production
+it returned a RealDictRow, which iterates as `('arrest_started_at',
+'arrest_counter_s')` — the column NAMES, not values. Production threw
+TypeError on every heartbeat. No test would have caught this without
+running against a real cursor.
+
+### 2. Type fidelity
+
+psycopg2's type adapters convert Postgres types to Python types at fetch
+time. `real → float`, `timestamptz → datetime`, `numeric → Decimal`,
+`text[] → list`, `jsonb → dict`. Mocks bypass these adapters entirely.
+
+A test that asserts `result.value == 5.0` will pass whether the production
+code receives `5.0` (correct), `Decimal('5.0')` (silent corruption when
+later used in JSON serialization), or `"5.0"` (silent corruption on
+arithmetic comparison). Real cursors expose type mismatches at the
+fetch boundary where they belong.
+
+### 3. SQL correctness
+
+A mock cursor accepts any query string — including syntactically invalid
+SQL, references to nonexistent columns, ambiguous joins, broken alias
+chains. The production cursor parses every query. Real-PG tests catch
+SQL errors at test time; mock tests defer them to production heartbeats.
+
+The Sprint A predicate-alias bug (`bug-4`, diagnosed 2026-05-10 via the
+first live-DB test in the suite) is the canonical example: a bare-table
+FROM clause that worked in unit tests because the mock never JOINed,
+but failed in production with `AmbiguousColumn` whenever the predicate
+was composed with `decision_log`.
+
+## The Fixture and the Isolation Pattern
+
+The test infrastructure already exists. The `db_cur` fixture in
+`tests/conftest.py` provides:
+
+- **A real psycopg2 cursor** against the production database (RealDictCursor
+  by default).
+- **SAVEPOINT isolation** per test: `cur.execute("SAVEPOINT test_savepoint")`
+  at fixture setup, `ROLLBACK TO SAVEPOINT test_savepoint` at teardown.
+  Each test can INSERT/UPDATE/DELETE freely; nothing persists.
+- **Sentinel-tagged test data**: tests should use the `test_driver_id`
+  fixture (which produces a `TEST_GC_<datestamp>_<uuid>` value) for any
+  driver_id they create, so the session-end janitor can sweep any rows
+  that escaped rollback (segfault, kill -9, etc.).
+
+A canonical real-PG test:
+
+```python
+from psycopg2.extras import RealDictCursor
+
+def test_arrest_counter_realdictrow_unpack(db_cur, test_driver_id, seed_decision_log):
+    """Regression: positional-unpacking RealDictRow.fetchone() yields KEYS,
+    not values. The B-2 hotfix bug demonstrated this. The matcher must
+    access fields by key.
+    """
+    # Set up: insert a driver_trip_state row for this test driver.
+    db_cur.execute("""
+        INSERT INTO app_private.driver_trip_state
+            (driver_id, arrest_counter_s, arrest_started_at)
+        VALUES (%s, 7.5, NOW())
+    """, (test_driver_id,))
+
+    # Exercise: the UPDATE...RETURNING pattern from driver_heartbeat.py.
+    db_cur.execute("""
+        UPDATE app_private.driver_trip_state
+        SET arrest_counter_s = 8.0
+        WHERE driver_id = %s
+        RETURNING arrest_started_at, arrest_counter_s
+    """, (test_driver_id,))
+    row = db_cur.fetchone()
+
+    # Assertions (the doctrine):
+    # Key access yields the value, correctly typed.
+    assert isinstance(row['arrest_counter_s'], float)
+    assert row['arrest_counter_s'] == 8.0
+
+    # Positional unpack yields KEYS, not values. The negative assertion
+    # makes the bug pattern permanent regression: any future code that
+    # unpacks positionally will fail this test.
+    a, b = row
+    assert a == 'arrest_started_at'
+    assert b == 'arrest_counter_s'
+```
+
+The savepoint rolls back at teardown; the inserted row vanishes; the next
+test starts from the same clean state.
+
+## Migration Path
+
+Existing tests that use MagicMock cursors are **grandfathered**. They
+are not retroactively migrated.
+
+**New tests** for code that calls `cur.execute()` directly, or that
+depends on specific Postgres types being returned, MUST use `db_cur`.
+
+**Bug-fix tests** that demonstrate "the existing tests should have caught
+this" MUST migrate as part of the fix. The B-2 hotfix is the precedent.
+
+**Logic-only tests** (math, dispatch case resolution, pure functions) can
+remain MagicMock-based. Real-PG tests are not a hammer for nails that
+don't exist.
+
+## Known Limitation (until Sub-step B lands)
+
+`db_cur`'s SAVEPOINT chain is destroyed if the code under test calls
+`conn.commit()`. The heartbeat handler commits at the end of every
+heartbeat. So **end-to-end tests of `post_heartbeat()` cannot use
+`db_cur` today** — they would need the commit-suppression infrastructure
+documented in conftest.py's docstring ("Sub-step B").
+
+Workaround: test the subcomponents in isolation. The B-2 unpack bug can
+be tested without invoking `post_heartbeat()` — exercise the UPDATE +
+fetchone + unpack pattern as its own unit (as in the canonical example
+above). When commit-suppression lands, integration tests of `post_heartbeat()`
+can use the same infrastructure.
+
+## Convention Summary
+
+- Use `db_cur` for the cursor.
+- Use `test_driver_id` for any driver_id.
+- Use `seed_decision_log` / `seed_offer_history` fixtures (already in
+  conftest.py) when you need a row to test against.
+- Default to `RealDictCursor` cursor_factory unless the production code
+  under test uses a different one.
+- Assert both the positive case (key access works) and the negative case
+  (unpack yields keys not values) when the test is regression-shaped.
+
+## What This Replaces
+
+Implicit assumption: "Mock cursors with hand-computed SQL return values
+are sufficient because tests exercise function behavior, not SQL
+correctness."
+
+That assumption was wrong. Tests that exercise function behavior at the
+cursor boundary inherit the cursor's behavior; mocking the cursor means
+the tests pass against an imaginary cursor and silently diverge from
+production.
+
+## The Discipline
+
+- When writing a new test for code that touches the cursor, default to
+  `db_cur`. Reach for MagicMock only when the test is pure function logic
+  with no cursor interaction.
+- When fixing a bug that "the tests should have caught," add a `db_cur`
+  test as part of the fix. Do not rely on retrospective audit; bug-driven
+  migration is the migration path.
+- When a test file becomes a candidate for full real-PG migration (e.g.,
+  every test in it touches the cursor), file an issue and migrate the
+  whole file rather than letting the conventions diverge within one file.
+- When the test under design genuinely needs end-to-end orchestration
+  through `post_heartbeat()` or other commit-calling code, **flag it as
+  Sub-step B work** — don't try to mock the cursor as a workaround. The
+  workaround is the rot this rule exists to prevent.
+
+> The mock matches itself. The real cursor matches Postgres.
+
+---
+
 ## XV. OBSERVATION BEFORE NARRATIVE
 
 The PUDO system exists primarily to populate two fundamental caches:
