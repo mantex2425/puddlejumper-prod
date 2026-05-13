@@ -34,8 +34,8 @@ revision.
 The 4-box discipline question to ask before any code (Section VIII end)
 remains operative regardless of file-assignment drift.
 
-Sections I, II, IV, V, VI (post-trim), VII, XIII (post-amendment), and the
-new Section XIV are fully current.
+Sections I, II, IV, V, VI (post-trim), VII, XIII (post-amendment), XIV, and
+the new Section XV are fully current.
 
 ---
 
@@ -334,6 +334,103 @@ Bare-table FROM clauses (no alias) will fail at runtime with `AmbiguousColumn` w
 **Drift gate.** `tests/test_driver_queue.py::test_offer_ids_only_and_project_offers_share_where_clause` enforces source-textual identity between the two driver_queue call sites. Adding a third call site in driver_queue.py requires extending this test or factoring out a similar guard.
 
 **Exceptions.** Out-of-band scripts (replay, backtest, harvest, drive_review) may query historical data without the predicate. Each such call site must be documented in `docs/out_of_band_offer_history_queries.md` with the reason for exception. (This file does not yet exist; the first out-of-band script to claim an exception creates it.)
+
+### I. Asymmetric Ambiguity Handling (Dispatch §5.3 + §5.3-mirror)
+
+Implements Rule XV (Observation Before Narrative) at the dispatch layer.
+
+When `WhereAmI.evaluate()` emits multiple matches at the same `location_type` (i.e., two pickups or two dropoffs at the same geocode — the §5.3 cases), dispatch handles the two cases **asymmetrically** because the recoverability profiles differ.
+
+**Pickup ambiguity is recoverable; dropoff ambiguity is not.**
+
+#### Two pickups, same geocode (§5.3 pickup case)
+
+The common cause is an Uber re-bid: same passenger re-thrown as a new offer ID after a decline timeout. Less commonly: two independent passengers requesting from the same building.
+
+**Resolution:**
+
+1. Sort the tied pickup matches by `OfferMeta.created_at` descending. The most recently received offer is the **narrative winner**.
+2. Emit `FirePickup(winner)` to set `current_offer_id = winner.offer_id`.
+3. Emit `FirePickupObservation(loser)` for every other tied pickup. Each such action stamps `offer_history.actual_pickup_at` for that offer but does NOT touch `current_offer_id`.
+
+**Why recency is the tiebreaker:** in the re-bid case, the later offer supersedes the earlier per Uber's dispatch semantics. In the rare independent-passenger case, recency is the best available default and the error is bounded — GPS truth at the dropoff phase will trigger §X Implicit Cancellation (Case D in dispatch) and correct the narrative within a single ride cycle. Cache observations are correct in both cases.
+
+**Why not `app_verdict`:** acceptance state is a downstream concern. The PUDO matching layer treats all queued offers as equally valid observation candidates; branching on accept/decline at this layer would conflate observation with narrative and violate Rule XV. Recency (`created_at`) is a queue-physics fact available to dispatch through `OfferMeta` and sufficient on its own.
+
+#### Two dropoffs, same geocode (§5.3-mirror dropoff case)
+
+Possible causes: shared-ride (pool) drop, two stacked rides ending at the same building, geocode noise. The dispatcher cannot distinguish among these from within its boundary.
+
+**Resolution:**
+
+1. Emit `FireDropoffObservation(o)` for every tied dropoff. Each stamps `offer_history.actual_dropoff_at` for that offer.
+2. Emit `ClearNarrative()`. This sets `current_offer_id = NULL`, placing the system in observe-only mode awaiting the next anchoring event.
+3. Do not emit any `FireDropoff` (narrative dropoff). The narrative is explicitly unknown after this point.
+
+**Why no narrative commit:** dropoff ambiguity has no GPS-recoverable downstream — the next event is a new ride, so a wrong dropoff commit would corrupt the narrative going forward with no self-correcting signal. Better to honestly clear the narrative than to commit wrong.
+
+#### Three-or-more matches, any combination
+
+Treat as unenumerated. Emit `LogAmbiguousMatch` and do not modify state. This is genuine architectural ambiguity (e.g., three concurrent matches at the same cluster) and should not be silently auto-resolved. If N≥3 ever appears in production, that data motivates a separate amendment.
+
+#### Dispatcher signature
+
+To support these decisions, `dispatch()` accepts a `queue_metadata` parameter:
+
+```python
+def dispatch(
+    matches: list[WAIMatch],
+    current_offer_id: Optional[str],
+    queue_metadata: dict[str, OfferMeta],
+) -> list[Action]
+```
+
+Where `OfferMeta` is defined narrowly:
+
+```python
+@dataclass(frozen=True)
+class OfferMeta:
+    created_at: datetime  # UTC-aware; timestamp from offer_history.created_at
+```
+
+**Strict scope:** `OfferMeta` carries exactly the data dispatch needs for the recency tiebreaker, and nothing else. It does NOT carry `app_verdict`, `fare`, or any other field. Future tiebreaker scenarios that require additional context are separate amendments with their own justification.
+
+**Temporal invariant.** `OfferMeta.created_at` must be timezone-aware UTC per Rule III. The dataclass enforces this via `__post_init__`; any caller that constructs `OfferMeta` from a naive datetime fails at construction, not at the downstream comparison. This prevents silent ordering bugs from tzinfo stripping anywhere in the snapshot path.
+
+The previous `queue_offer_ids: set[str]` parameter is removed — `queue_metadata.keys()` provides the equivalent border filter.
+
+#### Forensic record
+
+When the recency tiebreaker fires (the §5.3 pickup case), the JSONB `tad_decision_context` grows a `narrative_tiebreaker` field:
+
+```json
+"narrative_tiebreaker": {
+    "winner": "7850",
+    "losers": ["7849"],
+    "signal": "created_at",
+    "winner_created_at": "2026-05-12T18:35:15.501361+00:00"
+}
+```
+
+When the `ClearNarrative` path fires (the §5.3-mirror dropoff case), the JSONB records the same shape with `signal: "ambiguous_clear"` and no winner. This makes the "I'd rather be lost and right than certain and wrong" decision visible to forensic queries (§V Flight Recorder).
+
+---
+
+## XV. OBSERVATION BEFORE NARRATIVE
+
+The PUDO system exists primarily to populate two fundamental caches:
+
+1. **The Pricing Cache:** Every identified Pickup records fare and price signals. This builds the per-location value model that drives our offer-scoring intelligence.
+
+2. **The Geographic Cache:** Every identified Pickup *and* Dropoff records coordinates. This "pins" the location in our private map, displacing future Google API calls (the "Google Tax").
+
+**The Operational Mandate:** Observation is the primary output; Narrative is the secondary output. Cache writes must fire whenever a PUDO event is identified, regardless of narrative certainty. While the trip narrative (`current_offer_id`) requires absolute disambiguation to avoid corruption, the caches thrive on volume.
+
+**In Practice:** If the system sees an ambiguity (e.g., two pickups at the same spot), it must fire observations for both to capture the data, even if it defers the narrative commit to avoid a state-machine error.
+
+> "We would rather have a perfectly populated map and a 'Lost' narrative than a 'Found' narrative and a blank map."
+
+**Architectural implication.** The dispatcher emits two distinct families of actions: **narrative actions** (`FirePickup`, `FireDropoff`) which set or clear `current_offer_id`, and **observation actions** (`FirePickupObservation`, `FireDropoffObservation`, `ClearNarrative`) which write to the location/pricing caches without touching narrative state. See §XIV.I for the case-resolution semantics.
 
 ---
 
