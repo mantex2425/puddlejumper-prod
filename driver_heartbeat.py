@@ -924,6 +924,8 @@ def _log_decision_context(
     lost_mode=False,                    # [3b.R]
     last_known_anchor_id=None,          # [3b.R]
     queue_metadata=None,                # [Phase 4]
+    arrest_started_at_post=None,        # [Rule XVI B-2]
+    arrest_counter_s_post=None,         # [Rule XVI B-2]
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -993,7 +995,8 @@ def _log_decision_context(
             dispatch_executed, dispatch_error,
             motion_gate_result, odometer_gate_result,
             gate_held_offer_ids, gate_held_legs,
-            tad_decision_context
+            tad_decision_context,
+            arrest_started_at, arrest_duration_s
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
@@ -1007,7 +1010,8 @@ def _log_decision_context(
             %s, %s,
             %s, %s,
             %s, %s,
-            %s
+            %s,
+            %s, %s
         )
         """,
         (
@@ -1040,6 +1044,11 @@ def _log_decision_context(
             (gate_verdict.held_offer_ids_and_legs()[0] if gate_verdict else None),
             (gate_verdict.held_offer_ids_and_legs()[1] if gate_verdict else None),
             tad_decision_context,    # [3b.R]
+            # Rule XVI B-2: forensic record of the arrest counter state.
+            # Threaded as function params from post_heartbeat() where the
+            # driver_trip_state UPDATE's RETURNING clause captured them.
+            arrest_started_at_post,
+            arrest_counter_s_post,
         ),
     )
 
@@ -1125,11 +1134,39 @@ def post_heartbeat():
     # dist_to_target_m, stopped_seconds, required_stopped_seconds). The
     # /driver/status endpoint uses null-safe .get() and surfaces missing
     # fields as null — honest representation of "this concept is gone."
+    # Rule XVI B-2: arrest counter. SQL-side CASE atomically maintains
+    # arrest_started_at and arrest_counter_s based on prior state +
+    # current speed_mph. RETURNING pulls the post-update values back into
+    # Python for the pudo_decision_context forensic write below.
+    #
+    # Bare NOW() per Rule III: column type is timestamptz, NOW() returns
+    # timestamptz, no AT TIME ZONE conversion needed. PostgreSQL evaluates
+    # all SET expressions against the pre-update row state, so
+    # arrest_counter_s's CASE reads the OLD arrest_started_at, not the
+    # one being assigned in the same SET clause.
+    #
+    # speed_mph IS NULL is treated as "moving" (counter resets) — safest
+    # default for missing-data heartbeats.
     cur.execute("""
         UPDATE app_private.driver_trip_state
         SET heartbeat = %s::jsonb,
-            heartbeat_at = NOW()
+            heartbeat_at = NOW(),
+            arrest_started_at = CASE
+                WHEN %s::real = 0.0 AND arrest_started_at IS NULL
+                    THEN NOW()
+                WHEN %s::real = 0.0 AND arrest_started_at IS NOT NULL
+                    THEN arrest_started_at
+                ELSE NULL
+            END,
+            arrest_counter_s = CASE
+                WHEN %s::real = 0.0 AND arrest_started_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (NOW() - arrest_started_at))::real
+                WHEN %s::real = 0.0 AND arrest_started_at IS NULL
+                    THEN 0.0
+                ELSE NULL
+            END
         WHERE driver_id = %s
+        RETURNING arrest_started_at, arrest_counter_s
     """, (json.dumps({
         "lat": current_lat,
         "lng": current_lng,
@@ -1137,7 +1174,16 @@ def post_heartbeat():
         "gps_accuracy_m": gps_accuracy_m,
         "cumulative_miles": cumulative_miles,
         "received_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }), driver_id))
+    }), speed_mph, speed_mph, speed_mph, speed_mph, driver_id))
+
+    # Capture the post-UPDATE counter state to thread into _log_decision_context.
+    # Defensive: if the driver row doesn't exist (shouldn't happen post-LOAD
+    # in the same transaction, but guard anyway), default to None/None.
+    _arrest_row = cur.fetchone()
+    if _arrest_row is not None:
+        arrest_started_at_post, arrest_counter_s_post = _arrest_row
+    else:
+        arrest_started_at_post, arrest_counter_s_post = None, None
 
     # ── HEARTBEAT_LOG (flight recorder for cluster detection) ───────
     # cluster_detection.detect_cluster + pivot_context + bead_on_wire
@@ -1233,6 +1279,8 @@ def post_heartbeat():
             lost_mode=lost_mode,                          # [3b.R]
             last_known_anchor_id=last_known_anchor_id,    # [3b.R]
             queue_metadata=queue_metadata,                # [Phase 4]
+            arrest_started_at_post=arrest_started_at_post,    # [Rule XVI B-2]
+            arrest_counter_s_post=arrest_counter_s_post,      # [Rule XVI B-2]
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is
