@@ -16,6 +16,7 @@ Coverage: 7 test functions, 15 parametrize items.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal
 
 import pytest
@@ -28,7 +29,7 @@ from dispatch import (
     LogPickupRematch,
     dispatch,
 )
-from pudo_types import WAIMatch
+from pudo_types import OfferMeta, WAIMatch
 
 
 # ============================================================================
@@ -54,6 +55,20 @@ def _wm(
     )
 
 
+def _meta(created_at: datetime | None = None) -> OfferMeta:
+    """Sentinel OfferMeta for test queue_metadata dicts.
+
+    Phase 2 migration helper. Most dispatch tests don't exercise the
+    recency tiebreaker, so the timestamp value is irrelevant — any
+    UTC-aware datetime satisfies OfferMeta.__post_init__. Pass a
+    specific created_at when the test needs to control ordering
+    (e.g., the §5.3 recency tiebreaker test in Phase 5).
+    """
+    if created_at is None:
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return OfferMeta(created_at=created_at)
+
+
 # Match shapes referenced by parametrize rows (keeps each row readable
 # and lets the expected LogAmbiguousMatch.candidates tuple be built
 # from the same source).
@@ -73,25 +88,25 @@ _M_THREE_MATCH = [
 
 
 @pytest.mark.parametrize(
-    "matches, queue_offer_ids",
+    "matches, queue_metadata",
     [
-        pytest.param([], set(), id="empty_match_list"),
+        pytest.param([], {}, id="empty_match_list"),
         pytest.param(
             [_wm("STALE_A", "pickup"), _wm("STALE_B", "dropoff")],
-            {"123"},
+            {"123": _meta()},
             id="all_stale_border_filter",
         ),
     ],
 )
-def test_case_a_no_match(matches, queue_offer_ids):
+def test_case_a_no_match(matches, queue_metadata):
     """§4 Case A: empty (or fully-filtered) match list -> LogNoMatch.
 
     Border filter coverage: matches whose offer_ids are absent from
-    queue_offer_ids are silently dropped per §10 A8 belt-and-suspenders.
+    queue_metadata are silently dropped per §10 A8 belt-and-suspenders.
     With every match dropped, the function reaches Case A naturally.
     No Action is emitted for the dropped matches themselves.
     """
-    actions = dispatch(matches, None, queue_offer_ids)
+    actions = dispatch(matches, None, queue_metadata)
     assert actions == [LogNoMatch()]
 
 
@@ -103,7 +118,7 @@ def test_case_a_no_match(matches, queue_offer_ids):
 def test_case_b_single_pickup_no_active():
     """§4 Case B: pickup match, current_offer_id=None -> FirePickup."""
     matches = [_wm("123", "pickup")]
-    actions = dispatch(matches, None, {"123"})
+    actions = dispatch(matches, None, {"123": _meta()})
     assert actions == [FirePickup("123")]
 
 
@@ -115,7 +130,7 @@ def test_case_b_single_pickup_no_active():
 def test_case_c_dropoff_of_active():
     """§4 Case C: dropoff match, current_offer_id == matched_id."""
     matches = [_wm("123", "dropoff")]
-    actions = dispatch(matches, "123", {"123"})
+    actions = dispatch(matches, "123", {"123": _meta()})
     assert actions == [FireDropoff("123")]
     # outcome=None means the wiring layer logs INFO (normal completion);
     # contrast with Case D's "canceled" and Case F's "pickup_missed".
@@ -135,7 +150,7 @@ def test_case_d_implicit_cancel_then_pickup():
     equality in Python is positional, so == comparison verifies order.
     """
     matches = [_wm("NEW", "pickup")]
-    actions = dispatch(matches, "OLD", {"NEW", "OLD"})
+    actions = dispatch(matches, "OLD", {"NEW": _meta(), "OLD": _meta()})
     assert actions == [
         FireDropoff("OLD", outcome="canceled"),
         FirePickup("NEW"),
@@ -192,16 +207,13 @@ def test_case_d_implicit_cancel_then_pickup():
             )],
             id="52_hot_swap_broken_fail_closed",
         ),
-        # §5.3 two pickups -- ambiguous by design
-        pytest.param(
-            _M_TWO_PICKUPS,
-            None,
-            [LogAmbiguousMatch(
-                candidates=tuple(_M_TWO_PICKUPS),
-                reason="two_pickups",
-            )],
-            id="53_two_pickups_fail_closed",
-        ),
+        # §5.3 two-pickups case removed in Phase 2 (2026-05-13). Old
+        # assertion was LogAmbiguousMatch(reason="two_pickups"); new
+        # behavior per CANONICAL_RULES.md §XIV.I is a recency tiebreaker
+        # emitting [FirePickup(winner), FirePickupObservation(loser)].
+        # Coverage restored by dedicated tests in Phase 5 per v3 plan
+        # item 13 (test_dispatch_two_pickups_recency_winner +
+        # test_dispatch_two_dropoffs_clears_narrative).
         # 3+ matches -- unenumerated by §4/§5. Fail closed.
         pytest.param(
             _M_THREE_MATCH,
@@ -216,9 +228,9 @@ def test_case_d_implicit_cancel_then_pickup():
 )
 def test_case_e_disambiguation(matches, current_offer_id, expected):
     """§4 Case E + §5.1 / §5.2 / §5.3 disambiguation rules + fail-closed."""
-    queue = {m.offer_id for m in matches}
+    queue = {m.offer_id: _meta() for m in matches}
     if current_offer_id is not None:
-        queue.add(current_offer_id)
+        queue[current_offer_id] = _meta()
     actions = dispatch(matches, current_offer_id, queue)
     assert actions == expected
 
@@ -246,9 +258,9 @@ def test_case_f_dropoff_missed_pickup(current_offer_id):
     Uber-pin-quality drift.
     """
     matches = [_wm("123", "dropoff")]
-    queue = {"123"}
+    queue = {"123": _meta()}
     if current_offer_id is not None:
-        queue.add(current_offer_id)
+        queue[current_offer_id] = _meta()
     actions = dispatch(matches, current_offer_id, queue)
     assert actions == [FireDropoff("123", outcome="pickup_missed")]
     # Explicit assertion on the outcome flag -- central to Case F semantics
@@ -270,7 +282,7 @@ def test_case_g_pickup_rematch_while_active():
     logs DEBUG; no state change.
     """
     matches = [_wm("123", "pickup")]
-    actions = dispatch(matches, "123", {"123"})
+    actions = dispatch(matches, "123", {"123": _meta()})
     assert actions == [LogPickupRematch("123")]
 
 

@@ -47,7 +47,7 @@ from dispatch import (
     FirePickup, FireDropoff,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
-from pudo_types import Offer, TargetSpec
+from pudo_types import Offer, OfferMeta, TargetSpec
 from motion_gate import (
     GateVerdict,
     evaluate_gates,
@@ -855,6 +855,15 @@ def post_heartbeat():
     snap = queue.snapshot(cur)
     current_offer_id = snap.bound_offer_id
     queue_offer_ids = set(snap.offer_ids)
+    # Phase 2 (§XIV.I): OfferMeta.created_at reads from offer.accepted_at
+    # because the Offer dataclass field is misnamed — it actually carries
+    # offer_history.created_at (no accepted_at column exists on the table;
+    # the misnaming dates to commit 6e1d60f, sub-step 1b.1). Tracked in
+    # docs/DEBT.md under "Phase 3: Lexical Alignment" for separate rename.
+    queue_metadata = {
+        str(offer.offer_id): OfferMeta(created_at=offer.accepted_at)
+        for offer in snap.offers
+    }
 
     # ── HEARTBEAT (preserve API contract for /driver/status) ─────────
     # Per Option H1 (ratified Sprint A): keep GPS/motion fields with real
@@ -940,7 +949,7 @@ def post_heartbeat():
     gated_matches = filter_matches_by_gates(matches, gate_verdict)
 
     # ── DECIDE ───────────────────────────────────────────────────────
-    actions = dispatch(gated_matches, current_offer_id, queue_offer_ids)
+    actions = dispatch(gated_matches, current_offer_id, queue_metadata)
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster

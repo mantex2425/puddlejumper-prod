@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Union
 
-from pudo_types import WAIMatch
+from pudo_types import OfferMeta, WAIMatch
 
 
 # ============================================================================
@@ -151,22 +151,22 @@ Action = Union[
 def dispatch(
     matches: list[WAIMatch],
     current_offer_id: Optional[str],
-    queue_offer_ids: set[str],
+    queue_metadata: dict[str, OfferMeta],
 ) -> list[Action]:
     """Map WAI matches against current_offer_id memory to side-effect Actions.
 
     Pure function. No I/O. Implements SIMPLIFIED_ARCHITECTURE.md §4 Cases
-    A-G and §5 disambiguation rules.
+    A-G and §5 disambiguation rules. Implements CANONICAL_RULES.md §XIV.I
+    asymmetric ambiguity handling at the §5.3 cases.
 
     Args:
         matches: list[WAIMatch] from WAI.evaluate(). May be empty.
         current_offer_id: 1-bit memory of active ride (None or offer_id).
-        queue_offer_ids: offer_ids currently in the driver's queue. Used as
-            a defensive border filter -- matches for offer_ids not in the
-            queue are silently dropped before case resolution. Per §10 A8
-            WAI evaluates against the queue and should not return stale
-            matches; this filter is belt-and-suspenders against a WAI bug.
-            Silent drop (no Action emitted) preserves downstream case logic.
+        queue_metadata: per-offer metadata for offers currently in the
+            driver's queue, keyed by offer_id. Used both as a defensive
+            border filter (matches for offer_ids not in queue_metadata
+            are silently dropped) and as the source of OfferMeta.created_at
+            for the §5.3 recency tiebreaker per §XIV.I.
 
     Returns:
         list[Action] for the wiring layer to execute. Ordering matters for
@@ -175,7 +175,7 @@ def dispatch(
     # Border filter: silently drop any match whose offer_id is not in the
     # active queue. Per §10 A8, WAI shouldn't produce these; this guard
     # keeps a WAI bug from cascading into a stale-offer fire.
-    matches = [m for m in matches if m.offer_id in queue_offer_ids]
+    matches = [m for m in matches if m.offer_id in queue_metadata]
 
     # Case A: empty match list ------------------------------------------
     if not matches:
@@ -187,7 +187,7 @@ def dispatch(
 
     # Two matches: §5.1 errands, §5.2 hot-swap, §5.3 ambiguous ----------
     if len(matches) == 2:
-        return _dispatch_pair(matches, current_offer_id)
+        return _dispatch_pair(matches, current_offer_id, queue_metadata)
 
     # Three+ matches: unenumerated, fail closed -------------------------
     return [LogAmbiguousMatch(
@@ -230,8 +230,14 @@ def _dispatch_single(
 def _dispatch_pair(
     matches: list[WAIMatch],
     current_offer_id: Optional[str],
+    queue_metadata: dict[str, OfferMeta],
 ) -> list[Action]:
-    """Two-match resolution. §5.1 errands, §5.2 hot-swap, §5.3 ambiguous."""
+    """Two-match resolution. §5.1 errands, §5.2 hot-swap, §5.3 asymmetric.
+
+    Per CANONICAL_RULES.md §XIV.I: the §5.3 same-location-type cases are
+    asymmetric. Two pickups apply the recency tiebreaker; two dropoffs
+    clear the narrative and fire observations only.
+    """
     m1, m2 = matches[0], matches[1]
     types = {m1.location_type, m2.location_type}
 
@@ -271,19 +277,30 @@ def _dispatch_pair(
             reason="hot_swap_without_matching_active",
         )]
 
-    # §5.3 + fail closed: two pickups, two dropoffs, or other ----------
+    # §XIV.I asymmetric ambiguity: pickups vs dropoffs handled differently.
     if types == {"pickup"}:
-        # §5.3 explicitly: two pickups -> ambiguous
-        return [LogAmbiguousMatch(
-            candidates=tuple(matches),
-            reason="two_pickups",
-        )]
+        # §5.3 pickup case: recency tiebreaker. Newest created_at wins the
+        # narrative; all losers fire observation-only actions to populate
+        # the caches. OfferMeta.created_at is guaranteed UTC-aware by its
+        # constructor (Rule III); naive comparisons cannot reach this sort.
+        sorted_matches = sorted(
+            matches,
+            key=lambda m: queue_metadata[m.offer_id].created_at,
+            reverse=True,
+        )
+        winner, *losers = sorted_matches
+        return (
+            [FirePickup(winner.offer_id)]
+            + [FirePickupObservation(loser.offer_id) for loser in losers]
+        )
     if types == {"dropoff"}:
-        # Mirror of §5.3 for dropoffs. Unenumerated by §5 but symmetric.
-        return [LogAmbiguousMatch(
-            candidates=tuple(matches),
-            reason="two_dropoffs",
-        )]
+        # §5.3-mirror: dropoff ambiguity is non-recoverable. Fire observation
+        # actions for cache fidelity, then clear the narrative to enter
+        # observe-only mode awaiting next anchoring event (per §XIV.I).
+        return (
+            [FireDropoffObservation(m.offer_id) for m in matches]
+            + [ClearNarrative()]
+        )
 
     # Defensive: should not reach here given the type-set possibilities
     # ({"pickup"}, {"dropoff"}, {"pickup", "dropoff"}). Keeps the function

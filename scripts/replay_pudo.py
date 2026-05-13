@@ -74,7 +74,7 @@ import psycopg2.extras
 from where_am_i import WhereAmI  # noqa: E402
 from cluster_detection import detect_cluster, get_recent_clusters, Cluster  # noqa: E402
 from dispatch import dispatch  # noqa: E402
-from pudo_types import Offer, TargetSpec  # noqa: E402
+from pudo_types import Offer, OfferMeta, TargetSpec  # noqa: E402
 from bead_on_wire import classify_address  # noqa: E402
 
 import math
@@ -445,7 +445,11 @@ def replay(offer_id, time_window_utc=None, backfill=False):
 
         # Dispatch
         try:
-            actions = dispatch(matches, current_offer_id=None, queue_offer_ids={str(offer['id'])})
+            actions = dispatch(
+                matches,
+                current_offer_id=None,
+                queue_metadata={str(offer['id']): OfferMeta(created_at=offer['created_at'])},
+            )
         except Exception as e:
             print(f"  {ts_label}  DISPATCH ERROR: {e}")
             continue
