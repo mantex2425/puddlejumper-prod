@@ -149,3 +149,37 @@ class WAIMatch:
     confidence: float
 
 
+# ============================================================================
+# OfferMeta — per-offer metadata threaded to dispatch for tiebreaker decisions
+# ============================================================================
+
+@dataclass(frozen=True)
+class OfferMeta:
+    """Per-offer metadata threaded to dispatch for tiebreaker decisions.
+
+    Per CANONICAL_RULES.md §XIV.I: strict scope. Carries only the timestamp
+    dispatch needs for the recency tiebreaker (§5.3 two-pickups case).
+    Adding fields requires a separate canonical amendment.
+
+    Per CANONICAL_RULES.md §III (UTC-Mandatory): created_at must be
+    timezone-aware UTC. The __post_init__ guard rejects naive datetimes at
+    construction, preventing silent ordering bugs downstream from tzinfo
+    stripping anywhere in the snapshot path.
+
+    Failure mode the guard prevents: if snap.offers[i].created_at gets
+    stripped of tzinfo somewhere upstream (via .replace(tzinfo=None) or
+    .astimezone(None) or unaware fromtimestamp), two naive datetimes from
+    different timezones would compare as if same-zone — the recency
+    tiebreaker silently picks the wrong winner. Constructor guard makes
+    this fail at the source, not at the comparison.
+    """
+    created_at: datetime  # UTC-aware; sourced from offer_history.created_at
+
+    def __post_init__(self):
+        if self.created_at.tzinfo is None:
+            raise ValueError(
+                f"OfferMeta.created_at must be timezone-aware (Rule III). "
+                f"Got naive datetime: {self.created_at!r}"
+            )
+
+

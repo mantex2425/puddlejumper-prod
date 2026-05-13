@@ -87,9 +87,56 @@ class LogAmbiguousMatch:
     reason: str
 
 
+@dataclass(frozen=True)
+class FirePickupObservation:
+    """Pickup observation, no narrative commit. Rule XV / §XIV.I.
+
+    Stamps offer_history.actual_pickup_at for offer_id. Does NOT modify
+    driver_state.current_offer_id. Fires on the loser(s) of a §5.3 recency
+    tiebreaker — the observation is captured regardless of which offer
+    became the narrative winner.
+
+    Per Rule XV (Observation Before Narrative): cache writes fire on every
+    identified PUDO regardless of narrative certainty. This action is how
+    a same-leg-same-geocode tied loser still contributes to the pricing
+    and geographic caches.
+    """
+    offer_id: str
+
+
+@dataclass(frozen=True)
+class FireDropoffObservation:
+    """Dropoff observation, no narrative commit. Rule XV / §XIV.I.
+
+    Stamps offer_history.actual_dropoff_at for offer_id. Does NOT modify
+    driver_state.current_offer_id. Fires for every tied dropoff in the
+    §5.3-mirror two-dropoff case; the narrative is cleared via the
+    paired ClearNarrative action.
+    """
+    offer_id: str
+
+
+@dataclass(frozen=True)
+class ClearNarrative:
+    """Explicit narrative clear. §XIV.I two-dropoff case.
+
+    Sets driver_state.current_offer_id = NULL. Emitted alongside
+    FireDropoffObservation(s) when dispatch refuses to commit to a single
+    dropoff narrative. Distinguished from FireDropoff (which is a narrative
+    completion of a specific offer) in that ClearNarrative makes no claim
+    about which offer ended; it just admits the system no longer knows.
+
+    Carries no fields — the action's semantics are entirely positional
+    (its emission says "clear current_offer_id"; no parameters needed).
+    """
+
+
 Action = Union[
     FirePickup,
     FireDropoff,
+    FirePickupObservation,
+    FireDropoffObservation,
+    ClearNarrative,
     LogNoMatch,
     LogPickupRematch,
     LogAmbiguousMatch,
