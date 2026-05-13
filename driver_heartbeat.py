@@ -45,6 +45,7 @@ from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from dispatch import (
     dispatch,
     FirePickup, FireDropoff,
+    FirePickupObservation, FireDropoffObservation, ClearNarrative,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
 from pudo_types import Offer, OfferMeta, TargetSpec
@@ -148,11 +149,17 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
-      FirePickup        -> write_nailed_position(pickup) + UPDATE current_offer_id
-      FireDropoff       -> write_nailed_position(dropoff) + UPDATE current_offer_id = NULL
-      LogNoMatch        -> log INFO only
-      LogPickupRematch  -> log DEBUG only
-      LogAmbiguousMatch -> log WARNING only
+      FirePickup             -> write_nailed_position(pickup) + UPDATE current_offer_id
+      FireDropoff            -> write_nailed_position(dropoff) + UPDATE current_offer_id = NULL
+      FirePickupObservation  -> cache writes only (pms + offer_history + community_offers);
+                                no narrative state change. Rule XV / §XIV.I §5.3 pickup loser.
+      FireDropoffObservation -> observation record only (offer_history + pms.offer_status);
+                                no narrative state change. Rule XV / §XIV.I §5.3-mirror.
+      ClearNarrative         -> queue.unbind only (UPDATE current_offer_id = NULL); no
+                                cache writes. §XIV.I §5.3-mirror narrative clear.
+      LogNoMatch             -> log INFO only
+      LogPickupRematch       -> log DEBUG only
+      LogAmbiguousMatch      -> log WARNING only
 
     cluster is diagnostics.cluster from WAI; centroid is the canonical
     PUDO position under the simplified architecture (no "corrected"
@@ -359,6 +366,159 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             log.log(sev_map.get(action.outcome, logging.INFO),
                     "[heartbeat] FireDropoff offer=%s outcome=%s",
                     action.offer_id, action.outcome)
+            return True, None
+
+        if isinstance(action, FirePickupObservation):
+            # Rule XV / §XIV.I §5.3 pickup case: tied loser fires observation
+            # only — cache writes mirror FirePickup's pms+offer_history+
+            # community_offers triplet, but no write_nailed_position and no
+            # queue.bind. The winner's FirePickup already set current_offer_id;
+            # this captures the loser's location data for the caches without
+            # claiming a narrative.
+            if nail_lat is None or nail_lng is None:
+                return False, "fire_pickup_observation_without_coords"
+
+            # [α-fix mirror] pms: pricing cache write. Same SQL as FirePickup's
+            # pms UPDATE — actual_pickup_* from cluster centroid, data_source
+            # elevation, offer_status completed.
+            cur.execute("""
+                UPDATE app_private.pickup_market_signals
+                SET actual_pickup_lat     = %s,
+                    actual_pickup_lng     = %s,
+                    actual_pickup_h3      = app_private.coords_to_h3(%s, %s)::text,
+                    actual_pickup_at      = NOW(),
+                    data_source           = 'nail_it',
+                    offer_status          = 'completed'
+                WHERE offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
+            """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
+
+            # [α-fix mirror] offer_history: per-offer observation record. The
+            # WHERE actual_pickup_at IS NULL guard makes this idempotent — a
+            # subsequent FirePickupObservation for the same offer is a no-op.
+            cur.execute("""
+                UPDATE app_private.offer_history
+                SET actual_pickup_lat                   = %s,
+                    actual_pickup_lng                   = %s,
+                    actual_pickup_h3                    = app_private.coords_to_h3(%s, %s)::text,
+                    actual_pickup_at                    = NOW(),
+                    pickup_classification               = 'auto_observation',
+                    pickup_data_source                  = 'nail_it',
+                    leg_start_cumulative_miles_dropoff  = %s,
+                    cumulative_miles_at_pickup_fire     = %s
+                WHERE id = %s::bigint
+                  AND actual_pickup_at IS NULL
+            """, (
+                nail_lat, nail_lng, nail_lat, nail_lng,
+                cumulative_miles, cumulative_miles,
+                action.offer_id,
+            ))
+            # No rowcount guard: idempotent no-op is acceptable for observation.
+
+            # [α-fix mirror] community_offers: geographic cache insert. The
+            # NOT EXISTS guard handles the §5.3 case naturally — when winner
+            # and loser share cluster coords (which they do by definition),
+            # winner's earlier INSERT succeeds and loser's no-ops on dedup.
+            cur.execute("""
+                INSERT INTO public.community_offers (
+                    created_at, day_of_year, day_of_week, hour_of_day,
+                    platform, metroplex_id,
+                    pickup_h3, dropoff_h3,
+                    actual_pickup_lat, actual_pickup_lng, actual_pickup_h3,
+                    fare, trip_miles,
+                    dollars_per_mile, effective_hourly_rate,
+                    data_source, geog
+                )
+                SELECT
+                    NOW(),
+                    EXTRACT(DOY  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
+                    'uber', 1,
+                    pms.pickup_h3, dl.dropoff_h3_index,
+                    pms.actual_pickup_lat, pms.actual_pickup_lng, pms.actual_pickup_h3,
+                    dl.fare, dl.trip_miles,
+                    pms.dollars_per_mile, pms.hourly_rate_offered,
+                    'nail_it',
+                    app_private.coords_to_geography(pms.actual_pickup_lat, pms.actual_pickup_lng)
+                FROM app_private.pickup_market_signals pms
+                JOIN app_private.decision_log dl ON dl.id = pms.offer_id
+                WHERE pms.offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
+                  AND pms.actual_pickup_lat IS NOT NULL
+                  AND pms.hourly_rate_offered BETWEEN 5 AND 150
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.community_offers co
+                      WHERE co.actual_pickup_lat = pms.actual_pickup_lat
+                        AND co.actual_pickup_lng = pms.actual_pickup_lng
+                        AND co.data_source = 'nail_it'
+                  )
+            """, (action.offer_id,))
+
+            log.info("[heartbeat] FirePickupObservation offer=%s", action.offer_id)
+            # executed=True so dispatch_executed reflects "we did real work";
+            # the cache writes are the work. Forensic visibility for §XIV.I.
+            return True, None
+
+        if isinstance(action, FireDropoffObservation):
+            # Rule XV / §XIV.I §5.3-mirror two-dropoff case: every tied dropoff
+            # fires this. Updates offer_history.actual_dropoff_* (per-offer
+            # observation record) and pms.offer_status='completed' (pricing
+            # cache acknowledgment). No community_offers INSERT — that table
+            # is a pickup-location cache; dropoff coords are already in
+            # decision_log.dropoff_h3_index from offer-receipt geocoding.
+            # No queue.unbind; ClearNarrative (emitted alongside in the same
+            # action list) handles narrative state.
+            if nail_lat is None or nail_lng is None:
+                return False, "fire_dropoff_observation_without_coords"
+
+            # pms: offer_status elevation. data_source NOT elevated to
+            # 'nail_it' here because that signal is reserved for the pickup
+            # path; dropoff observation doesn't establish data lineage the
+            # same way (pickup_market_signals is fundamentally pickup-centric).
+            cur.execute("""
+                UPDATE app_private.pickup_market_signals
+                SET offer_status = 'completed'
+                WHERE offer_id = (
+                    SELECT decision_log_id FROM app_private.offer_history
+                    WHERE id = %s::bigint
+                )
+            """, (action.offer_id,))
+
+            # offer_history: per-offer dropoff observation. Idempotent via
+            # WHERE actual_dropoff_at IS NULL.
+            cur.execute("""
+                UPDATE app_private.offer_history
+                SET actual_dropoff_lat               = %s,
+                    actual_dropoff_lng               = %s,
+                    actual_dropoff_h3                = app_private.coords_to_h3(%s, %s)::text,
+                    actual_dropoff_at                = NOW(),
+                    dropoff_classification           = 'auto_observation',
+                    cumulative_miles_at_dropoff_fire = %s
+                WHERE id = %s::bigint
+                  AND actual_dropoff_at IS NULL
+            """, (
+                nail_lat, nail_lng, nail_lat, nail_lng,
+                cumulative_miles,
+                action.offer_id,
+            ))
+
+            log.info("[heartbeat] FireDropoffObservation offer=%s", action.offer_id)
+            return True, None
+
+        if isinstance(action, ClearNarrative):
+            # §XIV.I §5.3-mirror narrative clear: set current_offer_id = NULL
+            # without firing any dropoff. The system is now in observe-only
+            # mode awaiting next anchoring event. No write_nailed_position
+            # because we make no claim about which offer ended at what
+            # coordinates — that's exactly the ambiguity ClearNarrative admits.
+            queue.unbind(cur)
+            log.info("[heartbeat] ClearNarrative (§XIV.I two-dropoff)")
+            # executed=True: the narrative state mutation IS the side effect.
             return True, None
 
         if isinstance(action, LogNoMatch):
