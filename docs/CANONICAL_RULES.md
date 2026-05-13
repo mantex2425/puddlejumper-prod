@@ -434,6 +434,204 @@ The PUDO system exists primarily to populate two fundamental caches:
 
 ---
 
+
+---
+
+## XVI. ARREST-DEFINED TRUTH
+
+**Ratified:** 2026-05-13
+**Companions:** §VII (Postgres Owns Truth), §XV (Observation Before Narrative), §XIV.I (§5.3 Asymmetric Handling)
+
+PuddleJumper does not know where a PUDO happens until it observes one.
+
+Geocoded coordinates are **hypotheses** about what Uber's text addresses mean. They are produced by a third-party geocoder applied to vague human-readable inputs. They have an error budget that no part of the system can shrink. They are useful as inputs to confidence scoring. **They are never a gate.**
+
+The car coming to physical rest is a **fact**. It is observable directly via the velocity stream. It has no error budget beyond GPS sampling noise (which on production hardware is ≤ 0.01 mph at zero velocity). When the car stops, a transaction event has occurred — for some reason, at some location, regardless of whether any geocoded point agrees.
+
+> The pin is the stop. The stop is the pin.
+
+### A. The state machine watches the car, not the offers.
+
+PUDO detection has no per-offer state. There is no "armed for offer X." The state machine tracks one thing per driver: how long has the car been at zero velocity. When that counter crosses the arrest threshold, a PUDO event has been detected. The detection layer does not consult the offer queue for arming.
+
+The mistake this rule prevents: "armed for offer X" leaks geocode-trust into the state machine. Arming criteria become "we're near offer X's pin AND offer X's signals look good." That makes the geocoded pin the *organizing principle* of detection. The system then misses every PUDO whose pin is wrong — which, given geocoder error budgets, is many of them.
+
+**Exception, named explicitly:** Phase 1 of the Forensic Ladder uses TAD odometer position across the whole queue as a cheap efficiency filter — "no offer is even close to a destination, so don't burn cycles on Phase 2-5 logic." This is not arming-for-offer-X; it's an early exit when the queue can't plausibly explain *any* stop. The state machine is still watching the car; it's just running its cheapest test first.
+
+### B. Offer matching happens after detection, not before.
+
+Once a PUDO event is detected, the system asks the queue: which offer in the live set best explains this stop?
+
+The matcher uses the existing trustworthy signals — TAD odometer position, WAI confidence — applied as **filters**, not as gates that the state machine waits for. If multiple offers match, §5.3 / dispatch resolves the ambiguity. If zero offers match, the stop is logged but no PUDO fires.
+
+The mistake this rule prevents: requiring TAD or WAI to "pass" before the state machine begins watching for stops. Brief or imprecise stops at moments when TAD/WAI haven't yet converged are then invisible. By detecting the stop first and consulting TAD/WAI as filters after, the detection layer remains responsive to physics while the matching layer remains protective against false positives.
+
+### C. Both TAD and WAI gates are required for offer matching.
+
+A detected stop only fires a PUDO for offer X if:
+
+- **TAD verdict for offer X**: `distance_gate.passed = True` — the driver's odometer position is consistent with arriving at offer X's destination leg (within the 85%-115% window for trips ≥2 miles, ±0.5 mi for shorter trips).
+- **WAI confidence for offer X**: outcome confidence ≥ 0.40 — the geometric and POI signals plausibly match offer X.
+
+If only one gate passes, the stop is logged but no fire occurs. The system prefers a missed PUDO (recoverable) to a wrong-narrative PUDO (corrupts forensic record).
+
+The mistake this rule prevents: trusting one signal alone. TAD alone fires on coffee-shop stops in destination neighborhoods. WAI alone fires on geometric coincidences before the driver has actually traveled the leg distance. Both together provide the triple-lock: physics + odometer + geometry.
+
+### D. Distance-to-geocode is never a gate.
+
+No code path uses "distance from car's current position to offer.pickup_lat/lng" as a threshold gate that can prevent a PUDO from firing. Distance enters WAI's confidence calculation as a signal, weighted alongside cluster mass and POI proximity, but the resulting confidence value is the gate — not the raw distance.
+
+The mistake this rule prevents: hard-coded distance thresholds (50m, 100m, etc.) that fail on imprecise geocodes. Apartment-complex dropoffs, residential intersections, mixed-use buildings all routinely have geocodes that resolve to a different point than where the driver actually stops. A distance-threshold gate guarantees these PUDOs miss.
+
+### E. The arrest threshold is symmetric across pickup and dropoff.
+
+Pickups and dropoffs use identical arrest detection parameters. The transaction physics is the same — car stops, rider transitions, car leaves. Any historical sense that "dropoffs are different" reflected geocode-quality variance, not transaction-physics variance.
+
+Asymmetries between pickup and dropoff that genuinely exist:
+- **Pickup records fare** (FirePickup writes `pickup_market_signals` + `community_offers`; FireDropoff does not). This is downstream of detection, in the execute layer.
+- **Pickup binds `current_offer_id`**; **Dropoff clears it.** Narrative state mechanics, also downstream of detection.
+
+These do not require asymmetric detection parameters.
+
+### F. The Forensic Ladder
+
+Rule XVI is implemented as a five-phase ladder. Each phase has a defined heartbeat cadence, a defined check, and a defined transition criterion. The ladder is **economical** — expensive operations (1Hz cadence, Google Places API call) only occur when cheaper checks have already passed. It is **forensic** — the canonical PUDO record is written exactly once, with back-dated coordinates from the peak-confidence sample during the arrest window.
+
+#### Phase 1 — The Perimeter
+
+- **State:** Passive observation. Default state when driving.
+- **Heartbeat cadence:** 5 seconds.
+- **Check:** TAD odometer position across the whole live offer queue.
+- **Gate:** Is the odometer within `distance_gate.passed = True` window for *any* live offer?
+- **Transition:** If yes → Phase 2. If no → stay in Phase 1.
+
+This is the cheapest check the system runs. It gates entry to all higher-cost phases. If no offer in the queue is plausibly close to a destination, the system does nothing further this heartbeat.
+
+#### Phase 2 — The Engagement
+
+- **State:** Active neighborhood vigilance.
+- **Heartbeat cadence:** 3 seconds.
+- **Check:** TAD continues passing for at least one offer + observe velocity.
+- **Gate:** Is the car stopped (`speed_mph = 0`) for 2 consecutive heartbeats (6s total)?
+- **Transition:** If yes AND a stop is observed → Phase 2b. If TAD drops for all offers → return to Phase 1.
+
+Phase 2 is the watching window. The driver is in the destination zone; the system is paying closer attention but not yet committed.
+
+#### Phase 2b — The Arrest
+
+- **State:** Preliminary commitment.
+- **Trigger:** 6s of contiguous zero velocity reached in Phase 2.
+- **Check:** WAI confidence on the best-matching offer.
+- **Gate:** Is WAI confidence > 0.40 for any offer that also has TAD passed?
+- **Transition:** If yes → mark PUDO event as "happened" (commit intent), proceed to Phase 3. If no → return to Phase 2 (this is a stoplight, traffic, etc., not a transaction).
+
+Phase 2b is where the PUDO is *marked* — the system commits that an event happened — but the coordinates are not yet finalized. Coordinates remain refinable through Phase 4.
+
+#### Phase 3 — The Flashbulb
+
+- **State:** Contextual snapshot.
+- **Heartbeat cadence:** 1 second.
+- **Logic:**
+  1. Check local `poi_cache` for entries near the current coordinates.
+  2. **If cache hit:** use cached POI data, no external call. Proceed to Phase 4.
+  3. **If cache miss:** make exactly one Google Places API call. Store result in `poi_cache` for this location. Proceed to Phase 4.
+
+The cache-first discipline is non-negotiable. Google API calls cost money; cache hits cost nothing. As the cache populates over time, cache-miss rate drops asymptotically to zero. The "Google Tax" exists only on first-encounter locations.
+
+**Transition:** Always proceeds to Phase 4 after POI data is loaded (whether from cache or live call).
+
+#### Phase 4 — The Hill-Climb
+
+- **State:** Continuous peak sampling.
+- **Heartbeat cadence:** 1 second.
+- **Logic:**
+  1. Sample GPS every second while car remains stopped.
+  2. For each sample, compute the WAI confidence for the matched offer using the Phase 3 POI data.
+  3. Track the **peak sample** — the (timestamp, lat, lng, confidence) tuple with the highest confidence observed during this stop.
+  4. If a new sample exceeds the previous peak, replace the peak.
+  5. If a new sample falls below the peak, log it as a "decay" sample but do not replace the peak.
+- **Transition:** When `speed_mph > 0` (car moves) → Phase 5.
+
+The hill-climb captures the moment of maximum confidence — typically the moment the car is closest to the actual transaction point — rather than the moment the car finally moves away. This back-dates the canonical record to the physical truth.
+
+#### Phase 5 — The Notarization
+
+- **State:** Canonical record write.
+- **Trigger:** Car moves after Phase 4 (`speed_mph > 0`).
+- **Logic:**
+  1. Identify the peak sample from Phase 4's window.
+  2. Perform exactly one atomic database write to the canonical PUDO row using the peak sample's timestamp and coordinates.
+  3. Apply the Transaction Lock (see below).
+  4. Reset state machine to Phase 1 (or Phase 2 if another offer in the queue is still active).
+
+The Phase 5 write is the only mid-stop database commit. Phases 2b through 4 hold the PUDO record in memory; only Phase 5 persists it. This avoids jittered writes and keeps the canonical record clean.
+
+### G. The Transaction Lock
+
+After a PUDO fires for a specific offer's specific leg (`FirePickup` for offer X, or `FireDropoff` for offer X), the matcher will not fire that same offer's same leg again until:
+
+- The car has moved at least 500 feet from the fire location, **OR**
+- The car has maintained `speed_mph > 5` for 10 contiguous seconds.
+
+**Primary defense remains the SQL idempotency guards** (`WHERE actual_pickup_at IS NULL`). The Transaction Lock is belt-and-suspenders, preventing wasted compute and ensuring that long stops with brief speed flickers don't produce machine-gun firing.
+
+Other offers' legs are not locked. A pickup fire for offer X does not block a pickup fire for offer Y at a different location, nor a dropoff fire for offer X later in the leg.
+
+### H. Forensic Record
+
+When a PUDO fires via the Forensic Ladder, the `pudo_decision_context` row records:
+
+- `arrest_started_at`: when the 0.0 mph counter began
+- `arrest_duration_s`: total contiguous zero-velocity time at fire
+- `matched_offer_id`: which offer the matcher selected
+- `match_signal`: which gate combination produced the match (`tad_and_wai`, `tad_and_wai_ambiguous`, `dispatch_resolved`)
+- `matcher_candidates`: full list of offers that passed both gates, for ambiguity forensics
+- `phase_reached`: which Forensic Ladder phase the heartbeat reached (1, 2, 3, 4, 5)
+- `poi_source`: where Phase 3's POI data came from (`local_cache`, `google_live`)
+- `peak_confidence`: the Phase 4 peak confidence value used for notarization
+- `decay_samples`: count of Phase 4 samples below peak (for future GPS-quality analysis)
+
+When a stop is detected but no offer matches, the row records:
+
+- `arrest_started_at` and `arrest_duration_s` as above
+- `matched_offer_id`: NULL
+- `match_signal`: `no_match`
+- `matcher_candidates`: empty array
+- `unmatched_reason`: which gate failed for the closest candidate (`tad_failed`, `wai_below_floor`, `both_failed`, `empty_queue`)
+- `phase_reached`: highest phase reached before failure
+
+These forensics make false negatives investigable. A miss is not silent — every detected stop has a row, regardless of whether it produced a fire.
+
+### I. Relationship to Existing Doctrine
+
+**§VII (Postgres Owns Truth)**: §XVI applies the same epistemic discipline to PUDO detection that §VII applies to query results. Just as we don't trust in-memory caches over Postgres, we don't trust geocoded hypotheses over physical observations.
+
+**§XV (Observation Before Narrative)**: §XVI extends §XV's separation of observation from narrative into the detection layer. §XV says cache writes (observation) are durable while `current_offer_id` (narrative) is provisional. §XVI says stop detection (observation) is the primitive while offer matching (narrative) is the secondary step. Same shape, applied earlier in the pipeline.
+
+**§XIV.I (§5.3 Asymmetric Handling)**: The §5.3 dispatcher continues to operate at the dispatch layer. The Forensic Ladder's Phase 2b/3/4/5 produces match candidates; dispatch resolves any ambiguity among them per §XIV.I. §XVI and §XIV.I compose cleanly.
+
+### J. What This Rule Replaces
+
+§XVI deprecates implicit assumptions that were never written as canonical rules but governed implementation decisions:
+
+- **"The cluster gate is the primary PUDO detector."** Cluster mass remains an input to WAI confidence; it is no longer the *trigger* for PUDO fires. The Forensic Ladder triggers; cluster informs WAI scoring.
+- **"Distance to the pin matters for detection."** It doesn't. It matters for WAI confidence calculation only, as one input among several.
+- **"PUDOs need confirmation via cluster maturation (~30s)."** No. PUDOs are confirmed via 6s of zero velocity in TAD's destination zone, plus WAI confidence > 0.40. The 30s maturation window was a function of waiting for cluster mass to overcome geocoder noise; §XVI removes the need to wait by inverting the detection-vs-matching order.
+
+The existing cluster-detection code paths remain in place because cluster mass is still useful as a WAI signal. The change is in how the *fire decision* is reached, not in how WAI's inputs are computed.
+
+### K. The Discipline
+
+- When a future change wants to use distance-to-geocode as a gate, refer to this rule and refuse.
+- When a future change wants to add per-offer state to the detection layer, refer to this rule and refuse.
+- When a future change wants to add asymmetric pickup/dropoff arrest parameters, require evidence that the asymmetry is in transaction physics (not geocoder quality, not address class, not narrative state) before accepting.
+- When a future change wants to skip the cache-first check before a Google Places API call, refer to this rule and refuse.
+
+> The map is not the territory. The arrest is the pin.
+
+
+---
+
 ## Notes
 
 - These rules are derived from production lessons across Phase D and Phase E.
