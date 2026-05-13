@@ -1203,7 +1203,9 @@ def post_heartbeat():
     # in the same transaction, but guard anyway), default to None/None.
     _arrest_row = cur.fetchone()
     if _arrest_row is not None:
-        arrest_started_at_post, arrest_counter_s_post = _arrest_row
+        # RealDictCursor: iteration yields KEYS not values; use key access.
+        arrest_started_at_post = _arrest_row['arrest_started_at']
+        arrest_counter_s_post = _arrest_row['arrest_counter_s']
     else:
         arrest_started_at_post, arrest_counter_s_post = None, None
 
