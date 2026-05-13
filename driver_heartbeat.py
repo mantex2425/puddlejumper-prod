@@ -777,8 +777,11 @@ def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles,
     return cur.fetchone() is not None
 
 
-def _build_tad_decision_context(diagnostics, matches, lost_mode, last_known_anchor_id):
-    """Serialize tad_decision_context JSONB blob. [3b.R]
+def _build_tad_decision_context(
+    diagnostics, matches, lost_mode, last_known_anchor_id,
+    executed_actions=None, queue_metadata=None,
+):
+    """Serialize tad_decision_context JSONB blob. [3b.R + Phase 4 narrative_tiebreaker]
 
     Returns str (json.dumps output) or None.
       None: bridge state — diagnostics.tad_verdicts is empty {} (caller
@@ -786,11 +789,26 @@ def _build_tad_decision_context(diagnostics, matches, lost_mode, last_known_anch
         NULL JSONB in DB preserves regression compatibility with the
         pre-3b.R 521 test floor.
       str: TAD evaluation occurred — full forensic blob with verdicts,
-        per-committed commit_rule classification, lost_mode state, and
-        the last_known_anchor_id forensic context.
+        per-committed commit_rule classification, lost_mode state, the
+        last_known_anchor_id forensic context, and (Phase 4)
+        narrative_tiebreaker recording §5.3 dispatch decisions per
+        CANONICAL_RULES.md §XIV.I.
 
     Per Bible Rule 5: classification labels live INSIDE this JSONB,
     never as flat columns on pudo_decision_context.
+
+    Phase 4 (Rule XV / §XIV.I): the narrative_tiebreaker field records
+    which §5.3 case fired in dispatch and the recency tiebreaker outcome.
+    Detection uses executed_actions (truthful — records what was actually
+    persisted) not matches (which would record dispatch's intent even if
+    _execute_action raised partway through the action chain).
+
+    executed_actions and queue_metadata default to None for backwards
+    compatibility with callers that haven't been updated to Phase 4
+    (notably tests/fixtures that synthesize _build_tad_decision_context
+    inputs directly). When either is None, narrative_tiebreaker is
+    omitted from the JSONB rather than emitted as null — preserves
+    pre-Phase 4 blob shape exactly for those callers.
     """
     if not diagnostics.tad_verdicts:
         return None
@@ -820,7 +838,80 @@ def _build_tad_decision_context(diagnostics, matches, lost_mode, last_known_anch
         "lost_mode": lost_mode,
         "last_known_anchor_id": last_known_anchor_id,
     }
+
+    # Phase 4 narrative_tiebreaker: detect §5.3 cases from executed_actions.
+    # Truthful forensic — what actually persisted, not dispatch intent.
+    if executed_actions is not None and queue_metadata is not None:
+        narrative_tiebreaker = _detect_narrative_tiebreaker(
+            executed_actions, queue_metadata
+        )
+        if narrative_tiebreaker is not None:
+            blob["narrative_tiebreaker"] = narrative_tiebreaker
+
     return json.dumps(blob)
+
+
+def _detect_narrative_tiebreaker(executed_actions, queue_metadata):
+    """Detect which §XIV.I §5.3 case fired in this heartbeat.
+
+    Returns narrative_tiebreaker dict per §XIV.I "Forensic record":
+      §5.3 pickup case:
+        {winner, losers, signal: "created_at", winner_created_at: ISO-8601 UTC}
+      §5.3-mirror dropoff case:
+        {winner: null, losers, signal: "ambiguous_clear"}
+      Neither fired: None (no field emitted)
+
+    Detection by type-presence in executed_actions:
+      - FirePickupObservation present -> §5.3 pickup case fired
+      - ClearNarrative present -> §5.3-mirror dropoff case fired
+      - Both shapes mutually exclusive: dispatch never emits both for one
+        heartbeat (pickup case emits FirePickup+FPO; dropoff case emits
+        FDO+CN; no overlap).
+
+    Per Rule III: winner_created_at serialized via .isoformat() which on
+    a UTC-aware datetime produces a '+00:00' suffix, preserving the
+    timezone anchor in the forensic record.
+    """
+    fp_obs = [a for a in executed_actions if isinstance(a, FirePickupObservation)]
+    fd_obs = [a for a in executed_actions if isinstance(a, FireDropoffObservation)]
+    fire_pickups = [a for a in executed_actions if isinstance(a, FirePickup)]
+    clear_narratives = [a for a in executed_actions if isinstance(a, ClearNarrative)]
+
+    if fp_obs:
+        # §5.3 pickup case: there's exactly one FirePickup (the winner)
+        # and one or more FirePickupObservations (the losers).
+        if not fire_pickups:
+            # Defensive: FirePickupObservation without a FirePickup means
+            # the winner's action raised and halted the loop. Record the
+            # partial state honestly.
+            return {
+                "winner": None,
+                "losers": [a.offer_id for a in fp_obs],
+                "signal": "created_at",
+                "winner_created_at": None,
+                "note": "winner_action_failed_pre_persistence",
+            }
+        winner = fire_pickups[0]
+        winner_meta = queue_metadata.get(winner.offer_id)
+        return {
+            "winner": winner.offer_id,
+            "losers": [a.offer_id for a in fp_obs],
+            "signal": "created_at",
+            "winner_created_at": (
+                winner_meta.created_at.isoformat() if winner_meta else None
+            ),
+        }
+
+    if clear_narratives:
+        # §5.3-mirror dropoff case: ClearNarrative emitted, with
+        # FireDropoffObservation(s) for every tied dropoff.
+        return {
+            "winner": None,
+            "losers": [a.offer_id for a in fd_obs],
+            "signal": "ambiguous_clear",
+        }
+
+    return None
 
 
 def _log_decision_context(
@@ -832,6 +923,7 @@ def _log_decision_context(
     gate_verdict=None,
     lost_mode=False,                    # [3b.R]
     last_known_anchor_id=None,          # [3b.R]
+    queue_metadata=None,                # [Phase 4]
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -865,6 +957,8 @@ def _log_decision_context(
     # [3b.R] Build TAD forensic blob (Bible Rule 5: JSONB-resident, never flat)
     tad_decision_context = _build_tad_decision_context(
         diagnostics, matches, lost_mode, last_known_anchor_id,
+        executed_actions=executed_actions,
+        queue_metadata=queue_metadata,
     )
 
     # Project executed-action list into a forensic-readable string.
@@ -1138,6 +1232,7 @@ def post_heartbeat():
             gate_verdict=gate_verdict,
             lost_mode=lost_mode,                          # [3b.R]
             last_known_anchor_id=last_known_anchor_id,    # [3b.R]
+            queue_metadata=queue_metadata,                # [Phase 4]
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is
