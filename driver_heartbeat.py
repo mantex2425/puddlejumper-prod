@@ -48,7 +48,7 @@ from dispatch import (
     FirePickupObservation, FireDropoffObservation, ClearNarrative,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
-from pudo_types import Offer, OfferMeta, TargetSpec
+from pudo_types import Offer, OfferMeta, TargetSpec, WAIMatch, WAI_CONFIDENCE_THRESHOLD
 from motion_gate import (
     GateVerdict,
     evaluate_gates,
@@ -56,6 +56,13 @@ from motion_gate import (
 )
 from driver_queue import DriverQueue
 from bead_on_wire import classify_address
+
+
+# ── Rule XVI B-3 — Active Interrogation matcher constants ──
+# Arrest threshold: contiguous zero-velocity seconds required
+# to enter Phase 2b of the Forensic Ladder (§XVI.F).
+# WAI floor is imported from pudo_types per §XIV.C.
+ARREST_DURATION_THRESHOLD_S = 6.0
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
 
@@ -926,6 +933,11 @@ def _log_decision_context(
     queue_metadata=None,                # [Phase 4]
     arrest_started_at_post=None,        # [Rule XVI B-2]
     arrest_counter_s_post=None,         # [Rule XVI B-2]
+    phase_reached=1,                    # [Rule XVI B-3]
+    matched_offer_id=None,              # [Rule XVI B-3]
+    match_signal=None,                  # [Rule XVI B-3]
+    matcher_candidates=None,            # [Rule XVI B-3]
+    unmatched_reason=None,              # [Rule XVI B-3]
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -996,7 +1008,9 @@ def _log_decision_context(
             motion_gate_result, odometer_gate_result,
             gate_held_offer_ids, gate_held_legs,
             tad_decision_context,
-            arrest_started_at, arrest_duration_s
+            arrest_started_at, arrest_duration_s,
+            phase_reached, matched_offer_id, match_signal,
+            matcher_candidates, unmatched_reason
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
@@ -1011,6 +1025,8 @@ def _log_decision_context(
             %s, %s,
             %s, %s,
             %s,
+            %s, %s,
+            %s, %s, %s,
             %s, %s
         )
         """,
@@ -1049,6 +1065,12 @@ def _log_decision_context(
             # driver_trip_state UPDATE's RETURNING clause captured them.
             arrest_started_at_post,
             arrest_counter_s_post,
+            # Rule XVI B-3: matcher forensic record.
+            phase_reached,
+            matched_offer_id,
+            match_signal,
+            matcher_candidates,
+            unmatched_reason,
         ),
     )
 
@@ -1248,8 +1270,86 @@ def post_heartbeat():
     )
     gated_matches = filter_matches_by_gates(matches, gate_verdict)
 
+    # ── MATCH (Rule XVI B-3 Active Interrogation) ────────────────────
+    # Forensic Ladder. matcher_actions is None when the matcher
+    # abstains (arrest < threshold OR all candidates rejected) — in
+    # those cases the lazy dispatch path retains agency below.
+    phase_reached = 1
+    matched_offer_id = None
+    match_signal = None
+    matcher_candidates = []
+    unmatched_reason = None
+    matcher_actions = None
+
+    # Phase 1 → Phase 2 perimeter: is any offer in its destination zone?
+    if any(v.distance_gate.get('passed') is True
+           for v in diagnostics.tad_verdicts.values()):
+        phase_reached = 2
+
+    if (arrest_counter_s_post is not None
+            and arrest_counter_s_post >= ARREST_DURATION_THRESHOLD_S):
+        candidates = []  # list[(offer_id, leg, confidence)]
+        tad_passed_any = False
+
+        for offer_id, verdict in diagnostics.tad_verdicts.items():
+            if verdict.distance_gate.get('passed') is not True:
+                continue
+            tad_passed_any = True
+            leg = verdict.leg_evaluated
+            if leg not in ('pickup', 'dropoff'):
+                continue
+            outcome = None
+            for oid, ltype, oc in diagnostics.per_target_outcomes:
+                if oid == offer_id and ltype == leg:
+                    outcome = oc
+                    break
+            if outcome is None or outcome.confidence < WAI_CONFIDENCE_THRESHOLD:
+                continue
+            candidates.append((offer_id, leg, outcome.confidence))
+
+        matcher_candidates = [c[0] for c in candidates]
+
+        if len(candidates) == 1:
+            # Single-match express lane (Option β).
+            offer_id, leg, _conf = candidates[0]
+            action_cls = FirePickup if leg == 'pickup' else FireDropoff
+            matcher_actions = [action_cls(offer_id=offer_id)]
+            matched_offer_id = offer_id
+            match_signal = 'tad_and_wai'
+            phase_reached = 5
+        elif len(candidates) >= 2:
+            # §5.3 ambiguity — hand to dispatch (Option α).
+            synth = [WAIMatch(offer_id=oid, location_type=lg, confidence=cf)
+                     for oid, lg, cf in candidates]
+            matcher_actions = dispatch(synth, current_offer_id, queue_metadata)
+            match_signal = 'dispatch_resolved'
+            phase_reached = 5
+            # Pull narrative winner from dispatch's action list (None for
+            # §5.3-mirror ClearNarrative case where no fire occurs).
+            for a in matcher_actions:
+                if isinstance(a, (FirePickup, FireDropoff)):
+                    matched_offer_id = a.offer_id
+                    break
+        else:
+            # Arrest reached but no candidate passed both gates.
+            match_signal = 'no_match'
+            if not diagnostics.tad_verdicts:
+                unmatched_reason = 'empty_queue'
+            elif tad_passed_any:
+                unmatched_reason = 'wai_below_floor'
+                phase_reached = 3
+            else:
+                unmatched_reason = 'tad_failed'
+                # phase_reached retains perimeter-scan value (1 or 2)
+
     # ── DECIDE ───────────────────────────────────────────────────────
-    actions = dispatch(gated_matches, current_offer_id, queue_metadata)
+    if matcher_actions is not None:
+        # Matcher fired (single or §5.3). Lazy path skipped.
+        actions = matcher_actions
+    else:
+        # Matcher abstained — lazy dispatch path retains agency
+        # (handoff: 'let the lazy path fire' on matcher no-match).
+        actions = dispatch(gated_matches, current_offer_id, queue_metadata)
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster
@@ -1259,6 +1359,7 @@ def post_heartbeat():
         executed, err = _execute_action(
             action, cur, conn, driver_id, queue, cluster,
             cumulative_miles=cumulative_miles,
+            fallback_lat=current_lat, fallback_lng=current_lng,
         )
         if executed:
             executed_actions.append(action)
@@ -1281,6 +1382,11 @@ def post_heartbeat():
             queue_metadata=queue_metadata,                # [Phase 4]
             arrest_started_at_post=arrest_started_at_post,    # [Rule XVI B-2]
             arrest_counter_s_post=arrest_counter_s_post,      # [Rule XVI B-2]
+            phase_reached=phase_reached,                      # [Rule XVI B-3]
+            matched_offer_id=matched_offer_id,                # [Rule XVI B-3]
+            match_signal=match_signal,                        # [Rule XVI B-3]
+            matcher_candidates=matcher_candidates,            # [Rule XVI B-3]
+            unmatched_reason=unmatched_reason,                # [Rule XVI B-3]
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is
