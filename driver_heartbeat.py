@@ -110,24 +110,28 @@ def _bucket_to_target_spec(address_text, lat, lng):
             lat=float(lat), lng=float(lng),
             address_class="intersection",
             named_roads=(parts.get("road_a", ""), parts.get("road_b", "")),
+            address=address_text,
         )
     if bucket == "street_number":
         return TargetSpec(
             lat=float(lat), lng=float(lng),
             address_class="number_on_street",
             named_roads=(parts.get("road", ""),),
+            address=address_text,
         )
     if bucket == "single_road":
         return TargetSpec(
             lat=float(lat), lng=float(lng),
             address_class="single_road",
             named_roads=(parts.get("road", ""),),
+            address=address_text,
         )
     if bucket == "poi":
         return TargetSpec(
             lat=float(lat), lng=float(lng),
             address_class="poi",
             named_roads=(),
+            address=address_text,
         )
     # "garbage" or any unrecognized bucket -> unevaluatable
     return None

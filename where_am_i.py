@@ -1047,6 +1047,7 @@ def _match_intersection(
     topo: RoadTopology,
     target,
     pois: Optional[list] = None,
+    anchors: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an intersection-class target ("Joan St & Settemont Rd")."""
     if (skip := _validate_target(target, "intersection")) is not None:
@@ -1083,6 +1084,7 @@ def _match_single_road(
     topo: RoadTopology,
     target,
     pois: Optional[list] = None,
+    anchors: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a single_road target ("fondren rd")."""
     if (skip := _validate_target(target, "single_road")) is not None:
@@ -1119,6 +1121,7 @@ def _match_number_on_street(
     topo: RoadTopology,
     target,
     pois: Optional[list] = None,
+    anchors: Optional[list] = None,
 ) -> MatchOutcome:
     """Match a number_on_street target ("1234 Main St").
 
@@ -1159,6 +1162,7 @@ def _match_apartment_complex(
     topo: RoadTopology,
     target,
     pois: Optional[list] = None,
+    anchors: Optional[list] = None,
 ) -> MatchOutcome:
     """Match an apartment_complex target.
 
@@ -1201,6 +1205,7 @@ def _match_poi_stub(
     topo: RoadTopology,
     target,
     pois=None,
+    anchors=None,
 ) -> MatchOutcome:
     """Stub for poi-class targets (airports, named businesses).
 
@@ -1811,6 +1816,46 @@ class WhereAmI:
             cluster_pois = []
             cluster_poi_names = []
 
+        # §XVII Patch 3: cluster-anchors fetch helper. Used per-candidate
+        # inside the dispatch loop below. Returns list of POI with dist_m
+        # recomputed relative to cluster centroid via canonical
+        # app_private.distance_miles (Path 2: per-anchor SQL, mirrors
+        # _read_cache pattern). Returns empty list on no-text, no-anchors,
+        # or any error — Head 5 falls through; other heads still fire.
+        def _fetch_cluster_anchors(target_addr):
+            if not target_addr:
+                return []
+            try:
+                from poi_service import get_anchors_for_text
+                anchor_result = get_anchors_for_text(
+                    target_addr, self.cur,
+                    bias_lat=cluster.median_lat,
+                    bias_lng=cluster.median_lng,
+                )
+                raw_anchors = list(anchor_result.pois) if anchor_result else []
+                # Recompute dist_m for each anchor relative to cluster centroid
+                # (Patch 1 returns anchors with dist_m=0.0 by Gemini directive 1).
+                cluster_anchors = []
+                from poi_service import POI as _POI
+                for a in raw_anchors:
+                    self.cur.execute(
+                        "SELECT app_private.distance_miles(%s, %s, %s, %s) * 1609.344 AS dist_m",
+                        (cluster.median_lat, cluster.median_lng, a.lat, a.lng),
+                    )
+                    row = self.cur.fetchone()
+                    dist_m = float(row["dist_m"]) if row and row["dist_m"] is not None else float("inf")
+                    cluster_anchors.append(_POI(
+                        place_id=a.place_id, name=a.name, types=a.types,
+                        lat=a.lat, lng=a.lng, dist_m=dist_m,
+                    ))
+                return cluster_anchors
+            except Exception:
+                log.warning(
+                    "[WAI] semantic anchor fetch failed for target_addr=%r — proceeding without Head 5",
+                    target_addr, exc_info=True,
+                )
+                return []
+
         # Step 4 (Map): generate (target, location_type, offer_id) candidates.
         candidates = []
         for offer in queue:
@@ -1854,7 +1899,11 @@ class WhereAmI:
                     target.address_class, offer_id,
                 )
                 continue
-            outcome = matcher(cluster, topo, target, pois=cluster_pois)
+            cluster_anchors = _fetch_cluster_anchors(getattr(target, "address", None))
+            outcome = matcher(
+                cluster, topo, target,
+                pois=cluster_pois, anchors=cluster_anchors,
+            )
             per_target_outcomes.append((offer_id, location_type, outcome))
 
         # Step 6 (Reduce, Phase 2c.2 Item 3c): apply dual commit rule per

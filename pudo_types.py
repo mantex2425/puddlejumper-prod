@@ -61,6 +61,14 @@ class TargetSpec:
         "apartment_complex",
     ]
     named_roads: tuple[str, ...]
+    # §XVII Patch 3: offer's raw address text, populated from
+    # offer_history.{pickup_address,dropoff_address}. Used by Head 5
+    # (_signal_semantic_anchor) as the query for Google Places
+    # searchText resolution. Optional/default-None preserves backward
+    # compat with the 13+ existing TargetSpec construction sites.
+    # Production code at 8 sites uses getattr(target, 'address', None)
+    # defensively, anticipating this exact field.
+    address: Optional[str] = None
 
 
 # ============================================================================

@@ -1046,7 +1046,7 @@ class TestMatchPoiStub:
 # backoff, cluster starvation, no PUDO commits.
 #
 # This class locks in the dispatch-call contract: every matcher in
-# _CLASS_DISPATCH MUST accept (cluster, topo, target, pois=...).
+# _CLASS_DISPATCH MUST accept (cluster, topo, target, pois=..., anchors=...).
 #
 # CRITICAL: do NOT "simplify" this test by using MagicMock for
 # cluster/topo/target. MagicMock accepts any signature and would let
@@ -1065,17 +1065,22 @@ class TestClassDispatchContract:
     the bug ships.
     """
 
-    def test_every_dispatch_matcher_accepts_pois_kwarg(self):
-        """Every _CLASS_DISPATCH entry must accept pois=... per the
-        dispatch contract. TypeError here means a matcher signature has
-        drifted from the where_am_i.py:1700 call site — same regression
+    def test_every_dispatch_matcher_accepts_pois_and_anchors_kwargs(self):
+        """Every _CLASS_DISPATCH entry must accept pois=... AND anchors=...
+        per the dispatch contract. TypeError here means a matcher signature
+        has drifted from the where_am_i.py call site — same regression
         class as the 2026-05-09 _match_poi_stub production bug.
 
-        We pass pois=[] (empty list) because that's the common production
-        case (residential pickups, no POIs nearby) and it lets matchers
-        either consume or ignore the kwarg without depending on POI-
-        handling correctness — this test is about the signature contract,
-        not POI logic.
+        Contract evolution:
+          - 2026-05-09: pois=... mandatory (Item 2 / _match_poi_stub bug)
+          - 2026-05-14: anchors=... added (§XVII Patch 3a, Head 5 wiring)
+
+        We pass pois=[] and anchors=[] (empty lists) because those are
+        the common production cases (no POIs near cluster, no semantic
+        anchors for the target text) and they let matchers either consume
+        or ignore the kwargs without depending on POI/anchor-handling
+        correctness — this test is about the signature contract, not
+        signal logic.
         """
         cluster = _cluster()
         topo = _topo()
@@ -1083,12 +1088,12 @@ class TestClassDispatchContract:
 
         for address_class, matcher in _CLASS_DISPATCH.items():
             try:
-                outcome = matcher(cluster, topo, target, pois=[])
+                outcome = matcher(cluster, topo, target, pois=[], anchors=[])
             except TypeError as e:
                 raise AssertionError(
                     f"_CLASS_DISPATCH[{address_class!r}] -> "
                     f"{matcher.__name__} does not accept dispatch contract "
-                    f"(cluster, topo, target, pois=...): {e}. "
+                    f"(cluster, topo, target, pois=..., anchors=...): {e}. "
                     f"L-6 corollary regression — see "
                     f"TestClassDispatchContract module docstring."
                 )
@@ -2436,7 +2441,7 @@ class TestItem3DualCommitRule:
         wai = _wai_with_fakes(cluster, topo)
         offer = self._build_offer()
 
-        with patch("where_am_i.evaluate_tad_gate") as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.50)}):
+        with patch("where_am_i.evaluate_tad_gate") as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois, **kwargs: _make_outcome(confidence=0.50)}):
             matches, diag = wai.evaluate_with_diagnostics("driver1", [offer])
 
         # TAD gate NOT called in bridge state
@@ -2472,7 +2477,7 @@ class TestItem3DualCommitRule:
 
         fake_verdicts = {offer.offer_id: _make_verdict(passed=True)}
 
-        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts) as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.95)}):
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts) as mock_tad,              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois, **kwargs: _make_outcome(confidence=0.95)}):
             matches, diag = wai.evaluate_with_diagnostics(
                 "driver1", [offer],
                 per_offer_state=per_offer_state,
@@ -2511,7 +2516,7 @@ class TestItem3DualCommitRule:
 
         # Track whether the matcher gets called
         matcher_calls = []
-        def tracking_matcher(c, t, tg, pois):
+        def tracking_matcher(c, t, tg, pois, **kwargs):
             matcher_calls.append((c, tg))
             return _make_outcome(confidence=0.99)
 
@@ -2568,7 +2573,7 @@ class TestItem3DualCommitRule:
 
         fake_verdicts = {offer.offer_id: _make_verdict(passed=True)}
 
-        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.41, poi_type_match=None)}):
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois, **kwargs: _make_outcome(confidence=0.41, poi_type_match=None)}):
             matches, _ = wai.evaluate_with_diagnostics(
                 "driver1", [offer],
                 per_offer_state=per_offer_state,
@@ -2618,7 +2623,7 @@ class TestItem3DualCommitRule:
 
         fake_verdicts = {offer.offer_id: _make_verdict(passed=None, lost_mode_reason="narrative_blindness")}
 
-        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.86, poi_type_match=None)}):
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois, **kwargs: _make_outcome(confidence=0.86, poi_type_match=None)}):
             matches, _ = wai.evaluate_with_diagnostics(
                 "driver1", [offer],
                 per_offer_state=per_offer_state,
@@ -2669,7 +2674,7 @@ class TestItem3DualCommitRule:
 
         fake_verdicts = {offer.offer_id: _make_verdict(passed=None, lost_mode_reason="narrative_blindness")}
 
-        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois: _make_outcome(confidence=0.86, poi_type_match=True)}):
+        with patch("where_am_i.evaluate_tad_gate", return_value=fake_verdicts),              patch("where_am_i._CLASS_DISPATCH", {"single_road": lambda c, t, tg, pois, **kwargs: _make_outcome(confidence=0.86, poi_type_match=True)}):
             matches, _ = wai.evaluate_with_diagnostics(
                 "driver1", [offer],
                 per_offer_state=per_offer_state,
