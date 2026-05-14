@@ -225,6 +225,47 @@ _CONFIDENCE_WEIGHTS = {
 }
 
 
+# §XVII Patch 2: per-anchor-type horizons for Head 5 semantic-anchor scoring.
+# Keys are Google Places v1 types-array values (case-sensitive; lowercase).
+# Lookup is first-match-wins against each anchor's types list — order
+# inside the anchor matters but Google sorts by relevance, so first match
+# usually IS the most specific applicable type.
+#
+# Horizons reflect real-world venue geometry per canonical §XVII §C:
+#   - Airports/stadiums: huge polygons, passenger drop happens anywhere
+#     in the complex (IAH terminals span ~1.5km end-to-end).
+#   - Universities/malls: large but more compact; 500m covers most.
+#   - Hospitals/lodging: tight footprints, driver must reach specific
+#     building; 150m prevents wrong-hospital false matches in dense
+#     medical center districts.
+#   - Default 500m: anything Google returns without one of the above
+#     types gets a moderate horizon. Empirically calibrated by the
+#     Tier A backtest (2026-05-14).
+#
+# Maintenance discipline (canonical §XVII §K): this map keys off Google's
+# own taxonomy. Adding a new market doesn't require extending it. Adding
+# new entries here requires Gemini ratification — it's the only category
+# step in §XVII and bypassing review reintroduces the lexicon-maintenance
+# trap §XVII was built to eliminate.
+_SEMANTIC_TYPE_HORIZON_MAP: dict[str, float] = {
+    "airport": 800.0,
+    "international_airport": 800.0,
+    "stadium": 600.0,
+    "tourist_attraction": 600.0,
+    "amusement_park": 600.0,
+    "zoo": 600.0,
+    "university": 500.0,
+    "shopping_mall": 500.0,
+    "hospital": 150.0,
+    "medical_clinic": 150.0,
+    "doctor": 150.0,
+    "lodging": 150.0,
+}
+
+# Default horizon for anchors whose types don't match any key above.
+_SEMANTIC_DEFAULT_HORIZON_M: float = 500.0
+
+
 # =============================================================================
 # Section A - The signal library
 # =============================================================================
@@ -677,6 +718,77 @@ def _signal_poi_type_match(
 from dataclasses import dataclass, field
 
 
+def _signal_semantic_anchor(
+    anchors: list,
+    horizon_map: dict[str, float] = None,
+    default_horizon: float = None,
+) -> tuple[float, Optional[str]]:
+    """Head 5 of §XVII: linear-decay confidence over semantic anchors.
+
+    Pure-Python signal function. Mirrors the established matcher-head
+    contract: takes precomputed POI list (Option B / Gemini-ratified
+    2026-05-14), returns (score, witness). No SQL, no cursor.
+
+    The caller (Patch 3 in evaluate()) is responsible for:
+      (a) Fetching anchors via poi_service.get_anchors_for_text using
+          the offer's address text as the query.
+      (b) Recomputing each anchor's dist_m relative to cluster centroid
+          (overwriting the dist_m=0.0 that get_anchors_for_text returns).
+          Use app_private.distance_miles per canonical §II.
+      (c) Passing the list with cluster-relative dist_m to this function.
+
+    Scoring per canonical §XVII §D:
+        score_a = max(0, 1.0 - dist(cluster, a) / h_a)
+    where h_a is the horizon for anchor a's type (from horizon_map, with
+    default_horizon fallback). Final score = max(score_a over all anchors).
+
+    Witness format per canonical §XVII §F:
+        semantic_anchor:{name}/{primary_type} ({dist_m}m)
+
+    Returns:
+        (score, witness) tuple. score in [0.0, 1.0]; witness is None
+        when no anchor produces a positive score (empty list, all outside
+        their horizons, or all anchor records malformed).
+    """
+    # Default args resolved here, not in signature, so future overrides
+    # of the module constants automatically apply without touching callers.
+    if horizon_map is None:
+        horizon_map = _SEMANTIC_TYPE_HORIZON_MAP
+    if default_horizon is None:
+        default_horizon = _SEMANTIC_DEFAULT_HORIZON_M
+
+    if not anchors:
+        return 0.0, None
+
+    best_score = 0.0
+    best_witness: Optional[str] = None
+
+    for a in anchors:
+        # Horizon resolution: first match in anchor's types array wins.
+        # Google sorts types by relevance, so first-match is typically
+        # the most specific applicable type (§XVII §C).
+        h_a = default_horizon
+        for t in a.types:
+            if t in horizon_map:
+                h_a = horizon_map[t]
+                break
+
+        # Linear-decay confidence weighting (§XVII §D).
+        score = max(0.0, 1.0 - (a.dist_m / h_a))
+
+        if score > best_score:
+            best_score = score
+            # Defensive: empty types array shouldn't happen (poi_service
+            # filters incomplete records) but witness must still produce
+            # a forensic-legible string if it does.
+            primary_type = a.types[0] if a.types else "unknown"
+            best_witness = (
+                f"semantic_anchor:{a.name}/{primary_type} ({a.dist_m:.0f}m)"
+            )
+
+    return best_score, best_witness
+
+
 @dataclass(frozen=True)
 class MatchOutcome:
     """Internal carrier between per-class matchers and evaluate().
@@ -721,6 +833,8 @@ class MatchOutcome:
     poi_witness: Optional[str] = None
     poi_type_match: Optional[bool] = None
     poi_type_witness: Optional[str] = None
+    semantic_anchor_score: Optional[float] = None
+    semantic_anchor_witness: Optional[str] = None
 
 
 def _weighted_confidence(

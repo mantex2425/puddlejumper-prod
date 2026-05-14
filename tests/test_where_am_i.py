@@ -2143,14 +2143,21 @@ class TestWitnessWiring:
         assert outcome.poi_match == 0.0
         assert outcome.poi_witness is None
 
-    def test_matchoutcome_has_12_fields(self):
-        # Arithmetic gate: MatchOutcome should have exactly 12 dataclass fields
-        # after Item 2 (was 10 before, +2 for poi_type_match + poi_type_witness).
+    def test_matchoutcome_has_14_fields(self):
+        # Arithmetic gate: MatchOutcome should have exactly 14 dataclass fields.
+        # Provenance:
+        #   - Originally 10.
+        #   - Item 2 (Phase 2c.2, 2026-05-08): +2 for poi_type_match +
+        #     poi_type_witness (Head 4 wiring).
+        #   - §XVII Patch 2/5 (2026-05-14): +2 for semantic_anchor_score +
+        #     semantic_anchor_witness (Head 5 wiring).
         from where_am_i import MatchOutcome
         fields = list(MatchOutcome.__dataclass_fields__.keys())
-        assert len(fields) == 12
+        assert len(fields) == 14
         assert "poi_type_match" in fields
         assert "poi_type_witness" in fields
+        assert "semantic_anchor_score" in fields
+        assert "semantic_anchor_witness" in fields
 
 
 # =============================================================================
