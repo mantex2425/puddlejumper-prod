@@ -992,6 +992,47 @@ def _log_decision_context(
     top_match = matches[0] if matches else None
     top_outcome = diagnostics.outcome_for(top_match) if top_match else None
 
+    # §XVII Patch 4 (2026-05-14): PDC forensic-column resolution + drift fix.
+    #
+    # Pre-Patch-4 binding (bug): poi_lookup_source <- top_outcome.poi_witness
+    # poi_witness is a Head-1 witness string (e.g. "fuzzy:Pappadeaux"), NOT a
+    # lookup-source string. The column was 100% NULL in production for 7 days
+    # because Head 1 was dormant. Patch 3 brought Head 5 online; this block
+    # routes Head 5's source string to the correct column at the same moment
+    # forensic data starts arriving.
+    #
+    # Tie-break rule: Head 5 wins when its score >= Head 1's score (None as 0).
+    # When Head 5 wins, all three PDC columns reflect Head 5's data. When
+    # Head 1 wins (or no head fired), Head 1's score lands in poi_match_score
+    # and cluster_poi_names lands in poi_top_names — same as before.
+    #
+    # TODO (post-Patch-4 cleanup): Head 1's witness (top_outcome.poi_witness)
+    # is now unbound from any PDC column. A follow-up "PDC witness cleanup"
+    # patch will add a dedicated poi_witness column or repurpose match_signal.
+    # Production volume of Head 1 witnesses: ~65 rows in 7 days, previously
+    # misfiled into poi_lookup_source.
+    sem_score = top_outcome.semantic_anchor_score if top_outcome else None
+    sem_witness = top_outcome.semantic_anchor_witness if top_outcome else None
+    sem_source = top_outcome.semantic_lookup_source if top_outcome else None
+    head1_score = top_outcome.poi_match if top_outcome else None
+
+    head5_wins = (
+        sem_score is not None
+        and sem_score >= (head1_score or 0.0)
+    )
+
+    if head5_wins:
+        pdc_poi_lookup_source = sem_source
+        pdc_poi_match_score = sem_score
+        if sem_witness:
+            pdc_poi_top_names = [sem_witness] + list(diagnostics.cluster_poi_names or [])
+        else:
+            pdc_poi_top_names = diagnostics.cluster_poi_names or None
+    else:
+        pdc_poi_lookup_source = None
+        pdc_poi_match_score = head1_score
+        pdc_poi_top_names = diagnostics.cluster_poi_names or None
+
     # Deterministic fold (Phase 1B Option B): derive post-dispatch
     # current_offer_id. See _derive_post_offer_id docstring for rules.
     post_offer_id = _derive_post_offer_id(executed_actions, current_offer_id)
@@ -1052,9 +1093,9 @@ def _log_decision_context(
             cluster.median_lng if cluster else None,
             cluster.n if cluster else None,
             cluster.duration_s if cluster else None,
-            top_outcome.poi_witness if top_outcome else None,
-            top_outcome.poi_match if top_outcome else None,
-            diagnostics.cluster_poi_names if diagnostics.cluster_poi_names else None,
+            pdc_poi_lookup_source,
+            pdc_poi_match_score,
+            pdc_poi_top_names,
             action_str,
             dispatch_executed,
             dispatch_error_msg,

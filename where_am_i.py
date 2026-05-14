@@ -849,6 +849,10 @@ class MatchOutcome:
     poi_type_witness: Optional[str] = None
     semantic_anchor_score: Optional[float] = None
     semantic_anchor_witness: Optional[str] = None
+    # §XVII Patch 4 (2026-05-14): plumbs POILookupResult.source through
+    # the matcher pipeline. Values: 'semantic_cache_hit', 'semantic_api_call',
+    # 'semantic_api_error', or None (Head 5 not consulted for this target).
+    semantic_lookup_source: Optional[str] = None
 
 
 def _weighted_confidence(
@@ -1027,6 +1031,7 @@ def _build_outcome(
     poi_type_witness: Optional[str] = None,
     semantic_anchor_score: Optional[float] = None,
     semantic_anchor_witness: Optional[str] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Assemble a MatchOutcome from computed signals + confidence.
 
@@ -1057,6 +1062,7 @@ def _build_outcome(
         poi_type_witness=poi_type_witness,
         semantic_anchor_score=semantic_anchor_score,
         semantic_anchor_witness=semantic_anchor_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1066,6 +1072,7 @@ def _match_intersection(
     target,
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Match an intersection-class target ("Joan St & Settemont Rd")."""
     if (skip := _validate_target(target, "intersection")) is not None:
@@ -1099,6 +1106,7 @@ def _match_intersection(
         poi_type_witness=poi_type_witness_str,
         semantic_anchor_score=sem_score,
         semantic_anchor_witness=sem_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1108,6 +1116,7 @@ def _match_single_road(
     target,
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Match a single_road target ("fondren rd")."""
     if (skip := _validate_target(target, "single_road")) is not None:
@@ -1141,6 +1150,7 @@ def _match_single_road(
         poi_type_witness=poi_type_witness_str,
         semantic_anchor_score=sem_score,
         semantic_anchor_witness=sem_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1150,6 +1160,7 @@ def _match_number_on_street(
     target,
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Match a number_on_street target ("1234 Main St").
 
@@ -1187,6 +1198,7 @@ def _match_number_on_street(
         poi_type_witness=poi_type_witness_str,
         semantic_anchor_score=sem_score,
         semantic_anchor_witness=sem_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1196,6 +1208,7 @@ def _match_apartment_complex(
     target,
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Match an apartment_complex target.
 
@@ -1235,6 +1248,7 @@ def _match_apartment_complex(
         poi_type_witness=poi_type_witness_str,
         semantic_anchor_score=sem_score,
         semantic_anchor_witness=sem_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1244,6 +1258,7 @@ def _match_poi_class(
     target,
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
+    semantic_lookup_source: Optional[str] = None,
 ) -> MatchOutcome:
     """Matcher for address_class='poi' (airports, named venues, named
     businesses where the offer text IS the destination identity).
@@ -1337,6 +1352,7 @@ def _match_poi_class(
         poi_type_witness=poi_type_witness_str,
         semantic_anchor_score=sem_score,
         semantic_anchor_witness=sem_witness,
+        semantic_lookup_source=semantic_lookup_source,
     )
 
 
@@ -1917,8 +1933,16 @@ class WhereAmI:
         # _read_cache pattern). Returns empty list on no-text, no-anchors,
         # or any error — Head 5 falls through; other heads still fire.
         def _fetch_cluster_anchors(target_addr):
+            """Returns (cluster_anchors, semantic_lookup_source).
+
+            §XVII Patch 4 (2026-05-14): surfaces POILookupResult.source so the
+            matcher can record which endpoint sourced the anchor data
+            ('semantic_cache_hit', 'semantic_api_call', 'semantic_api_error').
+            Both elements of the tuple are None/empty on no-target or
+            exception paths.
+            """
             if not target_addr:
-                return []
+                return [], None
             try:
                 from poi_service import get_anchors_for_text
                 anchor_result = get_anchors_for_text(
@@ -1926,6 +1950,7 @@ class WhereAmI:
                     bias_lat=_HOUSTON_BIAS_LAT,
                     bias_lng=_HOUSTON_BIAS_LNG,
                 )
+                raw_source = anchor_result.source if anchor_result else None
                 raw_anchors = list(anchor_result.pois) if anchor_result else []
                 # Recompute dist_m for each anchor relative to cluster centroid
                 # (Patch 1 returns anchors with dist_m=0.0 by Gemini directive 1).
@@ -1942,13 +1967,13 @@ class WhereAmI:
                         place_id=a.place_id, name=a.name, types=a.types,
                         lat=a.lat, lng=a.lng, dist_m=dist_m,
                     ))
-                return cluster_anchors
+                return cluster_anchors, raw_source
             except Exception:
                 log.warning(
                     "[WAI] semantic anchor fetch failed for target_addr=%r — proceeding without Head 5",
                     target_addr, exc_info=True,
                 )
-                return []
+                return [], None
 
         # Step 4 (Map): generate (target, location_type, offer_id) candidates.
         candidates = []
@@ -1993,10 +2018,13 @@ class WhereAmI:
                     target.address_class, offer_id,
                 )
                 continue
-            cluster_anchors = _fetch_cluster_anchors(getattr(target, "address", None))
+            cluster_anchors, semantic_source = _fetch_cluster_anchors(
+                getattr(target, "address", None)
+            )
             outcome = matcher(
                 cluster, topo, target,
                 pois=cluster_pois, anchors=cluster_anchors,
+                semantic_lookup_source=semantic_source,
             )
             per_target_outcomes.append((offer_id, location_type, outcome))
 

@@ -6,6 +6,14 @@ this sprint wires (poi_lookup_source, poi_match_score, poi_top_names)
 plus a regression guard that asserts existing wai_* bindings continue
 to populate correctly.
 
+§XVII Patch 4 (2026-05-14, follow-up Patch 4a): poi_lookup_source binding
+was corrected to receive top_outcome.semantic_lookup_source (the POI-data
+source: semantic_cache_hit / semantic_api_call / semantic_api_error)
+instead of top_outcome.poi_witness (a Head-1 match-witness string). The
+test test_pdc_poi_lookup_source_populated was rewritten to codify the
+corrected invariant. The _StandinMatchOutcome fake was extended with the
+5 fields it had been missing across Item 2 + Patch 2 + Patch 4.
+
 Pre-sprint state: zero pytest coverage existed for _log_decision_context;
 all writer-level testing was via integration drives. This file is the
 unit-level floor going forward.
@@ -74,6 +82,16 @@ class _StandinMatchOutcome:
     signals: Optional[dict] = None
     poi_match: Optional[float] = None
     poi_witness: Optional[str] = None
+    # Item 2 fields (Phase 2c.2, 2026-05-08): Head 4 poi_type witnesses.
+    poi_type_match: Optional[bool] = None
+    poi_type_witness: Optional[str] = None
+    # §XVII Patch 2 fields (2026-05-14): Head 5 semantic anchor signal.
+    semantic_anchor_score: Optional[float] = None
+    semantic_anchor_witness: Optional[str] = None
+    # §XVII Patch 4 field (2026-05-14): POILookupResult.source plumbed
+    # through matcher pipeline. Values: semantic_cache_hit,
+    # semantic_api_call, semantic_api_error, or None.
+    semantic_lookup_source: Optional[str] = None
 
 
 @dataclass
@@ -208,16 +226,32 @@ class TestPoiBindings:
         assert params[COL["poi_match_score"]] == 0.85
 
     def test_pdc_poi_lookup_source_populated(self):
-        """top_outcome.poi_witness -> poi_lookup_source column.
+        """top_outcome.semantic_lookup_source -> poi_lookup_source column.
 
-        Witness format is per-head provenance (fuzzy:NAME, branded:TOKEN,
-        airport_type:TOKEN); the writer treats it as opaque text.
+        §XVII Patch 4 (2026-05-14) corrected the binding here. Pre-Patch-4,
+        the column was bound to top_outcome.poi_witness — a Head-1 witness
+        string like 'fuzzy:Pappadeaux'. That binding had drifted: the
+        column is *meant* to record where the POI data came from, not
+        which head won the match. The column had been 100% NULL in
+        production for 7 days because Head 1 was dormant; the drift
+        only would have started producing wrong rows the moment Head 1
+        or Head 5 fired in volume.
+
+        Patch 4 routes top_outcome.semantic_lookup_source to the column,
+        with values: 'semantic_cache_hit', 'semantic_api_call',
+        'semantic_api_error', or None. Head 5 wins the tie-break when
+        its score >= Head 1's score (None as 0), so this test sets
+        Head 5 score positive and leaves Head 1 unset.
         """
-        outcome = _StandinMatchOutcome(poi_witness="branded:starbucks")
+        outcome = _StandinMatchOutcome(
+            semantic_anchor_score=0.85,
+            semantic_anchor_witness="semantic_anchor:United/transportation_service (88m)",
+            semantic_lookup_source="semantic_cache_hit",
+        )
         match = _StandinMatch()
         diag = _make_diagnostics(outcome=outcome)
         params = _call_log(diag, [match])
-        assert params[COL["poi_lookup_source"]] == "branded:starbucks"
+        assert params[COL["poi_lookup_source"]] == "semantic_cache_hit"
 
     def test_pdc_poi_top_names_populated(self):
         """diagnostics.cluster_poi_names -> poi_top_names column.

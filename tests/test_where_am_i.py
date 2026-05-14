@@ -1034,7 +1034,7 @@ class TestClassDispatchContract:
     the bug ships.
     """
 
-    def test_every_dispatch_matcher_accepts_pois_and_anchors_kwargs(self):
+    def test_every_dispatch_matcher_accepts_pois_anchors_and_source_kwargs(self):
         """Every _CLASS_DISPATCH entry must accept pois=... AND anchors=...
         per the dispatch contract. TypeError here means a matcher signature
         has drifted from the where_am_i.py call site — same regression
@@ -1042,7 +1042,9 @@ class TestClassDispatchContract:
 
         Contract evolution:
           - 2026-05-09: pois=... mandatory (Item 2 / _match_poi_stub bug)
-          - 2026-05-14: anchors=... added (§XVII Patch 3a, Head 5 wiring)
+          - 2026-05-14a: anchors=... added (§XVII Patch 3a, Head 5 wiring)
+          - 2026-05-14b: semantic_lookup_source=... added (§XVII Patch 4,
+                         POILookupResult.source plumbed through matcher pipeline)
 
         We pass pois=[] and anchors=[] (empty lists) because those are
         the common production cases (no POIs near cluster, no semantic
@@ -1057,12 +1059,17 @@ class TestClassDispatchContract:
 
         for address_class, matcher in _CLASS_DISPATCH.items():
             try:
-                outcome = matcher(cluster, topo, target, pois=[], anchors=[])
+                outcome = matcher(
+                    cluster, topo, target,
+                    pois=[], anchors=[],
+                    semantic_lookup_source=None,
+                )
             except TypeError as e:
                 raise AssertionError(
                     f"_CLASS_DISPATCH[{address_class!r}] -> "
                     f"{matcher.__name__} does not accept dispatch contract "
-                    f"(cluster, topo, target, pois=..., anchors=...): {e}. "
+                    f"(cluster, topo, target, pois=..., anchors=..., "
+                    f"semantic_lookup_source=...): {e}. "
                     f"L-6 corollary regression — see "
                     f"TestClassDispatchContract module docstring."
                 )
@@ -2117,21 +2124,24 @@ class TestWitnessWiring:
         assert outcome.poi_match == 0.0
         assert outcome.poi_witness is None
 
-    def test_matchoutcome_has_14_fields(self):
-        # Arithmetic gate: MatchOutcome should have exactly 14 dataclass fields.
+    def test_matchoutcome_has_15_fields(self):
+        # Arithmetic gate: MatchOutcome should have exactly 15 dataclass fields.
         # Provenance:
         #   - Originally 10.
         #   - Item 2 (Phase 2c.2, 2026-05-08): +2 for poi_type_match +
         #     poi_type_witness (Head 4 wiring).
         #   - §XVII Patch 2/5 (2026-05-14): +2 for semantic_anchor_score +
         #     semantic_anchor_witness (Head 5 wiring).
+        #   - §XVII Patch 4/5 (2026-05-14): +1 for semantic_lookup_source
+        #     (POILookupResult.source plumbed through matcher pipeline).
         from where_am_i import MatchOutcome
         fields = list(MatchOutcome.__dataclass_fields__.keys())
-        assert len(fields) == 14
+        assert len(fields) == 15
         assert "poi_type_match" in fields
         assert "poi_type_witness" in fields
         assert "semantic_anchor_score" in fields
         assert "semantic_anchor_witness" in fields
+        assert "semantic_lookup_source" in fields
 
 
 # =============================================================================
