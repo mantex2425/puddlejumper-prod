@@ -248,8 +248,8 @@ _CONFIDENCE_WEIGHTS = {
 # step in §XVII and bypassing review reintroduces the lexicon-maintenance
 # trap §XVII was built to eliminate.
 _SEMANTIC_TYPE_HORIZON_MAP: dict[str, float] = {
-    "airport": 800.0,
-    "international_airport": 800.0,
+    "airport": 1000.0,
+    "international_airport": 1000.0,
     "stadium": 600.0,
     "tourist_attraction": 600.0,
     "amusement_park": 600.0,
@@ -264,6 +264,20 @@ _SEMANTIC_TYPE_HORIZON_MAP: dict[str, float] = {
 
 # Default horizon for anchors whose types don't match any key above.
 _SEMANTIC_DEFAULT_HORIZON_M: float = 500.0
+
+
+# §XVII Patch 3: fixed market-center bias for Head 5 searchText calls.
+# Per Andrew + Gemini ratification 2026-05-14, the locationBias center
+# is FIXED to Houston downtown (not cluster centroid). Eliminates cache
+# fragmentation — IAH's 7+ sub-clusters now share one cache row per
+# unique offer text. Trade-off: 1% slight relevance reduction (Google
+# may slightly reorder anchors when biased far from cluster) vs.
+# ~7x cache hit rate increase for high-volume venues.
+#
+# When PuddleJumper expands beyond Houston, this becomes a per-market
+# lookup keyed on driver location. For now, single-market is correct.
+_HOUSTON_BIAS_LAT: float = 29.7604
+_HOUSTON_BIAS_LNG: float = -95.3698
 
 
 # =============================================================================
@@ -1011,6 +1025,8 @@ def _build_outcome(
     poi_witness: Optional[str] = None,
     poi_type_match: Optional[bool] = None,
     poi_type_witness: Optional[str] = None,
+    semantic_anchor_score: Optional[float] = None,
+    semantic_anchor_witness: Optional[str] = None,
 ) -> MatchOutcome:
     """Assemble a MatchOutcome from computed signals + confidence.
 
@@ -1039,6 +1055,8 @@ def _build_outcome(
         poi_witness=poi_witness,
         poi_type_match=poi_type_match,
         poi_type_witness=poi_type_witness,
+        semantic_anchor_score=semantic_anchor_score,
+        semantic_anchor_witness=semantic_anchor_witness,
     )
 
 
@@ -1070,12 +1088,17 @@ def _match_intersection(
             _render_reason("intersection", signals, confidence),
         )
 
+    # §XVII Patch 3: Head 5 semantic anchor signal.
+    sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
+
     return _build_outcome(
         cluster, target, "intersection", signals, confidence,
         poi_match=poi_match_score,
         poi_witness=poi_witness_str,
         poi_type_match=poi_type_match_bool,
         poi_type_witness=poi_type_witness_str,
+        semantic_anchor_score=sem_score,
+        semantic_anchor_witness=sem_witness,
     )
 
 
@@ -1107,12 +1130,17 @@ def _match_single_road(
             _render_reason("single_road", signals, confidence),
         )
 
+    # §XVII Patch 3: Head 5 semantic anchor signal.
+    sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
+
     return _build_outcome(
         cluster, target, "single_road", signals, confidence,
         poi_match=poi_match_score,
         poi_witness=poi_witness_str,
         poi_type_match=poi_type_match_bool,
         poi_type_witness=poi_type_witness_str,
+        semantic_anchor_score=sem_score,
+        semantic_anchor_witness=sem_witness,
     )
 
 
@@ -1148,12 +1176,17 @@ def _match_number_on_street(
             _render_reason("number_on_street", signals, confidence),
         )
 
+    # §XVII Patch 3: Head 5 semantic anchor signal.
+    sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
+
     return _build_outcome(
         cluster, target, "number_on_street", signals, confidence,
         poi_match=poi_match_score,
         poi_witness=poi_witness_str,
         poi_type_match=poi_type_match_bool,
         poi_type_witness=poi_type_witness_str,
+        semantic_anchor_score=sem_score,
+        semantic_anchor_witness=sem_witness,
     )
 
 
@@ -1191,58 +1224,119 @@ def _match_apartment_complex(
             _render_reason("apartment_complex", signals, confidence),
         )
 
+    # §XVII Patch 3: Head 5 semantic anchor signal.
+    sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
+
     return _build_outcome(
         cluster, target, "apartment_complex", signals, confidence,
         poi_match=poi_match_score,
         poi_witness=poi_witness_str,
         poi_type_match=poi_type_match_bool,
         poi_type_witness=poi_type_witness_str,
+        semantic_anchor_score=sem_score,
+        semantic_anchor_witness=sem_witness,
     )
 
 
-def _match_poi_stub(
+def _match_poi_class(
     cluster: Cluster,
     topo: RoadTopology,
     target,
-    pois=None,
-    anchors=None,
+    pois: Optional[list] = None,
+    anchors: Optional[list] = None,
 ) -> MatchOutcome:
-    """Stub for poi-class targets (airports, named businesses).
+    """Matcher for address_class='poi' (airports, named venues, named
+    businesses where the offer text IS the destination identity).
 
-    Note: `pois` accepted for _CLASS_DISPATCH contract conformance only —
-    the dispatch site at where_am_i.py:1700 passes pois=cluster_pois to
-    every matcher. The stub does not consume it. Production bug
-    2026-05-09 (50+ TypeErrors during 75-minute drive validation) was
-    caused by this kwarg missing here while every other matcher had it.
-    L-6 corollary regression: dispatch-call contract changed without
-    grepping every dispatch entry's signature. Locked-in by
-    TestClassDispatchContract in tests/test_where_am_i.py.
+    §XVII Patch 3 (2026-05-14): replaces _match_poi_stub. Per
+    Andrew + Gemini ratification, the poi class is no longer
+    deferred to v1.1 — Head 5 (semantic anchor) gives us the
+    identity, Heads 1 and 4 provide defense in depth.
 
-    Original behavior:
+    Composition: max(Head 5, Head 4, Head 1) per Gemini ratification.
 
-    Per Step 1 Q4 lock and Gemini Step 5.4 Q3 ratification: returns
-    not_at_pudo semantics with WARN log. The cluster falls through to
-    ghost match -> at_unknown_pudo in evaluate(), and the WARN log
-    surfaces the POI miss rate in shadow-mode aggregates.
+    Head 5 (_signal_semantic_anchor) is the high-precision primary.
+    Queries Google Places searchText with the offer text via
+    poi_service.get_anchors_for_text; returns linear-decay score.
+    At airports the horizon is 1000m (Gemini ratification 2026-05-14)
+    so even the centroid-only fallback (no sub-anchors returned) at
+    Terminal-E-equivalent distance ~500m yields confidence 0.50,
+    clearing the 0.40 WAI floor.
 
-    POI matching deferred to v1.1 per RFC v2.4.7. Polygon-based
-    matching (airport curbs, business footprints) is a separate
-    architectural conversation from point-proximity matching.
+    Head 4 (_signal_poi_type_match) is the structural fallback.
+    Fires when a nearby cluster POI has the right type for the offer
+    class (e.g. cluster includes a 'doctor' POI for a dentist offer).
+    Useful when Google's text search returns nothing useful (rare
+    but happens for generic offer text like "Dentist, Sugar Land").
+
+    Head 1 (_signal_poi_match) is the legacy safety net. Fuzzy /
+    branded / airport-type co-reference between offer address and
+    cluster POIs. Catches the cases where Heads 4 and 5 miss but
+    name correlation is high.
+
+    The winning head's witness propagates to MatchOutcome.
+    semantic_anchor_witness / poi_type_witness / poi_witness reflect
+    which signal source identified the match, queryable from the
+    pudo_decision_context forensic record (Patch 4).
     """
-    log.warning(
-        "[WAI matcher=poi_stub] target=%r class=poi - match deferred to v1.1, "
-        "falling through to ghost / at_unknown_pudo",
-        getattr(target, "address", None),
+    if (skip := _validate_target(target, "poi")) is not None:
+        return skip
+
+    # Head 5: semantic anchor (primary signal for poi class)
+    sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
+
+    # Head 4: poi_type_match (structural fallback)
+    poi_type_match_bool, poi_type_witness_str = _signal_poi_type_match(
+        pois or [], target.address_class,
     )
-    return MatchOutcome(
-        matched=False,
-        confidence=0.0,
-        corrected_lat=None,
-        corrected_lng=None,
-        reason="poi_stub",
-        pudo_type=None,
-        target_address=getattr(target, "address", None),
-        signals=None,
+    # Head 4 returns bool not float — coerce for max() comparison.
+    h4_score = 1.0 if poi_type_match_bool else 0.0
+
+    # Head 1: fuzzy/branded/airport-type (legacy safety net)
+    poi_match_score, poi_witness_str = _signal_poi_match(
+        pois or [], getattr(target, "address", "") or "",
+    )
+
+    # Composition: max() per Gemini ratification (defense in depth).
+    # Ties broken by source priority: Head 5 > Head 4 > Head 1.
+    # Pure max-on-tuple would prefer Head 5 at ties due to argument
+    # order in Python's stable max — explicit ordering documented here.
+    candidates = [
+        (sem_score, sem_witness, "head5_semantic"),
+        (h4_score, poi_type_witness_str, "head4_type"),
+        (poi_match_score, poi_witness_str, "head1_fuzzy"),
+    ]
+    confidence, winning_witness, winning_head = max(
+        candidates, key=lambda c: c[0]
+    )
+
+    # Forensic INFO log per Andrew + Gemini ratification 2026-05-14.
+    # Replaces the previous WARN log which implied something broken.
+    # A Semantic Anchor match at IAH isn't broken — it's the system
+    # working as intended. INFO surfaces the match for shadow-mode
+    # aggregates and post-drive audit.
+    if confidence >= WAI_CONFIDENCE_THRESHOLD:
+        log.info(
+            "[WAI matcher=poi_class] target=%r winning_head=%s confidence=%.3f witness=%r",
+            getattr(target, "address", None),
+            winning_head,
+            confidence,
+            winning_witness,
+        )
+
+    # Signals dict for reason rendering. poi class doesn't compute the
+    # standard 6 road-based signals (no road topology relevance for an
+    # airport drop); we build a minimal dict.
+    signals = {"semantic_anchor": sem_score}
+
+    return _build_outcome(
+        cluster, target, "poi", signals, confidence,
+        poi_match=poi_match_score,
+        poi_witness=poi_witness_str,
+        poi_type_match=poi_type_match_bool,
+        poi_type_witness=poi_type_witness_str,
+        semantic_anchor_score=sem_score,
+        semantic_anchor_witness=sem_witness,
     )
 
 
@@ -1254,7 +1348,7 @@ _CLASS_DISPATCH = {
     "single_road":       _match_single_road,
     "number_on_street":  _match_number_on_street,
     "apartment_complex": _match_apartment_complex,
-    "poi":               _match_poi_stub,
+    "poi":               _match_poi_class,
 }
 
 
@@ -1829,8 +1923,8 @@ class WhereAmI:
                 from poi_service import get_anchors_for_text
                 anchor_result = get_anchors_for_text(
                     target_addr, self.cur,
-                    bias_lat=cluster.median_lat,
-                    bias_lng=cluster.median_lng,
+                    bias_lat=_HOUSTON_BIAS_LAT,
+                    bias_lng=_HOUSTON_BIAS_LNG,
                 )
                 raw_anchors = list(anchor_result.pois) if anchor_result else []
                 # Recompute dist_m for each anchor relative to cluster centroid
