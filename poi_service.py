@@ -135,6 +135,29 @@ PLACES_V1_FIELD_MASK: str = (
     "places.id,places.displayName,places.types,places.location"
 )
 
+
+# §XVII: Google Places v1 searchText endpoint. POST with JSON body; field
+# mask in header (same as searchNearby). Used to resolve offer dropoff
+# text to semantic anchors per canonical §XVII.
+PLACES_V1_TEXT_URL: str = "https://places.googleapis.com/v1/places:searchText"
+
+
+# Max anchors returned per searchText call. Captures dense venues (IAH
+# returns ~12 anchors for "United, Houston, Texas") without inflating
+# per-call cost.
+PLACES_V1_TEXT_MAX_RESULTS: int = 20
+
+
+# §XVII TTL on searchText cache writes per canonical §E. Venue identity
+# is stable for years; 365 days is conservative.
+SEMANTIC_CACHE_TTL_DAYS: int = 365
+
+
+# §XVII default locationBias radius. 50km wide enough to cover the Houston
+# metro for any text query; soft hint, not a hard restriction (Google may
+# return results outside this radius if relevance is high).
+SEMANTIC_DEFAULT_BIAS_RADIUS_M: float = 50000.0
+
 # v1 hard cap is 20 results; we request the max so tight clusters in dense
 # strip malls don't get truncated. The 50m radius keeps this manageable.
 PLACES_V1_MAX_RESULTS: int = 20
@@ -255,6 +278,7 @@ def _read_cache(
         FROM app_private.poi_cache pc
         LEFT JOIN LATERAL jsonb_array_elements(pc.places) AS p ON TRUE
         WHERE pc.expires_at > (NOW() AT TIME ZONE 'UTC')
+          AND pc.text_query IS NULL
           AND ST_DWithin(
               pc.query_geog,
               app_private.coords_to_geography(%s, %s),
@@ -498,3 +522,298 @@ def _flat_earth_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dy = (lat2 - lat1) * 111_111.0
     dx = (lng2 - lng1) * 111_111.0 * math.cos(avg_lat_rad)
     return math.sqrt(dx * dx + dy * dy)
+
+# ─── §XVII: SEMANTIC ANCHOR (searchText) ─────────────────────────────────────
+
+
+def _call_google_places_text_v1(
+    text_query: str,
+    bias_lat: float,
+    bias_lng: float,
+    bias_radius_m: float,
+) -> tuple[dict[str, Any] | None, str]:
+    """POST to Google Places v1 searchText. Returns (response_dict, source).
+
+    Sibling of _call_google_places_v1. Differs in two ways:
+      (1) Endpoint: places:searchText, not places:searchNearby.
+      (2) Body uses locationBias.circle (soft hint), not locationRestriction.
+          Google may return results outside the bias radius if relevance is high.
+
+    On 200 OK (including empty places list): returns (response, 'semantic_api_call').
+    On any failure: returns (None, 'semantic_api_error') and logs a warning.
+
+    Fail-closed: caller treats None as "no API data, no cache write,
+    empty anchor list." System falls through to other matcher heads for
+    this cluster.
+    """
+    api_key = os.environ.get(_API_KEY_ENV_VAR)
+    if not api_key:
+        logger.warning(
+            "Google Places v1 searchText call skipped: %s not set in environment",
+            _API_KEY_ENV_VAR,
+        )
+        return None, "semantic_api_error"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": PLACES_V1_FIELD_MASK,
+    }
+    body = {
+        "textQuery": text_query,
+        "maxResultCount": PLACES_V1_TEXT_MAX_RESULTS,
+        "locationBias": {
+            "circle": {
+                "center": {"latitude": bias_lat, "longitude": bias_lng},
+                "radius": bias_radius_m,
+            }
+        },
+    }
+
+    try:
+        response = requests.post(
+            PLACES_V1_TEXT_URL,
+            json=body,
+            headers=headers,
+            timeout=PLACES_V1_TIMEOUT_S,
+        )
+    except requests.RequestException as exc:
+        logger.warning("Google Places v1 searchText request exception: %s", exc)
+        return None, "semantic_api_error"
+
+    if response.status_code != 200:
+        logger.warning(
+            "Google Places v1 searchText returned %d: %s",
+            response.status_code,
+            response.text[:200],
+        )
+        return None, "semantic_api_error"
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        logger.warning("Google Places v1 searchText returned malformed JSON: %s", exc)
+        return None, "semantic_api_error"
+
+    # Empty places is a valid 200 response (negative-cache scenario; rare for
+    # well-formed text queries, common for gibberish/dead venues). Normalize
+    # 'places' key for downstream parsing/write.
+    if "places" not in data:
+        data["places"] = []
+
+    return data, "semantic_api_call"
+
+
+def _read_text_cache(
+    text_query: str,
+    bias_lat: float,
+    bias_lng: float,
+    bias_radius_m: float,
+    cur: "_Cursor",
+) -> list[POI] | None:
+    """Read searchText cache rows by exact (text_query, bias) tuple.
+
+    Sibling of _read_cache. Differs in two ways:
+      (1) Lookup is by partial UNIQUE key (text_query, query_lat, query_lng,
+          bias_radius_m), not by spatial proximity.
+      (2) dist_m on returned POIs is 0.0 per Gemini directive 1 — these are
+          semantic anchors whose spatial relationship to the cluster is
+          recomputed by Patch 2's _signal_semantic_anchor against the
+          cluster centroid, not the bias center.
+
+    Returns None on miss (caller invokes API), or a list of POIs on hit
+    (possibly empty for negative-cache rows).
+
+    Side effect: matched row has last_hit_at touched, throttled to once
+    per hour per row.
+    """
+    cur.execute(
+        """
+        SELECT
+            pc.id              AS cache_id,
+            p->>'id'           AS place_id,
+            p->'displayName'->>'text' AS name,
+            p->'types'         AS types,
+            (p->'location'->>'latitude')::float  AS poi_lat,
+            (p->'location'->>'longitude')::float AS poi_lng
+        FROM app_private.poi_cache pc
+        LEFT JOIN LATERAL jsonb_array_elements(pc.places) AS p ON TRUE
+        WHERE pc.expires_at > (NOW() AT TIME ZONE 'UTC')
+          AND pc.text_query = %s
+          AND pc.query_lat = %s
+          AND pc.query_lng = %s
+          AND pc.bias_radius_m = %s
+        """,
+        (text_query, bias_lat, bias_lng, bias_radius_m),
+    )
+
+    rows = cur.fetchall()
+    if not rows:
+        return None  # complete miss; caller invokes API
+
+    # Touch last_hit_at, throttled to 1h per row.
+    cache_ids = list({row["cache_id"] for row in rows})
+    cur.execute(
+        f"""
+        UPDATE app_private.poi_cache
+        SET last_hit_at = (NOW() AT TIME ZONE 'UTC')
+        WHERE id = ANY(%s)
+          AND (
+              last_hit_at IS NULL
+              OR last_hit_at < (NOW() AT TIME ZONE 'UTC')
+                               - INTERVAL '{TOUCH_THROTTLE_INTERVAL}'
+          )
+        """,
+        (cache_ids,),
+    )
+
+    # Build POIs from non-sentinel rows. NULL place_id rows are negative-
+    # cache sentinels (cache row exists but places is []).
+    pois: list[POI] = []
+    for row in rows:
+        if row["place_id"] is None:
+            continue
+        pois.append(
+            POI(
+                place_id=row["place_id"],
+                name=row["name"] or "",
+                types=list(row["types"] or []),
+                lat=float(row["poi_lat"]),
+                lng=float(row["poi_lng"]),
+                dist_m=0.0,  # §XVII: spatial relation deferred to matcher
+            )
+        )
+
+    return pois
+
+
+def _write_text_cache(
+    text_query: str,
+    bias_lat: float,
+    bias_lng: float,
+    bias_radius_m: float,
+    places: list[dict[str, Any]],
+    cur: "_Cursor",
+) -> None:
+    """INSERT a new searchText cache row. Idempotent via partial UNIQUE.
+
+    Sibling of _write_cache. Differs in three ways:
+      (1) Sets text_query and bias_radius_m columns.
+      (2) 365-day TTL (SEMANTIC_CACHE_TTL_DAYS) vs 30-day legacy TTL.
+      (3) ON CONFLICT DO NOTHING against the partial UNIQUE index per
+          canonical §E. Concurrent writers with the same (text_query, bias)
+          tuple collapse to one row.
+
+    Empty places list is permitted (negative-cache row; suppresses API
+    retries for 365 days for gibberish queries).
+    """
+    cur.execute(
+        f"""
+        INSERT INTO app_private.poi_cache
+            (expires_at, query_lat, query_lng, places, text_query, bias_radius_m)
+        VALUES (
+            (NOW() AT TIME ZONE 'UTC') + INTERVAL '{SEMANTIC_CACHE_TTL_DAYS} days',
+            %s, %s, %s::jsonb, %s, %s
+        )
+        ON CONFLICT (text_query, query_lat, query_lng, bias_radius_m)
+            WHERE text_query IS NOT NULL DO NOTHING
+        """,
+        (
+            bias_lat,
+            bias_lng,
+            json.dumps(places),
+            text_query,
+            bias_radius_m,
+        ),
+    )
+
+
+def _parse_v1_anchors(
+    api_response: dict[str, Any],
+) -> list[POI]:
+    """Map a v1 searchText response to a POI list with dist_m = 0.0.
+
+    Wraps _parse_v1_to_pois but discards its bias-center-relative distances.
+    Per Gemini directive 1: setting dist_m to 0.0 signals these are semantic
+    anchors whose spatial relationship to the car is pending Phase 2b
+    re-calculation in _signal_semantic_anchor (Patch 2).
+    """
+    # Pass zeros for the reference point — _parse_v1_to_pois computes
+    # dist_m relative to that point, but we immediately overwrite dist_m
+    # to 0.0 below for forensic clarity.
+    raw_pois = _parse_v1_to_pois(api_response, 0.0, 0.0)
+    return [
+        POI(
+            place_id=p.place_id,
+            name=p.name,
+            types=p.types,
+            lat=p.lat,
+            lng=p.lng,
+            dist_m=0.0,
+        )
+        for p in raw_pois
+    ]
+
+
+def get_anchors_for_text(
+    text_query: str,
+    cur: "_Cursor",
+    *,
+    bias_lat: float,
+    bias_lng: float,
+    bias_radius_m: float = SEMANTIC_DEFAULT_BIAS_RADIUS_M,
+) -> POILookupResult:
+    """Return semantic anchors for an offer text query; cache-first, API on miss.
+
+    Public sibling of get_pois_near_cluster. Implements §XVII canonical §A-E.
+
+    Behavior:
+      1. Read cache by (text_query, bias_lat, bias_lng, bias_radius_m).
+      2. Cache hit → touch last_hit_at (1h throttled), return
+         POILookupResult(pois=..., source='semantic_cache_hit'). Empty pois
+         possible if the row is a negative-cache entry.
+      3. Cache miss → call Google Places v1 searchText with locationBias.
+         On 200, write to cache (365-day TTL, including empty places for
+         negative cache). Return POILookupResult(pois=..., source='semantic_api_call').
+      4. API failure → no cache write. Return POILookupResult(pois=[],
+         source='semantic_api_error'). Matcher falls through to other heads.
+
+    Args:
+        text_query: the offer's address text (dropoff_address or pickup_address),
+            passed verbatim to Google Text Search. No tokenization, no
+            canonicalization.
+        cur: psycopg2 cursor with RealDictCursor factory.
+        bias_lat, bias_lng: locationBias circle center. Market-specific
+            (Houston: 29.7604, -95.3698).
+        bias_radius_m: locationBias circle radius. Default 50km
+            (SEMANTIC_DEFAULT_BIAS_RADIUS_M).
+
+    Returns:
+        POILookupResult with anchor POIs (dist_m=0.0; spatial relation
+        deferred to matcher) and source ∈ {semantic_cache_hit,
+        semantic_api_call, semantic_api_error}.
+    """
+    cache_anchors = _read_text_cache(
+        text_query, bias_lat, bias_lng, bias_radius_m, cur,
+    )
+    if cache_anchors is not None:
+        return POILookupResult(pois=cache_anchors, source="semantic_cache_hit")
+
+    # Cache miss → API call.
+    api_response, source = _call_google_places_text_v1(
+        text_query, bias_lat, bias_lng, bias_radius_m,
+    )
+    if api_response is None:
+        # semantic_api_error: fail-closed, no cache write, empty result.
+        return POILookupResult(pois=[], source=source)
+
+    # 200 OK (places may be empty for negative cache). Persist first so
+    # the next caller with the same text gets a cache hit.
+    _write_text_cache(
+        text_query, bias_lat, bias_lng, bias_radius_m,
+        api_response.get("places", []), cur,
+    )
+
+    anchors = _parse_v1_anchors(api_response)
+    return POILookupResult(pois=anchors, source=source)
+
