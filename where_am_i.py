@@ -33,6 +33,7 @@ from rapidfuzz import fuzz
 from bead_on_wire import _AIRLINE_AIRPORT_TOKENS, detect_branded_token
 from cluster_detection import Cluster
 from pivot_context import _road_names_match
+from road_membership import is_cluster_on_road
 from poi_service import POI
 
 log = logging.getLogger(__name__)
@@ -729,7 +730,7 @@ def _signal_poi_type_match(
     return False, None
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 def _signal_semantic_anchor(
@@ -2021,8 +2022,25 @@ class WhereAmI:
             cluster_anchors, semantic_source = _fetch_cluster_anchors(
                 getattr(target, "address", None)
             )
+            # Path B.2 (Phase 2c.2, 2026-05-15): Google-as-authority
+            # road membership. For single_road and intersection classes,
+            # ask road_membership.is_cluster_on_road whether the cluster
+            # centroid is on any of the offer's named roads. On hit,
+            # override topo.current_road with the offer-form name so
+            # downstream _signal_on_target_road matches trivially.
+            # Cache amortizes Google API cost (365-day TTL, H3 R10 cell
+            # key); see road_membership.py for the primitive.
+            matcher_topo = topo
+            if target.address_class in ("single_road", "intersection"):
+                for offer_road in target.named_roads:
+                    if is_cluster_on_road(self.cur, cluster, offer_road):
+                        if topo.current_road != offer_road:
+                            matcher_topo = replace(
+                                topo, current_road=offer_road,
+                            )
+                        break
             outcome = matcher(
-                cluster, topo, target,
+                cluster, matcher_topo, target,
                 pois=cluster_pois, anchors=cluster_anchors,
                 semantic_lookup_source=semantic_source,
             )
