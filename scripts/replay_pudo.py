@@ -76,6 +76,10 @@ from cluster_detection import detect_cluster, get_recent_clusters, Cluster  # no
 from dispatch import dispatch  # noqa: E402
 from pudo_types import Offer, OfferMeta, TargetSpec  # noqa: E402
 from bead_on_wire import classify_address  # noqa: E402
+# Patch 4b (2026-05-14): replaces local build_target_spec lift
+# with the production helper. Lift was stale - missing the
+# address=address_text kwarg Patch 3a added to TargetSpec sites.
+from driver_heartbeat import _bucket_to_target_spec as build_target_spec  # noqa: E402
 
 import math
 
@@ -208,54 +212,6 @@ def load_offer(cur, offer_id):
     if not row:
         sys.exit(f"FATAL: no offer with id={offer_id}")
     return row
-
-
-def build_target_spec(address_text, lat, lng):
-    """Lift of driver_heartbeat.py:_bucket_to_target_spec.
-
-    Classifies the address via bead_on_wire and constructs the appropriate
-    TargetSpec (address_class + named_roads) per the §5.1 matching rule.
-    Returns None for unrecognized address shapes ("garbage" bucket).
-    """
-    if not address_text or lat is None or lng is None:
-        return None
-    try:
-        classification = classify_address(address_text)
-    except Exception as e:
-        print(f"  WARNING: classify_address failed for {address_text!r}: {e}")
-        return None
-    if not classification:
-        return None
-
-    bucket = classification.get("bucket")
-    parts = classification.get("parts", {})
-
-    if bucket == "intersection":
-        return TargetSpec(
-            lat=float(lat), lng=float(lng),
-            address_class="intersection",
-            named_roads=(parts.get("road_a", ""), parts.get("road_b", "")),
-        )
-    if bucket == "street_number":
-        return TargetSpec(
-            lat=float(lat), lng=float(lng),
-            address_class="number_on_street",
-            named_roads=(parts.get("road", ""),),
-        )
-    if bucket == "single_road":
-        return TargetSpec(
-            lat=float(lat), lng=float(lng),
-            address_class="single_road",
-            named_roads=(parts.get("road", ""),),
-        )
-    if bucket == "poi":
-        return TargetSpec(
-            lat=float(lat), lng=float(lng),
-            address_class="poi",
-            named_roads=(),
-        )
-    # "garbage" or any unrecognized bucket -> unevaluatable
-    return None
 
 
 def build_offer_queue(offer_row):
