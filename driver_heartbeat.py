@@ -225,11 +225,13 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     pickup_classification               = 'auto',
                     pickup_data_source                  = 'nail_it',
                     leg_start_cumulative_miles_dropoff  = %s,
-                    cumulative_miles_at_pickup_fire     = %s
+                    cumulative_miles_at_pickup_fire     = %s,
+                    expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
+                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval
                 WHERE id = %s::bigint
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
-                cumulative_miles, cumulative_miles,
+                cumulative_miles, cumulative_miles, cumulative_miles,
                 action.offer_id,
             ))
             if cur.rowcount == 0:
@@ -418,12 +420,14 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     pickup_classification               = 'auto_observation',
                     pickup_data_source                  = 'nail_it',
                     leg_start_cumulative_miles_dropoff  = %s,
-                    cumulative_miles_at_pickup_fire     = %s
+                    cumulative_miles_at_pickup_fire     = %s,
+                    expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
+                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval
                 WHERE id = %s::bigint
                   AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
-                cumulative_miles, cumulative_miles,
+                cumulative_miles, cumulative_miles, cumulative_miles,
                 action.offer_id,
             ))
             # No rowcount guard: idempotent no-op is acceptable for observation.
