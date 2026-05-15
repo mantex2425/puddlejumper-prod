@@ -1067,6 +1067,61 @@ def _build_outcome(
     )
 
 
+def _apply_road_membership_override(
+    cur,
+    cluster: Cluster,
+    topo: RoadTopology,
+    target,
+) -> RoadTopology:
+    """Path B.2 dispatch-site helper: seed three road-related signals
+    from a road_membership verdict.
+
+    For single_road and intersection address classes, queries
+    road_membership.is_cluster_on_road for each target named road.
+    On first True, returns a new RoadTopology with three fields seeded:
+
+      - current_road    -> the offer-form road name (the Geometric
+                           Handshake; feeds _signal_on_target_road=1.0)
+      - breadcrumb      -> offer-form road prepended (feeds
+                           _signal_breadcrumb_match=1.0; bypasses
+                           pivot's 40m snap miss in backward scan)
+      - adjacent_roads  -> offer-form road prepended (feeds
+                           _signal_adjacent_road_match=1.0; bypasses
+                           the Dr/Road suffix gap that crippled the
+                           default OSM-keyed comparison)
+
+    All three seeded values use the offer's named-road form (e.g.,
+    "Watts Plantation Dr") so downstream _road_names_match
+    comparisons match trivially against target.named_roads —
+    sidestepping the suffix/directional canonicalization gaps that
+    pivot-based road resolution suffered from.
+
+    Transit gate semantics preserved: this helper does NOT modify
+    current_road_class. If pivot's snap classified the driver as on
+    a transit-class road, _signal_adjacent_road_match's transit gate
+    still suppresses adjacency rescue — by design, until production
+    data shows that's a real false-negative pattern.
+
+    Non-road address classes (apartment_complex, poi, number_on_street)
+    return topo unchanged with no cursor traffic. No SQL, no Google
+    call, no cache write.
+
+    See road_membership.is_cluster_on_road for the cache-backed
+    primitive this helper builds on.
+    """
+    if target.address_class not in ("single_road", "intersection"):
+        return topo
+    for offer_road in target.named_roads:
+        if is_cluster_on_road(cur, cluster, offer_road):
+            return replace(
+                topo,
+                current_road=offer_road,
+                breadcrumb=(offer_road,) + topo.breadcrumb,
+                adjacent_roads=(offer_road,) + topo.adjacent_roads,
+            )
+    return topo
+
+
 def _match_intersection(
     cluster: Cluster,
     topo: RoadTopology,
@@ -2022,23 +2077,19 @@ class WhereAmI:
             cluster_anchors, semantic_source = _fetch_cluster_anchors(
                 getattr(target, "address", None)
             )
-            # Path B.2 (Phase 2c.2, 2026-05-15): Google-as-authority
-            # road membership. For single_road and intersection classes,
-            # ask road_membership.is_cluster_on_road whether the cluster
-            # centroid is on any of the offer's named roads. On hit,
-            # override topo.current_road with the offer-form name so
-            # downstream _signal_on_target_road matches trivially.
-            # Cache amortizes Google API cost (365-day TTL, H3 R10 cell
-            # key); see road_membership.py for the primitive.
-            matcher_topo = topo
-            if target.address_class in ("single_road", "intersection"):
-                for offer_road in target.named_roads:
-                    if is_cluster_on_road(self.cur, cluster, offer_road):
-                        if topo.current_road != offer_road:
-                            matcher_topo = replace(
-                                topo, current_road=offer_road,
-                            )
-                        break
+            # Path B.2 extension (2026-05-15): when road_membership
+            # confirms cluster is on a target named road, seed all
+            # THREE road-related signal inputs — current_road
+            # (_signal_on_target_road), breadcrumb
+            # (_signal_breadcrumb_match), and adjacent_roads
+            # (_signal_adjacent_road_match). Original Path B.2 only
+            # touched current_road, leaving the other two signals
+            # (45% of single_road's weight budget) zero-locked by
+            # the same Dr/Road suffix gap. Helper extracted for unit
+            # testability — see tests/test_path_b2_override.py.
+            matcher_topo = _apply_road_membership_override(
+                self.cur, cluster, topo, target,
+            )
             outcome = matcher(
                 cluster, matcher_topo, target,
                 pois=cluster_pois, anchors=cluster_anchors,
