@@ -5,6 +5,317 @@
 
 ---
 
+## §0. THE PRIME DIRECTIVE
+
+**Status:** ratified 2026-05-16
+**Position:** §0 — ontologically prior to all other canonical rules.
+PuddleJumper does not exist without this section. Every other rule
+derives from it.
+
+### The product
+
+**PuddleJumper exists to answer one question:**
+
+> *"For where I am right now, at this time, on this day of the year,
+> on this day of the week, is this Uber offer good or not, when
+> compared to the market?"*
+
+**The market** is defined as the crowd-sourced observed price for this
+place, at this time, in this calendar context, on this day of the week.
+
+The answer is computed by comparing a new offer's quoted $/hr and
+$/mile against the distribution of past observed quotes for the
+matching (place, time-of-day, calendar-context, day-of-week) cohort.
+
+Everything else in the codebase exists to produce, refine, defend, or
+deliver that answer.
+
+### A. The objective
+
+Accurate $/hr and $/mile valuation for every (place, time-of-day,
+calendar-context, day-of-week) cohort the driver might encounter,
+derived from crowd-sourced observed offers, used to evaluate new
+offers at the moment they arrive.
+
+The four dimensions are non-negotiable. A pricing model that ignores
+any of them fails the directive:
+
+- **Place** — Houston traffic at the Galleria is not Houston traffic
+  at IAH. Rates per location are distinct populations.
+
+- **Time of day** — a 7am rush-hour pickup in Sugar Land is not a
+  2am surge run from downtown. Rates per hour-of-day are distinct.
+
+- **Calendar context** — Thanksgiving Thursday is not an ordinary
+  Thursday. Christmas Eve is not December 23. Rodeo weekends in
+  Houston are not ordinary weekends. The dimension is not the
+  integer day-of-year (which is a numeric position in the calendar
+  that bears no semantic relationship to ride economics); the
+  dimension is the **kind of day** for ride demand. This includes
+  named holidays (fixed and floating), event days (rodeo, major
+  games, concerts), school sessions, seasonal position (summer
+  vs. winter for non-special days), and whatever other classifiers
+  prove operationally meaningful as the cache populates.
+
+  Implementation note: the specifics of how calendar context is
+  classified — flag tables, holiday calendars, event feeds — is
+  downstream of §0. The directive only requires that the dimension
+  is named correctly and not silently collapsed to integer day-of-year.
+
+- **Day of week** — Friday-night ride volume is not Tuesday-morning
+  ride volume. Weekly rhythms persist across all other dimensions.
+
+The cohort an offer belongs to is the intersection of all four.
+
+### B. The mechanism
+
+**Confirmed Pickups** populate the pricing cache. Each pickup
+observation records the **quoted economics from the offer card** —
+the fare, $/hr, $/mile, effective hourly rate, trip miles, trip
+minutes, and pickup miles as Uber communicated them at offer-receipt
+time. The pricing cache is a cache of **offers, not of realized
+rides.** Realized economics — actual trip duration after traffic,
+actual distance after route changes, actual fare after tolls — are
+informational color but not directive scope. We compare offers
+apples-to-apples on the terms Uber presented them.
+
+**Confirmed Pickups and Dropoffs** populate the geographic cache.
+Each observation records canonical coordinates that displace future
+Google Geocoding and Places API calls (the "Google Tax").
+
+Both caches are append-only sensors of physical reality. Neither
+makes claims about the future. The pricing model — the engine that
+answers the Prime Directive's question — reads from the caches at
+offer-evaluation time, computes the cohort distribution, and
+produces a value verdict.
+
+### C. The implication
+
+**Every pickup observation is the entire product.** A pickup that
+observes is product working. A pickup that misses observation is
+product missing.
+
+The PUDO logic, the WAI matcher, the §XVI Forensic Ladder, the §XVII
+semantic anchor, the §XVIII lost-mode rule, and every future
+matcher refinement exists for one reason: **each pickup observation
+is one data point in the pricing model that decides whether the
+next offer is worth taking.**
+
+Dropoffs are secondary but not optional. They populate the
+geographic cache, which reduces the marginal cost of every future
+evaluation by avoiding paid Google API calls.
+
+### D. The corollaries
+
+These corollaries are not optional. Every existing canonical rule
+derives from them; every future rule must too.
+
+#### D.1 Volume beats precision — within high-confidence limits
+
+The pricing model improves with more observations. **When the
+matcher produces high-confidence matches, record them all.** This
+includes the legitimate-ambiguity cases where multiple matches
+genuinely apply at the same cluster:
+
+- **Single high-confidence match** → record it. The normal path.
+- **Multiple high-confidence matches at the same location_type**
+  (§XIV.I §5.3 cases — two pickups at one geocode, two dropoffs at
+  one geocode) → record observations for all matched offers. Each
+  observation is independently correct. The cache writes are
+  symmetric to the physical reality (two contracts, one curb).
+- **No high-confidence match** → record none. Per D.4, the right
+  action is `LogAmbiguousMatch` / `unmatched_reason` with no cache
+  write.
+
+Volume beats precision *within the regime where every observation
+clears the confidence floor.* It does NOT mean writing low-confidence
+guesses to the cache. The §XV doctrine ("we'd rather have a
+populated map and a Lost narrative than a Found narrative and a
+blank map") presumes the observations being populated were
+identifiable as observations in the first place. A guess is not an
+observation.
+
+This corollary does NOT apply to narrative state (`current_offer_id`).
+Narrative requires precision; observation rewards volume within
+confidence bounds. The two are different products of the PUDO
+system and obey different rules.
+
+#### D.2 Narrative is an optimization for observation, not its master.
+
+current_offer_id exists because narrative-bound matches are cheaper and more disambiguated than full-queue searches. When the system has high enough confidence to bind narrative, it does — and subsequent matching benefits from the constraint. When narrative breaks, observation continues unimpeded; the caches keep filling; §XIV.I §5.3 handles the additional ambiguity correctly.
+The product is the caches. Narrative is the optimization that makes cache writes cheaper. The system strives for narrative because it improves write efficiency, but the system does not depend on narrative for correctness.
+
+#### D.3 Engineering effort allocates by observation impact
+
+When prioritizing work, the question is not "is this technically
+elegant" or "does this fix a bug." The question is: **how many
+pickup observations per week does this recover, and how common is
+the cohort it serves?**
+
+A feature that recovers 1% more pickups in a common (place, time,
+calendar-context, day-of-week) cohort beats a feature that recovers
+50% more pickups in a rare cohort. A residential side-stub recovery
+(decision-not-to-implement, 2026-05-16) is an example of choosing
+not to build for a rare cohort. A lost-mode recovery (§XVIII) is
+an example of building for a common one (anyone with stacked
+offers, which is most accepting drivers).
+
+When two proposals compete, the one with broader cohort impact
+wins. This is not "easy beats right" — it is "right is defined
+relative to the directive."
+
+#### D.4 Cost of a missed observation is bounded; cost of a wrong observation is unbounded
+
+A missed pickup loses one data point. The pricing cache misses one
+fare signal for that cohort. The model gets marginally less
+accurate for that (place, time, calendar-context, day-of-week)
+intersection until the next observation arrives.
+
+A wrong pickup — firing for offer X when the driver was actually at
+offer Y — corrupts the pricing cache for the *wrong* place. The
+model gets actively worse at evaluating future offers in either
+place because both cohorts now carry false signal.
+
+**When the matcher is genuinely uncertain** (e.g., three or more
+overlapping match candidates, or zero candidates above the WAI 0.40
+floor), the right action is to log the miss in
+`pudo_decision_context` with the appropriate `unmatched_reason`
+and move on. Skip beats pollute (§VI canonical). Forensic
+visibility of misses is operationally cheap; price corruption is
+operationally expensive.
+
+The distinction from D.1 is the regime: D.1 covers the cases where
+the matcher has high confidence in multiple candidates (write all of
+them — they're each correct). D.4 covers the cases where the matcher
+has low confidence in any single candidate (write none of them —
+none are supportable). The regimes do not overlap. Both serve the
+directive.
+
+#### D.5 Every other metric is a means to this end
+
+Match rate, fire latency, false-positive rate, WAI confidence floor,
+TAD gate thresholds, §XVI Phase 2b candidate counts — these are
+diagnostic instruments for whether the system is fulfilling the
+Prime Directive. None of them is the goal.
+
+A 100% match rate built on 30% false positives serves the directive
+worse than an 80% match rate with 0% false positives, because the
+former corrupts the pricing model and the latter merely under-fills
+it.
+
+When a metric becomes the goal, return to §0. The directive is the
+goal. The metrics describe how well we are achieving it.
+
+### E. The discipline — the §0 Test
+
+When any future architectural decision becomes contested, return
+to the Prime Directive and apply the §0 Test:
+
+| Question | If yes |
+|---|---|
+| Does this change increase the rate at which we record correct pickup observations? | priority work |
+| Does this change increase the rate at which we record correct dropoff observations? | priority work |
+| Does this change reduce the Google Tax via cache hits? | priority work |
+| Does this change improve the pricing model's cohort-level accuracy? | priority work |
+| Does this change improve narrative accuracy without improving observation? | de-prioritize until observation work is complete |
+| Does this change improve a metric that doesn't trace back to pricing-cache accuracy? | refuse, or demand the trace |
+| Does this change make the system more elegant without serving the directive? | refuse |
+
+The Test does not say "every change must serve the directive
+directly." Infrastructure, tooling, observability, and developer
+ergonomics work all serve the directive *indirectly* by enabling
+the direct work. The Test asks whether the indirect path traces
+back to the directive. If it does, proceed. If it doesn't —
+return the work to the backlog and explain.
+
+### F. What this replaces
+
+§0 does not retroactively change any existing canonical section.
+Every section from §I through §XVIII is consistent with §0 because
+§0 captures what those sections were already serving. The
+directive was implicit; §0 makes it explicit.
+
+§0 changes how *future* sections are written:
+
+- New canonical rules must trace their motivation to §0
+- New architectural proposals must pass the §0 Test
+- New features must justify themselves in observation-impact terms
+- Disagreements between contributors resolve by §0 first, then by
+  subsequent sections
+
+§0 also changes how existing rules are *read*:
+
+- §VI (1-bit memory) is short because narrative serves observation;
+  the minimum viable narrative bit is the right design
+- §XV (Observation Before Narrative) is a direct quotation of D.2
+- §XVI (Arrest-Defined Truth) is a direct expression of D.4 (the
+  physical sensor is bounded; the geocode hypothesis is unbounded)
+- §XVII (Semantic Anchor) is a direct expression of B (Google's
+  text search resolves cohort identity for venue-class destinations)
+- §XVIII (Driver-State Lost Mode) is a direct expression of D.2
+  (narrative serves observation; when narrative breaks, observation
+  continues)
+
+### G. What this does not do
+
+- **Does not eliminate ambiguity in edge cases.** The directive
+  tells us what to optimize for; it does not tell us how to resolve
+  every contested design call. The subsequent sections (§I-§XVIII
+  and beyond) handle the specifics.
+
+- **Does not justify shortcuts.** Rule VII (do the right thing, not
+  the easy thing) operates inside the §0 frame. A "right" solution
+  is right *relative to the directive*. A solution that violates
+  the directive cannot be the right thing, regardless of how
+  technically elegant it is.
+
+- **Does not track realized economics.** Quoted economics from the
+  offer card are the canonical record. The cache compares offers
+  to offers, all on Uber's quoted terms. If the driver accepts an
+  offer and reality diverges (traffic, tolls, route changes), that
+  divergence is not a directive concern.
+
+### H. The discipline (future-Claude refusals)
+
+- When a future change wants to optimize a metric that doesn't
+  trace to pricing-cache accuracy, refer to §0.D.5 and refuse, or
+  demand the trace.
+
+- When a future change wants to prioritize narrative correctness
+  over observation volume, refer to §0.D.2 and require evidence
+  that observation volume is unaffected.
+
+- When a future change wants to build for a rare cohort while
+  common-cohort observation gaps remain unaddressed, refer to
+  §0.D.3 and request the cohort-impact comparison.
+
+- When a future change wants to ship a feature whose justification
+  cannot be traced to §0 in a sentence, refer to §0 and require
+  the trace before reviewing the technical proposal.
+
+- When a future change wants to write low-confidence guesses to
+  the pricing cache "because volume beats precision," refer to
+  §0.D.1 and §0.D.4 and refuse. Volume beats precision within the
+  high-confidence regime only. Outside that regime, skip beats
+  pollute.
+
+- When a future change wants to collapse "calendar context" to
+  integer day-of-year for simplicity, refer to §0.A and refuse.
+  The dimension is the kind of day, not the date arithmetic.
+
+- When a future change wants to record realized trip economics
+  (post-traffic, post-toll, post-route-change) into the pricing
+  cache as if they were offer data, refer to §0.B and refuse.
+  The cache is a cache of offers, not of realized rides.
+
+### The single sentence
+
+> **PuddleJumper is a pricing engine. The PUDO machinery is its
+> sensor array. The narrative is the indexing scheme. The product
+> is the prices.**
+
+---
+
 ## ⚠️ DEPRECATION NOTICE (2026-04-30 — Sprint A)
 
 The simplified architecture pivot ratified 2026-04-30 morning is in active
