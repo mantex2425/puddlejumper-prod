@@ -345,8 +345,8 @@ revision.
 The 4-box discipline question to ask before any code (Section VIII end)
 remains operative regardless of file-assignment drift.
 
-Sections I, II, IV, V, VI (post-trim), VII, XIII (post-amendment), XIV, and
-the new Section XV are fully current.
+Sections §0, I, II, IV, V, VI (post-trim), VII, XIII (post-amendment),
+XIV, XV, XVI, XVII, and XVIII are fully current.
 
 ---
 
@@ -938,9 +938,6 @@ The PUDO system exists primarily to populate two fundamental caches:
 
 ---
 
-
----
-
 ## XVI. ARREST-DEFINED TRUTH
 
 **Ratified:** 2026-05-13
@@ -981,6 +978,8 @@ If only one gate passes, the stop is logged but no fire occurs. The system prefe
 
 The mistake this rule prevents: trusting one signal alone. TAD alone fires on coffee-shop stops in destination neighborhoods. WAI alone fires on geometric coincidences before the driver has actually traveled the leg distance. Both together provide the triple-lock: physics + odometer + geometry.
 
+**§XVIII override.** When the driver is in lost-mode per §XVIII, the TAD gate is bypassed; only the WAI floor applies. See §XVIII.C for the full behavioral specification.
+
 ### D. Distance-to-geocode is never a gate.
 
 No code path uses "distance from car's current position to offer.pickup_lat/lng" as a threshold gate that can prevent a PUDO from firing. Distance enters WAI's confidence calculation as a signal, weighted alongside cluster mass and POI proximity, but the resulting confidence value is the gate — not the raw distance.
@@ -1011,6 +1010,8 @@ Rule XVI is implemented as a five-phase ladder. Each phase has a defined heartbe
 
 This is the cheapest check the system runs. It gates entry to all higher-cost phases. If no offer in the queue is plausibly close to a destination, the system does nothing further this heartbeat.
 
+**§XVIII override.** When the driver is in lost-mode, Phase 1's TAD pre-filter is bypassed and the heartbeat unconditionally proceeds to Phase 2. See §XVIII.C.1.
+
 #### Phase 2 — The Engagement
 
 - **State:** Active neighborhood vigilance.
@@ -1030,6 +1031,8 @@ Phase 2 is the watching window. The driver is in the destination zone; the syste
 - **Transition:** If yes → mark PUDO event as "happened" (commit intent), proceed to Phase 3. If no → return to Phase 2 (this is a stoplight, traffic, etc., not a transaction).
 
 Phase 2b is where the PUDO is *marked* — the system commits that an event happened — but the coordinates are not yet finalized. Coordinates remain refinable through Phase 4.
+
+**§XVIII override.** When the driver is in lost-mode, Phase 2b's candidate set expands to every ACCEPTed live-queue offer regardless of TAD verdict. See §XVIII.C.2.
 
 #### Phase 3 — The Flashbulb
 
@@ -1088,7 +1091,7 @@ When a PUDO fires via the Forensic Ladder, the `pudo_decision_context` row recor
 - `arrest_started_at`: when the 0.0 mph counter began
 - `arrest_duration_s`: total contiguous zero-velocity time at fire
 - `matched_offer_id`: which offer the matcher selected
-- `match_signal`: which gate combination produced the match (`tad_and_wai`, `tad_and_wai_ambiguous`, `dispatch_resolved`)
+- `match_signal`: which gate combination produced the match (`tad_and_wai`, `tad_and_wai_ambiguous`, `dispatch_resolved`, or one of the §XVIII lost-mode signals per §XVIII.D.1)
 - `matcher_candidates`: full list of offers that passed both gates, for ambiguity forensics
 - `phase_reached`: which Forensic Ladder phase the heartbeat reached (1, 2, 3, 4, 5)
 - `poi_source`: where Phase 3's POI data came from (`local_cache`, `google_live`)
@@ -1101,7 +1104,7 @@ When a stop is detected but no offer matches, the row records:
 - `matched_offer_id`: NULL
 - `match_signal`: `no_match`
 - `matcher_candidates`: empty array
-- `unmatched_reason`: which gate failed for the closest candidate (`tad_failed`, `wai_below_floor`, `both_failed`, `empty_queue`)
+- `unmatched_reason`: which gate failed for the closest candidate (`tad_failed`, `wai_below_floor`, `both_failed`, `empty_queue`, or one of the §XVIII lost-mode reasons per §XVIII.D.2)
 - `phase_reached`: highest phase reached before failure
 
 These forensics make false negatives investigable. A miss is not silent — every detected stop has a row, regardless of whether it produced a fire.
@@ -1113,6 +1116,8 @@ These forensics make false negatives investigable. A miss is not silent — ever
 **§XV (Observation Before Narrative)**: §XVI extends §XV's separation of observation from narrative into the detection layer. §XV says cache writes (observation) are durable while `current_offer_id` (narrative) is provisional. §XVI says stop detection (observation) is the primitive while offer matching (narrative) is the secondary step. Same shape, applied earlier in the pipeline.
 
 **§XIV.I (§5.3 Asymmetric Handling)**: The §5.3 dispatcher continues to operate at the dispatch layer. The Forensic Ladder's Phase 2b/3/4/5 produces match candidates; dispatch resolves any ambiguity among them per §XIV.I. §XVI and §XIV.I compose cleanly.
+
+**§XVIII (Driver-State Lost Mode)**: §XVIII conditionally overrides the TAD gates at Phase 1 (pre-filter) and Phase 2b (candidate set) when the driver is in lost-mode. The physics-based arrest detection (Phase 2 velocity counter, Phase 3 POI lookup, Phase 4 hill-climb, Phase 5 notarization) runs unchanged in both modes. See §XVIII for the full specification.
 
 ### J. What This Rule Replaces
 
@@ -1133,14 +1138,7 @@ The existing cluster-detection code paths remain in place because cluster mass i
 
 > The map is not the territory. The arrest is the pin.
 
-
 ---
-
-## Notes
-
-- These rules are derived from production lessons across Phase D and Phase E.
-- Changes require explicit ratification (not silent edit).
-- When a new architectural decision is locked, it gets added here only after it has shipped and stabilized — not before.
 
 ## XVII. SEMANTIC ANCHOR — THE OFFER IS THE QUERY
 
@@ -1445,3 +1443,368 @@ fails, the change is wrong before it's reviewed.
 
 > The map is not the territory. The arrest is the pin. But to know
 > which arrest matters — ask the offer where it was going.
+
+---
+
+## XVIII. DRIVER-STATE LOST MODE
+
+**Ratified:** 2026-05-16
+**Companions:** §0 (Prime Directive), §VI (1-bit memory), §XIV.H (live offer predicate), §XIV.I (§5.3 asymmetric handling), §XV (observation before narrative), §XVI (arrest-defined truth)
+**Replaces in practice:** the per-offer `lost_mode_reason: narrative_violation` formulation inside `tad_decision_context.verdicts.X`; the top-level `tad_decision_context.lost_mode` boolean as a stored field
+
+### The principle
+
+Lost-mode is the natural operating state of a PUDO system whose narrative isn't bound. It is not an error condition. It is observation-mode without the narrative optimization.
+The system is always observing. The system binds narrative when a pickup observation crosses confidence against a single offer in the queue — that's the optimization that lets subsequent matches consult a smaller search space. When narrative is unbound (because no pickup has fired yet, or because a dropoff just cleared narrative, or because §5.3-mirror ambiguity refused to commit), the system continues observing — just without the optimization.
+Lost-mode rules are not recovery rules. They are the un-optimized fallback path that the system always falls back to when the optimization isn't available.
+
+The previous per-offer formulation produces four pathologies, all
+observed in production on the 2026-05-15 drive:
+
+1. **Asymmetric recovery.** Only an offer whose `completion_pct > 1.15`
+   could enter `lost_mode_reason: narrative_violation`. Offers whose
+   completion was deeply negative (driver hadn't traveled to their
+   anchor yet) stayed `passed: false` with no recovery affordance,
+   even when the physical reality matched a lost driver.
+2. **Unreachable for stacked offers.** Offers whose pickups never
+   fired never had narrative engaged, so `narrative_violation` was
+   structurally unreachable. Every offer accepted after the first
+   missed pickup was invisible to lost-mode recovery.
+3. **TAD remains authoritative when it shouldn't.** Without a
+   driver-level lost flag, every per-offer TAD verdict ran its math
+   against poisoned anchors and honestly returned `passed: false`,
+   blocking recovery on inputs the system itself didn't trust.
+4. **Incoherent forensic record.** `tad_decision_context.lost_mode:
+   false` at the top level while a per-offer verdict reported
+   `lost_mode_reason: narrative_violation` made historical queries
+   for "drives where the driver was lost" either over- or under-count
+   depending on which signal was consulted.
+
+Driver-state lost-mode fixes all four in one stroke.
+
+### A. The trigger — two bits, derived not stored
+
+A driver is in lost-mode when **both** of the following hold:
+
+1. `driver_trip_state.current_offer_id IS NULL` for that driver.
+2. The driver's live offer queue contains at least one offer with
+   `actual_pickup_at IS NULL`, where "live" is determined exclusively
+   by `LIVE_OFFER_PREDICATE_SQL` per §XIV.H. The trigger does NOT
+   consult `app_verdict` — the PUDO system has no prior knowledge of
+   the driver's accept/decline decision; the car's physical position
+   is the sole sensor of driver intent (§0.B, §XV).
+
+Both bits are derived from existing canonical sources. Lost-mode is
+**not** a stored column. No `driver_trip_state.is_lost` field will
+be added.
+
+The derivation is mathematically incapable of drifting from reality —
+the state evaluates ground truth dynamically on every consultation.
+Stored state introduces a synchronization matrix: every container
+restart, transaction rollback, and offer expiry would need a handler
+to keep `is_lost` aligned with the underlying bits. The derived form
+has no such matrix because the underlying bits ARE the state.
+
+#### Exit from lost-mode
+
+Lost-mode exits automatically when either bit flips:
+
+- `current_offer_id` binds (next clean ACCEPT cycle engages narrative), or
+- The queue empties of unmatched ACCEPTED offers (existing
+  `LIVE_OFFER_PREDICATE_SQL` GC sweeps them per §XIV.H — no parallel
+  cleanup process)
+
+There is no `ClearLostMode` action. There is no stored flag to clear.
+
+### B. The Physical Sensor Axiom
+
+> *"The driver's physical presence IS our sensor."*
+
+§XVIII rests on this axiom. Per §XV, observation is the primary
+output. The driver's GPS arrest at a specific location is a physical
+fact, independent of whether the system's narrative state is intact.
+
+If an offer is alive in the queue (passes `LIVE_OFFER_PREDICATE_SQL`,
+not yet GC'd) and the driver physically arrests at that offer's
+destination geocode, the engine MUST record the observation. The
+arrest is the sensor reading. Whether the driver consciously attempted
+that offer is unknowable from outside the driver's head, and §XV
+explicitly rejects inferring intent from physical observation.
+
+This axiom resolves an objection that may arise: "what if the driver
+mentally skipped offer X but physically stopped at its curb anyway?"
+The answer: cache the observation. The pricing cache gets a fare
+signal. The geographic cache gets a coordinate pin. Both are correct
+regardless of the driver's intent. The narrative does not engage
+(observation-only per §C below), so no corruption risk to
+`current_offer_id`.
+
+### C. Behavioral rules during lost-mode
+
+When the driver is in lost-mode, the following apply at every
+heartbeat where §XVI Phase 2b is consulted:
+
+#### C.1 TAD bypass
+
+The TAD distance gate is **not consulted** for any queued offer's
+evaluation. TAD anchors during lost-mode are mathematically poisoned
+(the previous failed pickup left expected_dropoff_* predictions
+uncorrected per §3b24239's design constraint — re-anchor fires only
+at successful pickup fire). Consulting TAD in this state gates
+legitimate recoveries on inputs the system itself does not trust.
+
+The §XVI Forensic Ladder Phase 1's TAD pre-filter is similarly
+bypassed in lost-mode. Phase 1 normally exits early when no offer
+has a plausible TAD position; in lost-mode, no offer has a plausible
+TAD position by definition, but that fact does not justify exiting
+Phase 1. The driver may be at any queued offer's destination.
+
+#### C.2 Expanded Phase 2b candidate set
+
+§XVI Phase 2b normally consults TAD-passing offers. In lost-mode,
+Phase 2b consults **every offer** in the `LIVE_OFFER_PREDICATE_SQL`
+-filtered queue with `actual_pickup_at IS NULL`. WAI confidence is
+computed against each. The 0.40 floor still applies per §XIV.C.
+
+The candidate set is NOT filtered by `app_verdict`. Per §0.B and §XV,
+the system has no prior knowledge of which offers the driver chose to
+drive; the car's physical arrest at an offer's geocode is the sensor
+that reveals driver intent, after the fact.
+
+#### C.3 §XIV.I §5.3 dispatcher rules apply normally
+
+When Phase 2b produces multiple matches at the same `location_type`
+during lost-mode, §XIV.I §5.3 fires unchanged:
+
+- **§5.3 pickup case** (two pickups same geocode): recency tiebreaker
+  on `OfferMeta.created_at`. Most recent → `FirePickupObservation`
+  (not `FirePickup` per §C.4 below). Others → `FirePickupObservation`.
+- **§5.3-mirror dropoff case** (two dropoffs same geocode): emit
+  `FireDropoffObservation` for every tied offer; emit
+  `ClearNarrative` (no-op in lost-mode since narrative is already
+  clear); do not emit `FireDropoff`.
+- **Three-or-more matches**: emit `LogAmbiguousMatch`; do not modify
+  state.
+
+#### C.4 Observation-only fires
+
+All fires during lost-mode are observation fires, not narrative fires:
+
+- `FirePickup` → `FirePickupObservation`
+- `FireDropoff` → `FireDropoffObservation`
+
+The caches populate per §XV (pricing cache from
+`FirePickupObservation`, geographic cache from both). `current_offer_id`
+does NOT bind. The narrative remains explicitly unknown until the
+next clean ACCEPT cycle re-engages it.
+
+This is the cost of being lost: we cache the observation, we do not
+commit the narrative. A narrative commit during lost-mode would
+require the system to claim certainty it does not have, and §XV
+forbids that ("we would rather have a populated map and a 'Lost'
+narrative than a 'Found' narrative and a blank map").
+
+### D. Forensic record
+
+`pudo_decision_context` rows during lost-mode evaluations gain new
+canonical values:
+
+#### D.1 New `match_signal` values
+
+- `lost_mode_observation` — single match in lost-mode produced an
+  observation fire
+- `lost_mode_ambiguous_observation` — multiple matches in lost-mode
+  produced observation fires per §XIV.I §5.3
+
+#### D.2 New `unmatched_reason` values
+
+- `lost_mode_no_candidate` — driver in lost-mode, Phase 2b consulted
+  full queue, no offer's WAI confidence cleared the 0.40 floor
+- `lost_mode_three_plus_matches` — driver in lost-mode, Phase 2b
+  produced N≥3 matches; per §XIV.I.3, state was not modified
+
+#### D.3 Derived `tad_decision_context.lost_mode`
+
+The top-level `lost_mode` field in the JSONB blob becomes a derived
+boolean reflecting whether the driver-state lost-mode condition
+holds at evaluation time. Per the trigger in §A, this is computed
+from `current_offer_id` and the queue, not stored.
+
+The per-offer `verdicts.X.lost_mode_reason` field is **deprecated**.
+Existing code that writes `lost_mode_reason: narrative_violation`
+into this field continues to write it for backward compatibility
+with historical forensic queries, but new code MUST NOT depend on
+it. The driver-state flag is the canonical source going forward.
+
+#### D.4 Forensic discoverability
+
+The dashboard or any operational query needing to surface "drivers
+currently in lost-mode" derives the answer from the same two bits:
+
+```sql
+SELECT dts.driver_id, dts.heartbeat_at
+FROM app_private.driver_trip_state dts
+WHERE dts.current_offer_id IS NULL
+  AND EXISTS (
+    SELECT 1 FROM app_private.offer_history oh
+    WHERE oh.driver_id = dts.driver_id
+      AND oh.actual_pickup_at IS NULL
+      AND <LIVE_OFFER_PREDICATE_SQL with oh alias>
+  );
+```
+
+Historical queries against `pudo_decision_context` find lost-mode
+fires by `match_signal IN ('lost_mode_observation',
+'lost_mode_ambiguous_observation')` and lost-mode misses by
+`unmatched_reason IN ('lost_mode_no_candidate',
+'lost_mode_three_plus_matches')`.
+
+No new tables. No precomputed `driver_lost_mode_log`. No
+materialized view of lost-mode duration. Per Rule VII (do the right
+thing, not the easy thing) and §VII (Postgres owns the truth):
+queries against the canonical sources answer all forensic questions
+without parallel state.
+
+### E. Validation case (2026-05-15 drive)
+
+Seven offers (7918-7924) demonstrate every failure mode this rule
+fixes:
+
+| Offer | App verdict | Pickup fire | Dropoff fire | TAD verdict at 21:57:53 |
+|---|---|---|---|---|
+| 7918 | ACCEPT | none | 21:57:53 via lost_floor side-channel | `passed: null, lost_mode_reason: narrative_violation` (completion 1.626) |
+| 7919 | DECLINE | n/a | n/a | `passed: false` (completion -0.032) |
+| 7920 | DECLINE | n/a | n/a | `passed: false` (completion -1.980) |
+| 7921 | ACCEPT | none | none | `passed: false` (completion -3.294) |
+| 7922 | DECLINE | n/a | n/a | `passed: false` (completion -9.257) |
+| 7923 | ACCEPT | none | none | `passed: false` (delta -57.819mi outside ±0.5mi) |
+| 7924 | DECLINE | n/a | n/a | not yet in queue |
+
+At 21:57:53, two ACCEPTed offers (7918 and 7923) shared the dropoff
+address "Highway 6, Missouri City, Texas." The driver was physically
+at 7918's dropoff coordinates. Under the previous per-offer rule:
+
+- Only 7918 entered lost-mode (its completion overshot the 1.15 ceiling)
+- 7923's TAD honestly reported `passed: false` because the driver
+  had only had 18 seconds since accepting 7923
+- 7921's TAD honestly reported `passed: false` because its anchors
+  had compounded off 7918's stale receipt-time predictions
+- The §XVI Phase 2b matcher consequently reported `match_signal:
+  no_match` and `matched_offer_id: NULL`
+- A side-channel (WAI confidence 0.86 + TAD `committed:
+  [{"offer_id": "7918", "commit_rule": "lost_floor"}]`) fired
+  `FireDropoff` for 7918
+- §XIV.I §5.3-mirror was **silently violated**: two ACCEPTed offers
+  shared the dropoff geocode but the system fired narrative for one
+  unilaterally rather than firing observations for both and clearing
+  narrative
+
+Under §XVIII:
+
+- Driver was in lost-mode the entire drive (current_offer_id was
+  NULL from 21:28:35 onward; live ACCEPTed queue had unfired pickups)
+- Phase 2b at 21:57:53 evaluates 7918, 7921, 7923 against WAI (the
+  ACCEPTed offers in queue)
+- WAI returns matches for both 7918 and 7923 at the Highway 6 geocode
+- §XIV.I §5.3-mirror fires: `FireDropoffObservation(7918)`,
+  `FireDropoffObservation(7923)`, `ClearNarrative` (no-op)
+- Both `offer_history` rows get `actual_dropoff_at` populated and
+  coordinates recorded
+- `match_signal: lost_mode_ambiguous_observation`
+- `current_offer_id` remains NULL (was already NULL)
+- The geographic cache gains two dropoff coordinate pins
+
+The system honestly records "two offers' dropoffs were observed at
+this location; we cannot disambiguate the narrative." This is more
+correct than "we committed 7918's narrative via a side-channel and
+hoped." If 7923 was actually a re-bid of 7918 (same passenger), the
+double observation is harmless — both rows record the same arrest
+coordinates. If 7923 was a stacked second ride, the system correctly
+records that we cannot disambiguate.
+
+### F. What this does not do
+
+- **Does not eliminate the missed pickup that started the cascade.**
+  §XVIII handles the symptom (TAD gates blocking recovery when
+  anchors are poisoned) not the cause (the WAI sub-floor failure at
+  7918's pickup). The cause is the broader problem space of
+  residential side-stub geometries documented in the 2026-05-16
+  decision-not-to-implement record.
+- **Does not introduce time gates.** No "lost-mode for >N seconds
+  triggers X." Either the two bits are true or they're not.
+- **Does not commit narrative on recovery.** Observation-only fires
+  honor §XV. If a driver wants to resume narrative cleanly, the next
+  ACCEPT cycle does it; the system does not retroactively guess.
+- **Does not add new tables or precomputed state.** All forensic
+  queries derive from `pudo_decision_context`, `driver_trip_state`,
+  and `offer_history`.
+- **Does not deprecate the existing `tad_decision_context.committed`
+  list.** TAD's lost-floor commit logic continues to write to this
+  list. Under §XVIII, the planner no longer needs to consult it for
+  recovery fires (lost-mode handles that path), but the field
+  remains forensically useful as TAD's independent attempt to
+  identify which offer the driver may be engaged with.
+
+### G. Companions and relationship
+
+- **§0 (Prime Directive):** §XVIII is a direct expression of §0.D.2
+  (narrative serves observation). When narrative is broken, the
+  product (observations into the pricing and geographic caches)
+  continues uninterrupted.
+- **§VI (1-bit memory):** lost-mode is derived from the absence of
+  the 1-bit (`current_offer_id IS NULL`) combined with queue
+  contents. §VI's single source of truth is preserved; §XVIII does
+  not add a second memory bit.
+- **§XIV.H (live offer predicate):** §XVIII's trigger and Phase 2b
+  candidate set both consume `LIVE_OFFER_PREDICATE_SQL`. Single
+  freshness model preserved.
+- **§XIV.I (§5.3 asymmetric handling):** dispatcher rules apply
+  unchanged during lost-mode; only the fire actions transform from
+  narrative to observation per §C.4.
+- **§XV (observation before narrative):** §XVIII is the matcher-layer
+  expression of §XV. When narrative is broken, observation continues
+  uninterrupted. The map gets populated; the ledger stays clean.
+- **§XVI (arrest-defined truth):** §XVI Phase 1's TAD pre-filter and
+  Phase 2b's TAD gate are both bypassed in lost-mode. The Forensic
+  Ladder phases themselves (the velocity-based arrest detection,
+  Phase 3 POI lookup, Phase 4 hill-climb, Phase 5 notarization) run
+  unchanged. §XVIII changes only the TAD-dependent gates, not the
+  physics-based arrest detection.
+
+### H. The discipline
+
+- When a future change wants to re-introduce per-offer lost-mode
+  (e.g., "this offer's `lost_mode_reason` is X"), refer to this
+  rule and refuse. Lost-mode is a property of the driver. Offers
+  have anchors that may be poisoned, but that is a property of
+  their anchors, not a state.
+- When a future change wants to add a stored `driver_trip_state.is_lost`
+  column, refer to this rule and refuse. The two-bit derivation is
+  the canonical source; storing introduces synchronization
+  obligations with no operational benefit.
+- When a future change wants to add time-based thresholds to
+  lost-mode entry or exit, refer to this rule and refuse. Either
+  narrative is engaged or it isn't. Time gates are arbitrary
+  numbers per Andrew Rule VII.
+- When a future change wants to commit narrative on lost-mode
+  recovery, refer to this rule and refuse. The high-confidence
+  single-match case still produces observation, not narrative.
+  Narrative re-engages on the next clean ACCEPT cycle, not on a
+  recovered observation. §XV is explicit on this and §XVIII
+  inherits its discipline.
+- When a future change wants to precompute lost-mode duration into a
+  materialized view or new table for dashboard performance, refer
+  to this rule and refuse. The derived query is sub-millisecond on
+  indexed columns; precomputation introduces drift; the forensic
+  record in `pudo_decision_context` is already sufficient for
+  historical queries.
+
+> The driver is lost, not the ride.
+
+---
+
+## Notes
+
+- These rules are derived from production lessons across Phase D and Phase E.
+- Changes require explicit ratification (not silent edit).
+- When a new architectural decision is locked, it gets added here only after it has shipped and stabilized — not before.
