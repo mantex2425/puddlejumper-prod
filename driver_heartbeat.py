@@ -49,11 +49,6 @@ from dispatch import (
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
 from pudo_types import Offer, OfferMeta, TargetSpec, WAIMatch, WAI_CONFIDENCE_THRESHOLD
-from motion_gate import (
-    GateVerdict,
-    evaluate_gates,
-    filter_matches_by_gates,
-)
 from driver_queue import DriverQueue
 from bead_on_wire import classify_address
 
@@ -909,7 +904,6 @@ def _log_decision_context(
     current_offer_id,
     diagnostics, matches, executed_actions,
     dispatch_executed, dispatch_error_msg,
-    gate_verdict=None,
     lost_mode=False,                    # [3b.R]
     last_known_anchor_id=None,          # [3b.R]
     queue_metadata=None,                # [Phase 4]
@@ -1077,11 +1071,14 @@ def _log_decision_context(
             action_str,
             dispatch_executed,
             dispatch_error_msg,
-            # Sprint A gate-layer columns (Gemini round-2 ratified):
-            (gate_verdict.motion_verdict if gate_verdict else None),
-            (json.dumps(gate_verdict.jsonb_payload()) if gate_verdict else None),
-            (gate_verdict.held_offer_ids_and_legs()[0] if gate_verdict else None),
-            (gate_verdict.held_offer_ids_and_legs()[1] if gate_verdict else None),
+            # Sprint A gate-layer columns (DEPRECATED 2026-05-17 — motion_gate
+            # purged per §XIV.A Naked-List Contract. Four columns retained
+            # in the schema for historical rows; new rows write NULL.
+            # Schema-drop follow-up queued post-vocabulary-sweep.):
+            None,
+            None,
+            None,
+            None,
             tad_decision_context,    # [3b.R]
             # Rule XVI B-2: forensic record of the arrest counter state.
             # Threaded as function params from post_heartbeat() where the
@@ -1282,19 +1279,6 @@ def post_heartbeat():
         current_odometer=cumulative_miles,
     )
 
-    # ── GATE ─────────────────────────────────────────────────────────
-    # Sprint A §7 + Amendment 1: post-WAI filtering. Runs unconditionally
-    # so motion_verdict and per-leg odometer math are logged for every
-    # heartbeat regardless of whether dispatch fires (forensic visibility
-    # for matcher tuning per §3 step 8).
-    gate_verdict = evaluate_gates(
-        cluster=diagnostics.cluster,
-        cumulative_miles=cumulative_miles,
-        queue_offers=snap.offers,
-        speed_mph=speed_mph,
-    )
-    gated_matches = filter_matches_by_gates(matches, gate_verdict)
-
     # ── MATCH (Rule XVI B-3 Active Interrogation) ────────────────────
     # Forensic Ladder. matcher_actions is None when the matcher
     # abstains (arrest < threshold OR all candidates rejected) — in
@@ -1394,13 +1378,14 @@ def post_heartbeat():
                 # phase_reached retains perimeter-scan value (1 or 2)
 
     # ── DECIDE ───────────────────────────────────────────────────────
-    if matcher_actions is not None:
-        # Matcher fired (single or §5.3). Lazy path skipped.
-        actions = matcher_actions
-    else:
-        # Matcher abstained — lazy dispatch path retains agency
-        # (handoff: 'let the lazy path fire' on matcher no-match).
-        actions = dispatch(gated_matches, current_offer_id, queue_metadata, lost_mode=lost_mode)
+    # Phase 2b (§XVI Forensic Ladder + §XVIII Driver-State Lost Mode) is
+    # the canonical and only matcher. If it abstains, no action fires.
+    # Per §XVIII.D.2 this is the correct lost_mode_no_candidate behavior;
+    # the legacy lazy fallback that previously occupied this branch was
+    # a Sprint A residual that fired phantom observations off a stale
+    # gated_matches list (2026-05-17 offer 7938 incident — see
+    # apply_purge_motion_gate_2026-05-17.py docstring).
+    actions = matcher_actions if matcher_actions is not None else []
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster
@@ -1427,7 +1412,6 @@ def post_heartbeat():
             current_offer_id,
             diagnostics, matches, executed_actions,
             dispatch_executed, dispatch_error_msg,
-            gate_verdict=gate_verdict,
             lost_mode=lost_mode,                          # [3b.R]
             last_known_anchor_id=last_known_anchor_id,    # [3b.R]
             queue_metadata=queue_metadata,                # [Phase 4]

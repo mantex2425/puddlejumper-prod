@@ -163,7 +163,6 @@ def _call_log(diagnostics, matches, **overrides):
         executed_actions=[],
         dispatch_executed=False,
         dispatch_error_msg=None,
-        gate_verdict=None,
         lost_mode=False,
         last_known_anchor_id=None,
     )
