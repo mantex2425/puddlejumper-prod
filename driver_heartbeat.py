@@ -1307,8 +1307,11 @@ def post_heartbeat():
     matcher_actions = None
 
     # Phase 1 → Phase 2 perimeter: is any offer in its destination zone?
-    if any(v.distance_gate.get('passed') is True
-           for v in diagnostics.tad_verdicts.values()):
+    # §XVIII.C.1: lost-mode bypasses TAD pre-filter (verdicts will all have
+    # passed=null in lost-mode, which is correct abstention, not failure).
+    if (lost_mode
+            or any(v.distance_gate.get('passed') is True
+                   for v in diagnostics.tad_verdicts.values())):
         phase_reached = 2
 
     if (arrest_counter_s_post is not None
@@ -1317,9 +1320,13 @@ def post_heartbeat():
         tad_passed_any = False
 
         for offer_id, verdict in diagnostics.tad_verdicts.items():
-            if verdict.distance_gate.get('passed') is not True:
+            # §XVIII.C.2: in lost-mode, candidate inclusion is unconditional
+            # on TAD verdict (which is null/abstained per §XVIII.C.1). The
+            # WAI 0.40 floor below remains the second-line gate.
+            if not lost_mode and verdict.distance_gate.get('passed') is not True:
                 continue
-            tad_passed_any = True
+            if verdict.distance_gate.get('passed') is True:
+                tad_passed_any = True
             leg = verdict.leg_evaluated
             if leg not in ('pickup', 'dropoff'):
                 continue
@@ -1337,17 +1344,30 @@ def post_heartbeat():
         if len(candidates) == 1:
             # Single-match express lane (Option β).
             offer_id, leg, _conf = candidates[0]
-            action_cls = FirePickup if leg == 'pickup' else FireDropoff
+            # §XVIII.C.4: in lost-mode, demote narrative fires to
+            # observation fires. The §5.3 path achieves this via
+            # dispatch(lost_mode=True); the express lane bypasses
+            # dispatch, so the demotion is applied here directly.
+            # Mapping mirrors dispatch._demote_to_observation per
+            # §XVIII.C.4 canonical text.
+            if leg == 'pickup':
+                action_cls = FirePickupObservation if lost_mode else FirePickup
+            else:
+                action_cls = FireDropoffObservation if lost_mode else FireDropoff
             matcher_actions = [action_cls(offer_id=offer_id)]
             matched_offer_id = offer_id
-            match_signal = 'tad_and_wai'
+            # §XVIII.D.1: lost-mode fires get canonical lost_mode_observation
+            # label; cold-mode fires retain tad_and_wai.
+            match_signal = 'lost_mode_observation' if lost_mode else 'tad_and_wai'
             phase_reached = 5
         elif len(candidates) >= 2:
             # §5.3 ambiguity — hand to dispatch (Option α).
             synth = [WAIMatch(offer_id=oid, location_type=lg, confidence=cf)
                      for oid, lg, cf in candidates]
             matcher_actions = dispatch(synth, current_offer_id, queue_metadata, lost_mode=lost_mode)
-            match_signal = 'dispatch_resolved'
+            # §XVIII.D.1: lost-mode ambiguous fires get canonical
+            # lost_mode_ambiguous_observation; cold-mode retains dispatch_resolved.
+            match_signal = 'lost_mode_ambiguous_observation' if lost_mode else 'dispatch_resolved'
             phase_reached = 5
             # Pull narrative winner from dispatch's action list (None for
             # §5.3-mirror ClearNarrative case where no fire occurs).
@@ -1360,6 +1380,12 @@ def post_heartbeat():
             match_signal = 'no_match'
             if not diagnostics.tad_verdicts:
                 unmatched_reason = 'empty_queue'
+            elif lost_mode:
+                # §XVIII.D.2: lost-mode misses get canonical
+                # lost_mode_no_candidate; matcher consulted WAI on every
+                # queued offer, so phase_reached = 3.
+                unmatched_reason = 'lost_mode_no_candidate'
+                phase_reached = 3
             elif tad_passed_any:
                 unmatched_reason = 'wai_below_floor'
                 phase_reached = 3
