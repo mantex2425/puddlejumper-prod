@@ -101,6 +101,8 @@ def log_decision(cur, conn, uid, params, ep, result):
                     JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
                     WHERE dl.driver_id = %s
                       AND oh.expected_dropoff_arrival_time IS NOT NULL
+                      AND oh.actual_pickup_at IS NOT NULL
+                      AND oh.actual_dropoff_at IS NULL
                       AND {LIVE_OFFER_PREDICATE_SQL}
                     ORDER BY oh.created_at DESC
                     LIMIT 1
