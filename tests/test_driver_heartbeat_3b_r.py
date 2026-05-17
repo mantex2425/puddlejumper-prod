@@ -290,31 +290,34 @@ class TestDetectLostMode:
         cur = _mock_cursor(fetchone_value={"id": 7770})
         assert _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW) is True
 
-    def test_sql_filters_to_accept_verdict(self):
-        """Declined offers carry no narrative obligation; they must not
-        force lost mode."""
+    def test_sql_does_not_filter_by_app_verdict(self):
+        """§XVIII: PUDO infrastructure is advice-blind. The decision
+        engine's accept/decline advice is NOT consulted in lost-mode
+        detection. The car's physical position is the sole sensor of
+        driver intent per §0.B and §XV.
+        """
         cur = _mock_cursor(fetchone_value=None)
         _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
-        assert "ACCEPT" in sql_text
+        assert "ACCEPT" not in sql_text
+        assert "app_verdict" not in sql_text
 
     def test_sql_uses_live_offer_predicate(self):
-        """Post-2026-05-12 Rule VII migration: orphan-recency is governed
-        by LIVE_OFFER_PREDICATE_SQL (horizon physics), not by a crude
-        wall-clock window.
-
-        See tests/test_lost_mode_horizon.py for the behavioral spec and
-        tests/test_live_offer_predicate_imports.py for the structural
-        contract."""
+        """§XVIII: orphan-recency is governed by LIVE_OFFER_PREDICATE_SQL
+        (horizon physics) PLUS the §XVIII trigger bit `actual_pickup_at
+        IS NULL` (pickup not yet observed). The crude wall-clock window
+        from pre-2026-05-12 is gone.
+        """
         cur = _mock_cursor(fetchone_value=None)
         _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
         # Horizon predicate must be spliced in
         assert "oh.actual_dropoff_at IS NULL" in sql_text
         assert "oh.miles_at_offer_receipt" in sql_text
-        # Old proxies must be absent
+        # §XVIII trigger bit 2: pickup must be unfired
+        assert "actual_pickup_at IS NULL" in sql_text
+        # Pre-§XVIII proxies must be absent
         assert "interval '2 hours'" not in sql_text
-        assert "actual_pickup_at IS NULL" not in sql_text
 
 
 # ============================================================================

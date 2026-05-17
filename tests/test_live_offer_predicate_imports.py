@@ -87,8 +87,13 @@ class TestPredicateStructuralContract:
         assert "interval '2 hours'" not in body, (
             "_detect_lost_mode still has the old 2-hour wall-clock proxy"
         )
-        assert "actual_pickup_at IS NULL" not in body, (
-            "_detect_lost_mode still has the old pickup-state proxy"
+        # §XVIII bit-2 trigger (2026-05-16): the `actual_pickup_at IS NULL`
+        # clause is back, with new semantics. It is no longer a proxy for
+        # "narrative broken" — it now expresses "queue contains an offer
+        # whose pickup has not been observed." See CANONICAL_RULES §XVIII.A.
+        assert "actual_pickup_at IS NULL" in body, (
+            "_detect_lost_mode missing §XVIII bit-2 trigger "
+            "`actual_pickup_at IS NULL`"
         )
 
     def test_detect_lost_mode_signature(self):

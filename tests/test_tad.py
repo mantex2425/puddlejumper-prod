@@ -377,9 +377,9 @@ class TestPickupLegOvershoot:
             per_offer_state={"p-overshoot": state},
         )
         v = verdicts["p-overshoot"]
-        assert v.passed is None  # Lost Mode
-        assert v.lost_mode_reason == "narrative_violation"
-        assert v.distance_gate["passed"] is None
+        assert v.passed is False  # §XVIII: bistate verdict at leg-evaluator boundary
+        assert v.lost_mode_reason == "narrative_violation"  # §XVIII.D.3: label preserved
+        assert v.distance_gate["passed"] is None  # gate stays tristate (private helper)
         assert "lost mode" in v.distance_gate["fail_reason"].lower()
 
 
@@ -412,7 +412,11 @@ class TestDropoffLegInWindow:
 class TestDropoffLegLongWayRound:
     """Andrew's actual scenario: rider takes detour, distance budget blown by >15%."""
 
-    def test_dropoff_at_120_percent_triggers_lost_mode(self):
+    def test_dropoff_at_120_percent_returns_passed_false(self):
+        """§XVIII: long-way-round detour > 115% → bistate verdict
+        (passed=False) at leg-evaluator boundary, forensic label
+        preserved per §XVIII.D.3.
+        """
         offer = _make_offer("long-way", accepted_at=NOW - timedelta(minutes=45),
                             trip_miles=10.0, trip_minutes=18)
         state = _make_state(
@@ -428,9 +432,10 @@ class TestDropoffLegLongWayRound:
             per_offer_state={"long-way": state},
         )
         v = verdicts["long-way"]
-        assert v.passed is None
-        assert v.lost_mode_reason == "narrative_violation"
+        assert v.passed is False  # §XVIII bistate verdict
+        assert v.lost_mode_reason == "narrative_violation"  # §XVIII.D.3 label preserved
         assert v.leg_evaluated == "dropoff"
+        assert v.distance_gate["passed"] is None  # gate stays tristate (canary)
 
 
 # =============================================================================
@@ -456,7 +461,10 @@ class TestShortTripAbsoluteMode:
         assert v.passed is True
         assert v.distance_gate["mode"] == "absolute_short_trip"
 
-    def test_short_trip_overshoot_triggers_lost_mode(self):
+    def test_short_trip_overshoot_returns_passed_false(self):
+        """§XVIII: short-trip overshoot > +0.5mi → bistate verdict
+        (passed=False), forensic label preserved per §XVIII.D.3.
+        """
         offer = _make_offer("short-over", accepted_at=NOW - timedelta(minutes=10),
                             pickup_miles=0.8, pickup_minutes=2)
         state = _make_state(
@@ -470,8 +478,9 @@ class TestShortTripAbsoluteMode:
             per_offer_state={"short-over": state},
         )
         v = verdicts["short-over"]
-        assert v.passed is None
-        assert v.lost_mode_reason == "narrative_violation"
+        assert v.passed is False  # §XVIII bistate verdict
+        assert v.lost_mode_reason == "narrative_violation"  # §XVIII.D.3 label preserved
+        assert v.distance_gate["passed"] is None  # gate stays tristate (canary)
 
 
 # =============================================================================

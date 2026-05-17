@@ -533,11 +533,15 @@ def _evaluate_pickup_leg(
         expected_delta_miles=expected_delta,
     )
 
-    # Tristate: True (in window), False (under), None (overshoot/lost)
+    # Gate is tristate (True/False/None). §XVIII translates the gate's
+    # overshoot signal (None) into a bistate verdict (passed=False) at
+    # this boundary, while preserving the forensic label per §XVIII.D.3.
     if distance_gate["passed"] is None:
-        # Lost Mode: narrative_violation (overshoot)
+        # Overshoot: matcher skips spatial scoring (saving Google spend).
+        # Forensic label retained for backward-compat with historical
+        # JSONB queries (§XVIII.D.3).
         return TadVerdict(
-            passed=None,
+            passed=False,
             time_boost=0.0,
             leg_evaluated="pickup",
             lost_mode_reason="narrative_violation",
@@ -632,9 +636,11 @@ def _evaluate_dropoff_leg(
     )
 
     if distance_gate["passed"] is None:
-        # Lost Mode: narrative_violation (long-way-round detour or missed dropoff)
+        # Overshoot (long-way-round detour or missed dropoff). §XVIII:
+        # bistate verdict (passed=False), forensic label preserved per
+        # §XVIII.D.3.
         return TadVerdict(
-            passed=None,
+            passed=False,
             time_boost=0.0,
             leg_evaluated="dropoff",
             lost_mode_reason="narrative_violation",

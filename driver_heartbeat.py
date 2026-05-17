@@ -720,73 +720,47 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, referenc
 
 
 def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time):
-    """Detect narrative_blindness via HORIZON physics. [Rule VII, 2026-05-12]
+    """Detect driver-state lost-mode per §XVIII.
 
-    REWRITE (2026-05-12): the previous implementation used
-    `actual_pickup_at IS NULL` as a proxy for "narrative broken" plus
-    a crude `interval '2 hours'` wall-clock window. Both were wrong.
+    Driver-state lost-mode is the natural operating state of a PUDO
+    system whose narrative is broken. Per §XVIII.A, the trigger is two
+    bits derived (not stored):
 
-    Failure modes the old rule produced on the 2026-05-12 drive:
+        bit 1: current_offer_id IS NULL    (checked by caller)
+        bit 2: queue contains an offer with actual_pickup_at IS NULL
+               AND predicate-alive (this function returns this bit)
 
-      Houston Miss (offers 7848, 7853): AAI missed the pickup
-        observation, but dropoff fired cleanly. Old rule treated the
-        offer as a permanent ghost for 2 hours after dropoff fired,
-        poisoning every subsequent heartbeat with lost_mode=true and
-        forcing the dispatcher into conservative commit mode. This
-        cascaded — pickups missed because of lost_mode-conservative
-        commit produced new ghosts, extending lost_mode further.
-
-      Calhoun Zombie: pickup fires successfully but the dropoff
-        address Uber gave doesn't exist where navigation took you.
-        AAI never observes dropoff. Driver moves to next ride. Old
-        rule's `actual_pickup_at IS NULL` clause excluded the Calhoun
-        offer entirely (wrong direction — Calhoun is exactly the kind
-        of ghost the rule was supposed to catch).
-
-    The new rule uses LIVE_OFFER_PREDICATE_SQL — the same predicate
-    DriverQueue uses to decide which offers are "alive" in the
-    Diagnose-side queue. Physics, not fire state, decides:
-
-        An offer triggers lost_mode iff
-          accepted
-          AND not currently in the active queue
-          AND still inside its time/distance horizon
-          (LIVE_OFFER_PREDICATE_SQL — see driver_queue.py)
-
-    The predicate already contains `oh.actual_dropoff_at IS NULL` as
-    its first clause, so dropoff-fired offers are excluded
-    automatically (Houston Miss → not orphan, correct).
-
-    Pickup-fired-no-dropoff offers stay live until the time OR
-    distance horizon blows. Once physics terminates them, they stop
-    poisoning lost_mode. The Calhoun Zombie self-resolves after the
-    driver crosses the trip-miles horizon.
+    The PUDO infrastructure is advice-blind per §0.B and §XV. The car's
+    physical position is the sole sensor of driver intent — accept/decline
+    advice from the decision engine is not consulted here.
 
     Args:
         cur: psycopg2 cursor.
         driver_id: Firebase UID.
-        queue_offer_ids: int list of offers currently in the active
-            queue; these are excluded (already being evaluated).
-        current_cumulative_miles: float or None. When None, the
-            distance axis of the predicate short-circuits to TRUE
-            (time-only fallback). Production heartbeat path always
-            supplies a value.
+        queue_offer_ids: legacy parameter, unused under §XVIII. Retained
+            for signature compatibility; removed in a future cleanup.
+        current_cumulative_miles: float or None. When None, the distance
+            axis of LIVE_OFFER_PREDICATE_SQL short-circuits to TRUE
+            (time-only fallback). Production heartbeat path always supplies.
+        reference_time: UTC datetime; the heartbeat's reference point for
+            horizon evaluation.
 
-    Returns True iff at least one live orphaned offer exists.
+    Returns True iff bit 2 holds — at least one queued offer is
+    predicate-alive AND has no pickup observation recorded.
     """
+    _ = queue_offer_ids  # legacy parameter; unused under §XVIII (see docstring)
     cur.execute(
         f"""
         SELECT oh.id
         FROM app_private.offer_history oh
         JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
         WHERE dl.driver_id = %s
-          AND oh.id != ALL(%s::bigint[])
-          AND oh.app_verdict = 'ACCEPT'
+          AND oh.actual_pickup_at IS NULL
           AND {LIVE_OFFER_PREDICATE_SQL}
         ORDER BY oh.created_at DESC
         LIMIT 1
         """,
-        (driver_id, queue_offer_ids or [0])
+        (driver_id,)
         + live_offer_predicate_params(current_cumulative_miles, reference_time),
     )
     return cur.fetchone() is not None

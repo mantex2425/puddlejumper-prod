@@ -8,37 +8,37 @@ each inflection point of the drive.
 WHY THIS TEST EXISTS
 ====================
 
-On 2026-05-12 the production driver_heartbeat code shipped a refactor
-of _detect_lost_mode that replaced an `actual_pickup_at IS NULL` proxy
-+ wall-clock 2-hour window with the canonical LIVE_OFFER_PREDICATE_SQL.
-The old rule had two failure modes the new rule eliminates:
+§XVIII (Driver-State Lost Mode, ratified 2026-05-16) collapses
+lost-mode detection to two bits derived from canonical sources:
 
-  HOUSTON MISS  AAI missed pickup observation but dropoff fired
-                cleanly. Old rule's `actual_pickup_at IS NULL` clause
-                treated the offer as a permanent ghost for 2 hours
-                AFTER dropoff fired, poisoning every subsequent
-                heartbeat with lost_mode=true.
+    bit 1: current_offer_id IS NULL    (caller layer)
+    bit 2: queue contains an offer with actual_pickup_at IS NULL
+           AND predicate-alive (this function)
 
-  CALHOUN ZOMBIE  Pickup fires but the dropoff address Uber gave
-                  doesn't exist where navigation takes you. AAI
-                  never sees dropoff. Old rule's `actual_pickup_at
-                  IS NULL` clause excluded the offer entirely —
-                  wrong direction; Calhoun IS the ghost the rule
-                  is meant to catch.
+The PUDO infrastructure is advice-blind per §0.B and §XV — the
+decision engine's accept/decline advice is not consulted. Bit 2
+fires whenever physics says an offer is alive AND no pickup has
+been observed for it, regardless of what the decision engine
+recommended to the driver.
 
-The new rule uses the predicate's first clause (`actual_dropoff_at IS
-NULL`) so Houston Miss exits the live set on dropoff fire automatically.
-Pickup-fired-no-dropoff offers (Calhoun) stay alive until time/distance
-horizons blow — physics terminates the narrative, not fire state.
+The new SQL drops two old clauses:
+  - `oh.id != ALL(...)` queue exclusion (was wrong: queue members
+    are EXACTLY the offers we should be evaluating for lost-mode)
+  - `oh.app_verdict = 'ACCEPT'` advice-layer coupling (advice-blind)
 
-ROW 10 IS THE KILL SHOT
-=======================
+And adds one clause:
+  - `oh.actual_pickup_at IS NULL` (§XVIII trigger bit 2)
 
-Same timestamp/odometer as row 9, but synthetic empty queue. Encodes
-the bug: 7852 is predicate-alive (Calhoun pattern, pickup fired, no
-dropoff, horizons not blown) but the heartbeat queue doesn't include
-it. Old rule said False (pickup fired = not orphan). New rule must
-say True (predicate-alive + not in queue = orphan).
+The existing `LIVE_OFFER_PREDICATE_SQL` continues to provide the
+horizon physics (actual_dropoff_at IS NULL + time/distance horizons).
+
+ROW 10 STILL THE KILL SHOT
+==========================
+
+Same timestamp/odometer as row 9, but synthetic empty queue. Row 10
+was the pre-§XVIII era kill shot encoding the Calhoun Zombie bug.
+Under §XVIII it still asserts True — but now many more rows do too,
+because queue membership no longer suppresses lost-mode detection.
 
 CANONICAL HORIZON TABLE (locked in recon_b7 against real DB rows)
 =================================================================
@@ -86,65 +86,77 @@ PLAYBACK_CASES = [
     # ----- Row 1 -----
     (
         "2026-05-12T18:06:00+00:00",
-        "pre-7848 accept: no real offers yet (dev offers 7846/7847 horizon-blown)",
+        "§XVIII: 7846 horizon-dead (17:49:22), but 7847 ALIVE (declined "
+        "offer, horizon 18:24:15, pickup-unfired) -> True. Declined offers "
+        "are visible under §XVIII advice-blind SQL.",
         [],
-        False,
+        True,
     ),
     # ----- Row 2 -----
     (
         "2026-05-12T18:06:30+00:00",
-        "7848 just accepted, in queue",
+        "§XVIII: 7848 just accepted, pickup unfired, predicate-alive → lost-mode True",
         ["7848"],
-        False,
+        True,
     ),
     # ----- Row 3 -----
     (
         "2026-05-12T18:35:30+00:00",
-        "7850 accepted, 7848 still pre-pickup, both in queue",
+        "§XVIII: 7848 + 7850 both pre-pickup and predicate-alive → lost-mode True",
         ["7848", "7850"],
-        False,
+        True,
     ),
     # ----- Row 4 -----
     (
         "2026-05-12T18:38:48+00:00",
-        "7848 dropoff fires -> exits predicate via actual_dropoff_at IS NULL clause",
+        "§XVIII: 7848 dropoff exits predicate; 7850 still pre-pickup "
+        "and predicate-alive (accepted 18:35:15, horizon to 18:52:45) -> True",
         ["7850"],
-        False,
+        True,
     ),
     # ----- Row 5 -----
     (
         "2026-05-12T18:47:30+00:00",
-        "7852 accepted, 7850 still in queue",
+        "§XVIII: 7850 + 7852 both pre-pickup and predicate-alive → lost-mode True",
         ["7850", "7852"],
-        False,
+        True,
     ),
     # ----- Row 6 -----
     (
         "2026-05-12T18:52:46+00:00",
-        "7850 time-axis horizon blown (distance axis still live, but predicate requires both)",
+        "§XVIII: 7850 horizon just expired (18:52:45); 7851 (declined, "
+        "horizon to 19:06:39) and 7852 (pre-pickup, horizon to 19:41:01) "
+        "still alive -> True. DECLINEs are visible under §XVIII advice-blind SQL.",
         ["7852"],
-        False,
+        True,
     ),
     # ----- Row 7 -----
     (
         "2026-05-12T18:55:42+00:00",
-        "7852 pickup fires (Calhoun pattern: pickup observed, dropoff still pending)",
+        "§XVIII: 7852 pickup just fired (exits §XVIII bit-2); "
+        "7851 (declined, horizon to 19:06:39) still alive -> True",
         ["7852"],
-        False,
+        True,
     ),
     # ----- Row 8 -----
     (
         "2026-05-12T19:36:30+00:00",
-        "7853 accepted while 7852 still pickup-fired-no-dropoff",
+        "REPLAY-FIDELITY GAP (not a §XVIII bug): at ref_time, 7853 was "
+        "alive (created 19:36:09, dropoff at 20:14:20 hadn't happened yet). "
+        "But the predicate's `actual_dropoff_at IS NULL` clause reads the "
+        "column's CURRENT DB state, where 7853.actual_dropoff_at is now "
+        "20:14:20 (post-replay-time) -> 7853 wrongly excluded -> False. "
+        "Filed followup: extend Causality Guard to actual_*_at columns.",
         ["7852", "7853"],
         False,
     ),
     # ----- Row 9 -----
     (
         "2026-05-12T20:14:20+00:00",
-        "7853 dropoff fires -> exits predicate; 7852 dead by horizon; 7854 alive in queue",
+        "§XVIII: 7853 dropoff exits predicate; 7852 horizon-dead; "
+        "7854 alive with pickup unfired (DB-verified) → lost-mode True",
         ["7854"],
-        False,
+        True,
     ),
     # ----- Row 10 -----  *** KILL SHOT ***
     (
@@ -157,9 +169,10 @@ PLAYBACK_CASES = [
     # ----- Row 11 -----
     (
         "2026-05-12T20:35:00+00:00",
-        "Calhoun self-resolves: 7852 dead by both horizons; 7854 alive in queue",
+        "§XVIII: 7852 horizon-dead; 7854 still pre-pickup and predicate-alive "
+        "(accepted 20:10:54, horizon to 20:38:24) -> True",
         ["7854"],
-        False,
+        True,
     ),
 ]
 
