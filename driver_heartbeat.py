@@ -1346,7 +1346,7 @@ def post_heartbeat():
             # §5.3 ambiguity — hand to dispatch (Option α).
             synth = [WAIMatch(offer_id=oid, location_type=lg, confidence=cf)
                      for oid, lg, cf in candidates]
-            matcher_actions = dispatch(synth, current_offer_id, queue_metadata)
+            matcher_actions = dispatch(synth, current_offer_id, queue_metadata, lost_mode=lost_mode)
             match_signal = 'dispatch_resolved'
             phase_reached = 5
             # Pull narrative winner from dispatch's action list (None for
@@ -1374,7 +1374,7 @@ def post_heartbeat():
     else:
         # Matcher abstained — lazy dispatch path retains agency
         # (handoff: 'let the lazy path fire' on matcher no-match).
-        actions = dispatch(gated_matches, current_offer_id, queue_metadata)
+        actions = dispatch(gated_matches, current_offer_id, queue_metadata, lost_mode=lost_mode)
 
     # ── EXECUTE ──────────────────────────────────────────────────────
     cluster = diagnostics.cluster

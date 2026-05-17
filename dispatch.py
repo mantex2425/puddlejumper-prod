@@ -152,6 +152,7 @@ def dispatch(
     matches: list[WAIMatch],
     current_offer_id: Optional[str],
     queue_metadata: dict[str, OfferMeta],
+    lost_mode: bool = False,
 ) -> list[Action]:
     """Map WAI matches against current_offer_id memory to side-effect Actions.
 
@@ -167,6 +168,13 @@ def dispatch(
             border filter (matches for offer_ids not in queue_metadata
             are silently dropped) and as the source of OfferMeta.created_at
             for the §5.3 recency tiebreaker per §XIV.I.
+        lost_mode: when True, post-process the action list to demote
+            narrative fires (FirePickup, FireDropoff) into observation
+            fires (FirePickupObservation, FireDropoffObservation) per
+            §XVIII.C.4. The case-resolution logic itself is oblivious
+            to lost_mode — the transformation happens at this boundary
+            via _demote_to_observation. Default False preserves all
+            existing call-site semantics.
 
     Returns:
         list[Action] for the wiring layer to execute. Ordering matters for
@@ -179,21 +187,60 @@ def dispatch(
 
     # Case A: empty match list ------------------------------------------
     if not matches:
-        return [LogNoMatch()]
-
+        actions = [LogNoMatch()]
     # Single match: Cases B, C, D, F, G ---------------------------------
-    if len(matches) == 1:
-        return _dispatch_single(matches[0], current_offer_id)
-
+    elif len(matches) == 1:
+        actions = _dispatch_single(matches[0], current_offer_id)
     # Two matches: §5.1 errands, §5.2 hot-swap, §5.3 ambiguous ----------
-    if len(matches) == 2:
-        return _dispatch_pair(matches, current_offer_id, queue_metadata)
-
+    elif len(matches) == 2:
+        actions = _dispatch_pair(matches, current_offer_id, queue_metadata)
     # Three+ matches: unenumerated, fail closed -------------------------
-    return [LogAmbiguousMatch(
-        candidates=tuple(matches),
-        reason="unenumerated_multi_match",
-    )]
+    else:
+        actions = [LogAmbiguousMatch(
+            candidates=tuple(matches),
+            reason="unenumerated_multi_match",
+        )]
+
+    # §XVIII.C.4: in lost-mode, demote narrative fires to observation
+    # fires at the boundary. The case-resolution logic above produces
+    # the action list assuming normal narrative semantics; the demotion
+    # filter strips the narrative intent while preserving every cache
+    # write. Per §XVIII.A bit 1, lost_mode=True structurally implies
+    # current_offer_id=None at the caller, so Case D / Case G / §5.1
+    # narrative-active paths are unreachable — but the demotion filter
+    # is total over the Action Union for defense in depth.
+    if lost_mode:
+        actions = [_demote_to_observation(a) for a in actions]
+
+    return actions
+
+
+def _demote_to_observation(action: "Action") -> "Action":
+    """§XVIII.C.4 demotion primitive: strip narrative intent, preserve
+    observation. Pure function over the Action Union.
+
+    The demotion contract:
+      FirePickup(offer_id)  -> FirePickupObservation(offer_id)
+      FireDropoff(offer_id) -> FireDropoffObservation(offer_id)
+      FirePickupObservation, FireDropoffObservation, ClearNarrative,
+        LogNoMatch, LogAmbiguousMatch, LogPickupRematch -> unchanged
+
+    FireDropoff's optional `outcome` kwarg is intentionally dropped on
+    demotion: observation fires record the physical pickup/dropoff but
+    do not carry narrative-cancellation metadata (outcome="canceled"
+    or outcome="pickup_missed"). The narrative-state semantics those
+    outcomes encode are not meaningful in lost-mode — the driver has
+    no bound narrative to cancel.
+
+    Adding a new Action variant: if it carries narrative intent that
+    should be stripped under §XVIII, add an isinstance branch here.
+    Otherwise it passes through correctly via the default return.
+    """
+    if isinstance(action, FirePickup):
+        return FirePickupObservation(action.offer_id)
+    if isinstance(action, FireDropoff):
+        return FireDropoffObservation(action.offer_id)
+    return action
 
 
 def _dispatch_single(

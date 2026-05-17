@@ -22,11 +22,15 @@ from typing import Literal
 import pytest
 
 from dispatch import (
+    ClearNarrative,
     FireDropoff,
+    FireDropoffObservation,
     FirePickup,
+    FirePickupObservation,
     LogAmbiguousMatch,
     LogNoMatch,
     LogPickupRematch,
+    _demote_to_observation,
     dispatch,
 )
 from pudo_types import OfferMeta, WAIMatch
@@ -618,3 +622,172 @@ def test_houston_playback_7849_7850_redispatch():
         f"a regression here means Auto Nail It is broken on the re-bid scenario."
     )
 
+
+
+# ============================================================================
+# §XVIII Driver-State Lost Mode — demotion + dispatch-with-lost-mode
+# ============================================================================
+#
+# Tests the _demote_to_observation primitive in isolation, then validates
+# end-to-end behavior of dispatch(lost_mode=True). Per §XVIII.A bit 1,
+# lost_mode=True structurally implies current_offer_id=None at the caller,
+# so paths requiring current_offer_id != None (Case D, Case G, §5.1 with
+# active ride) are unreachable in practice — only Case B, Case F, and the
+# §5.3 cases are exercised here.
+
+
+def test_demote_fire_pickup_to_observation():
+    """FirePickup -> FirePickupObservation, offer_id preserved."""
+    result = _demote_to_observation(FirePickup("7918"))
+    assert isinstance(result, FirePickupObservation)
+    assert result.offer_id == "7918"
+
+
+def test_demote_fire_dropoff_to_observation():
+    """FireDropoff -> FireDropoffObservation, offer_id preserved."""
+    result = _demote_to_observation(FireDropoff("7918"))
+    assert isinstance(result, FireDropoffObservation)
+    assert result.offer_id == "7918"
+
+
+def test_demote_fire_dropoff_drops_outcome_kwarg():
+    """FireDropoff carries an `outcome` kwarg (canceled / pickup_missed)
+    encoding narrative-cancellation metadata. Observation fires don't
+    carry it — the narrative semantics aren't meaningful in lost-mode.
+    """
+    result = _demote_to_observation(FireDropoff("7918", outcome="canceled"))
+    assert isinstance(result, FireDropoffObservation)
+    assert result.offer_id == "7918"
+
+
+def test_demote_observation_actions_pass_through():
+    """FirePickupObservation and FireDropoffObservation pass through
+    demotion unchanged (identity-preserving).
+    """
+    pickup_obs = FirePickupObservation("7918")
+    dropoff_obs = FireDropoffObservation("7919")
+    assert _demote_to_observation(pickup_obs) is pickup_obs
+    assert _demote_to_observation(dropoff_obs) is dropoff_obs
+
+
+def test_demote_clear_narrative_passes_through():
+    """ClearNarrative passes through demotion unchanged."""
+    cn = ClearNarrative()
+    assert _demote_to_observation(cn) is cn
+
+
+def test_demote_log_actions_pass_through():
+    """LogNoMatch, LogAmbiguousMatch, LogPickupRematch pass through."""
+    no_match = LogNoMatch()
+    ambig = LogAmbiguousMatch(candidates=(), reason="test")
+    rematch = LogPickupRematch("7918")
+    assert _demote_to_observation(no_match) is no_match
+    assert _demote_to_observation(ambig) is ambig
+    assert _demote_to_observation(rematch) is rematch
+
+
+def test_dispatch_lost_mode_case_b_demotes():
+    """Case B (naked pickup, no active ride) under lost_mode produces
+    a single FirePickupObservation. Narrative does NOT engage.
+    """
+    actions = dispatch(
+        matches=[_wm("7918", "pickup")],
+        current_offer_id=None,
+        queue_metadata={"7918": _meta()},
+        lost_mode=True,
+    )
+    assert actions == [FirePickupObservation("7918")]
+
+
+def test_dispatch_lost_mode_case_f_demotes():
+    """Case F (dropoff while current_offer_id=None) under lost_mode
+    produces a single FireDropoffObservation.
+    """
+    actions = dispatch(
+        matches=[_wm("7918", "dropoff")],
+        current_offer_id=None,
+        queue_metadata={"7918": _meta()},
+        lost_mode=True,
+    )
+    assert actions == [FireDropoffObservation("7918")]
+
+
+def test_dispatch_lost_mode_section_5_3_pickup_all_observations():
+    """§5.3 two-pickup recency tiebreaker. Normal dispatch returns
+    [FirePickup(winner), FirePickupObservation(loser)]. Under lost_mode
+    the winner ALSO demotes — both become observations, no narrative
+    commit. This is the bug §XVIII exists to fix.
+    """
+    ts_old = datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc)
+    ts_new = datetime(2026, 5, 17, 12, 5, 0, tzinfo=timezone.utc)
+    actions = dispatch(
+        matches=[_wm("7918", "pickup"), _wm("7919", "pickup")],
+        current_offer_id=None,
+        queue_metadata={
+            "7918": _meta(ts_old),
+            "7919": _meta(ts_new),
+        },
+        lost_mode=True,
+    )
+    # All actions are observations. No FirePickup escapes demotion.
+    assert all(isinstance(a, FirePickupObservation) for a in actions)
+    assert not any(isinstance(a, FirePickup) for a in actions)
+    # Both offers contributed observations to the cache.
+    offer_ids = {a.offer_id for a in actions}
+    assert offer_ids == {"7918", "7919"}
+
+
+def test_dispatch_lost_mode_section_5_3_mirror_dropoff():
+    """§5.3-mirror two-dropoff case. Already produces observations +
+    ClearNarrative under normal dispatch. Under lost_mode the action
+    list is unchanged — everything passes through demotion as-is.
+
+    Directly encodes the 2026-05-15 ride 7918 production bug: two
+    ACCEPTed offers sharing a dropoff geocode produce observations +
+    ClearNarrative only, never a unilateral narrative FireDropoff
+    via side-channel.
+    """
+    actions = dispatch(
+        matches=[_wm("7918", "dropoff"), _wm("7919", "dropoff")],
+        current_offer_id=None,
+        queue_metadata={
+            "7918": _meta(),
+            "7919": _meta(),
+        },
+        lost_mode=True,
+    )
+    observation_count = sum(
+        1 for a in actions if isinstance(a, FireDropoffObservation)
+    )
+    clear_count = sum(1 for a in actions if isinstance(a, ClearNarrative))
+    narrative_count = sum(1 for a in actions if isinstance(a, FireDropoff))
+    assert observation_count == 2
+    assert clear_count == 1
+    assert narrative_count == 0  # §XVIII guarantee
+
+
+def test_dispatch_lost_mode_false_preserves_existing_behavior():
+    """Sanity: lost_mode=False (default) produces the same actions as
+    before Commit 2 landed. No regressions on the normal path.
+    """
+    actions = dispatch(
+        matches=[_wm("7918", "pickup")],
+        current_offer_id=None,
+        queue_metadata={"7918": _meta()},
+        # lost_mode omitted -> defaults to False
+    )
+    assert actions == [FirePickup("7918")]
+
+
+def test_dispatch_lost_mode_empty_match_list():
+    """LogNoMatch passes through demotion unchanged. The empty-match
+    case is the most common lost-mode heartbeat (driver moving but
+    no PUDO arrest detected).
+    """
+    actions = dispatch(
+        matches=[],
+        current_offer_id=None,
+        queue_metadata={},
+        lost_mode=True,
+    )
+    assert actions == [LogNoMatch()]
