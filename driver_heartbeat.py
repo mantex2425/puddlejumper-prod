@@ -1157,7 +1157,7 @@ def post_heartbeat():
     # is logged. Heartbeat continues with the self-healed value, and
     # FirePickup/FireDropoff naturally overwrite the DB pointer.
     queue = DriverQueue(driver_id, target_spec_builder=_bucket_to_target_spec)
-    snap = queue.snapshot(cur)
+    snap = queue.snapshot(cur, current_cumulative_miles=cumulative_miles)
     current_offer_id = snap.bound_offer_id
     queue_offer_ids = set(snap.offer_ids)
     # Phase 2 (§XIV.I): OfferMeta.created_at reads from offer.accepted_at
@@ -1246,11 +1246,11 @@ def post_heartbeat():
         cur.execute("""
             INSERT INTO app_private.heartbeat_log
               (driver_id, lat, lng, speed_mph, gps_accuracy_m,
-               current_offer_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+               current_offer_id, cumulative_miles)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
             driver_id, current_lat, current_lng, speed_mph, gps_accuracy_m,
-            current_offer_id,
+            current_offer_id, cumulative_miles,
         ))
     except Exception as e:
         log.warning("[heartbeat] heartbeat_log INSERT failed (non-fatal): %s", e)
@@ -1363,7 +1363,34 @@ def post_heartbeat():
             # Arrest reached but no candidate passed both gates.
             match_signal = 'no_match'
             if not diagnostics.tad_verdicts:
-                unmatched_reason = 'empty_queue'
+                # Bug B' 2026-05-18: the historical 'empty_queue' label
+                # conflated four distinct precondition failures. Split
+                # them so the next miss self-classifies. The WAI guard
+                # at where_am_i.py:_evaluate requires
+                #   `queue and per_offer_state is not None
+                #    and current_odometer is not None`.
+                # plus cluster non-None (Step 1 in _evaluate). Failure
+                # of any of these produces tad_verdicts == {}.
+                if not snap.offers:
+                    unmatched_reason = 'queue_actually_empty'
+                elif diagnostics.cluster is None:
+                    unmatched_reason = 'cluster_unavailable'
+                elif cumulative_miles is None:
+                    unmatched_reason = 'odometer_unavailable'
+                else:
+                    # Bug B'-2: queue non-empty, cluster present,
+                    # odometer present — TAD still didn't run. We could
+                    # not localize this from code reading on 2026-05-18.
+                    # Emit a WARNING so Cloud Run surfaces recurrences,
+                    # and tag the row so we can find it forensically.
+                    unmatched_reason = 'tad_skipped_unknown'
+                    log.warning(
+                        "[Bug B'-2] tad_skipped_unknown fired for "
+                        "driver_id=%s with snap.offers=%d, cluster present, "
+                        "cumulative_miles=%s — please investigate this "
+                        "pudo_decision_context row.",
+                        driver_id, len(snap.offers), cumulative_miles,
+                    )
             elif lost_mode:
                 # §XVIII.D.2: lost-mode misses get canonical
                 # lost_mode_no_candidate; matcher consulted WAI on every
