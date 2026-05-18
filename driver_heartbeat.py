@@ -1385,11 +1385,21 @@ def post_heartbeat():
                     # and tag the row so we can find it forensically.
                     unmatched_reason = 'tad_skipped_unknown'
                     log.warning(
-                        "[Bug B'-2] tad_skipped_unknown fired for "
-                        "driver_id=%s with snap.offers=%d, cluster present, "
-                        "cumulative_miles=%s — please investigate this "
-                        "pudo_decision_context row.",
-                        driver_id, len(snap.offers), cumulative_miles,
+                        "[Bug B'-2] tad_skipped_unknown fired | "
+                        "driver_id=%s | "
+                        "snap.offers=%d offer_ids=%s | "
+                        "per_offer_state_keys=%s | "
+                        "cluster lat,lng=(%s, %s) size=%s duration_s=%s | "
+                        "cumulative_miles=%s | lost_mode=%s | "
+                        "please investigate this pudo_decision_context row.",
+                        driver_id,
+                        len(snap.offers), [o.offer_id for o in snap.offers],
+                        sorted(per_offer_state.keys()) if per_offer_state else [],
+                        diagnostics.cluster.median_lat if diagnostics.cluster else None,
+                        diagnostics.cluster.median_lng if diagnostics.cluster else None,
+                        diagnostics.cluster.n if diagnostics.cluster else None,
+                        diagnostics.cluster.duration_s if diagnostics.cluster else None,
+                        cumulative_miles, lost_mode,
                     )
             elif lost_mode:
                 # §XVIII.D.2: lost-mode misses get canonical
