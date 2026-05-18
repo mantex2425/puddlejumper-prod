@@ -1104,7 +1104,16 @@ When a stop is detected but no offer matches, the row records:
 - `matched_offer_id`: NULL
 - `match_signal`: `no_match`
 - `matcher_candidates`: empty array
-- `unmatched_reason`: which gate failed for the closest candidate (`tad_failed`, `wai_below_floor`, `both_failed`, `empty_queue`, or one of the §XVIII lost-mode reasons per §XVIII.D.2)
+- `unmatched_reason`: which precondition or gate failed. Values:
+    - `tad_failed`: TAD distance gate rejected the closest candidate
+    - `wai_below_floor`: TAD passed but WAI confidence < 0.40 floor
+    - `both_failed`: TAD and WAI both rejected (legacy, retained for back-compat)
+    - `queue_actually_empty`: `snap.offers` was empty — no live offers in queue (Bug B'-1 surface; time-horizon scrubbing)
+    - `cluster_unavailable`: `diagnostics.cluster is None` — cluster detector returned no cluster despite arrest
+    - `odometer_unavailable`: `cumulative_miles is None` — heartbeat body lacked odometer (structurally impossible from current Android client; firing this label is itself an alert)
+    - `tad_skipped_unknown`: queue non-empty, cluster present, odometer present, TAD still didn't run — **Bug B'-2 recurrence sentinel**. When this label fires, a Cloud Run WARNING tagged `[Bug B'-2]` is also emitted carrying driver_id, snap.offers length, and cumulative_miles for investigation.
+    - one of the §XVIII lost-mode reasons per §XVIII.D.2
+    - **Deprecated:** `empty_queue` was the historical conflated label; replaced 2026-05-18 by the four-way split above. Pre-2026-05-18 PDC rows retain `empty_queue` and should be interpreted as "one of {queue_actually_empty, cluster_unavailable, odometer_unavailable, tad_skipped_unknown} but unknowable which without replay."
 - `phase_reached`: highest phase reached before failure
 
 These forensics make false negatives investigable. A miss is not silent — every detected stop has a row, regardless of whether it produced a fire.
