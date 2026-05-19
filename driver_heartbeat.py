@@ -1340,24 +1340,74 @@ def post_heartbeat():
         candidates = []  # list[(offer_id, leg, confidence)]
         tad_passed_any = False
 
-        for offer_id, verdict in diagnostics.tad_verdicts.items():
-            # §XVIII.C.2: in lost-mode, candidate inclusion is unconditional
-            # on TAD verdict (which is null/abstained per §XVIII.C.1). The
-            # WAI 0.40 floor below remains the second-line gate.
-            if not lost_mode and verdict.distance_gate.get('passed') is not True:
-                continue
-            if verdict.distance_gate.get('passed') is True:
-                tad_passed_any = True
-            leg = verdict.leg_evaluated
+        # P15-final consolidated candidate loop (2026-05-19): the matcher's
+        # source of truth is diagnostics.per_target_outcomes (WAI's spatial-
+        # scoring results — populated for EVERY offer in the queue, both
+        # legs per offer). TAD is CONSULTED, not iterated.
+        #
+        # Three invariants land here together:
+        #
+        #   (1) Iteration source = per_target_outcomes. Fixes the pre-P15
+        #       matcher-blindness bug where empty tad_verdicts produced
+        #       empty matcher_candidates despite live offers in the queue.
+        #
+        #   (2) tad_passed_any flips BEFORE the WAI confidence skip, so
+        #       the downstream unmatched_reason classifier can distinguish
+        #       'wai_below_floor' (TAD passed, spatial weak) from
+        #       'tad_failed' (TAD rejected).
+        #
+        #   (3) Leg alignment: per_target_outcomes has TWO entries per
+        #       offer (pickup + dropoff). tad_verdicts has ONE entry per
+        #       offer (the active leg for that offer's lifecycle state).
+        #       Pair them ONLY when verdict.leg_evaluated == loop's leg.
+        #       Otherwise the inactive leg would inherit the active leg's
+        #       TAD authorization (cross-leg leak).
+        for offer_id, leg, outcome in diagnostics.per_target_outcomes:
             if leg not in ('pickup', 'dropoff'):
                 continue
-            outcome = None
-            for oid, ltype, oc in diagnostics.per_target_outcomes:
-                if oid == offer_id and ltype == leg:
-                    outcome = oc
-                    break
+
+            # Isolate the offer's active-leg verdict. verdict_for_offer is
+            # the raw lookup (used to detect "TAD active on other leg"
+            # below). verdict is the leg-aligned form (used for the gate
+            # state variables).
+            verdict_for_offer = (
+                diagnostics.tad_verdicts.get(offer_id)
+                if diagnostics.tad_verdicts else None
+            )
+            verdict = (
+                verdict_for_offer
+                if (verdict_for_offer is not None
+                    and verdict_for_offer.leg_evaluated == leg)
+                else None
+            )
+
+            # tad_passed_any reflects TAD's view of THIS leg, independent
+            # of WAI confidence (drives the unmatched_reason classifier
+            # downstream — 'wai_below_floor' vs 'tad_failed').
+            if verdict is not None and verdict.distance_gate.get('passed') is True:
+                tad_passed_any = True
+
+            # WAI confidence floor: cheap spatial cutoff before the
+            # TAD authorization decision.
             if outcome is None or outcome.confidence < WAI_CONFIDENCE_THRESHOLD:
                 continue
+
+            # Normal-mode gates (lost-mode bypasses both per §XVIII.C.2):
+            #
+            #   (a) TAD active on the OTHER leg → this leg unauthorized.
+            #       Driver is in the lifecycle state where TAD picked the
+            #       other direction; firing on this leg would be premature.
+            #
+            #   (b) TAD active on THIS leg AND rejected → skip.
+            #       TAD's distance-gate said no; honor it.
+            #
+            # Bridge state (verdict_for_offer is None — TAD didn't run)
+            # falls through both gates: permissive abstention.
+            if not lost_mode and verdict_for_offer is not None and verdict is None:
+                continue
+            if not lost_mode and verdict is not None and verdict.distance_gate.get('passed') is not True:
+                continue
+
             candidates.append((offer_id, leg, outcome.confidence))
 
         matcher_candidates = [c[0] for c in candidates]
