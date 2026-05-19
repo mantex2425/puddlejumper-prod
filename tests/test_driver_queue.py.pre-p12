@@ -213,28 +213,28 @@ def test_offer_ids_only_query_uses_canonical_gc_constants():
     # Reference_time slots [4] and [6] must bind the SAME captured value
     # as slot [1]. GC_ODOMETER_FREEZE_MINUTES at [5] and [7] must match
     # the canonical module constant.
-    assert params[4] is None, "staleness NULL-guard slot must be None when last_odometer_move_at unset"
-    assert params[5] is None, "staleness age-LHS slot must be None when last_odometer_move_at unset"
+    assert params[2] is None, "staleness NULL-guard slot must be None when last_odometer_move_at unset"
+    assert params[3] is None, "staleness age-LHS slot must be None when last_odometer_move_at unset"
 
-    assert isinstance(params[6], _dt.datetime), "staleness age-RHS slot must be datetime"
-    assert params[6].tzinfo is not None, "staleness age-RHS slot must be timezone-aware"
+    assert isinstance(params[4], _dt.datetime), "staleness age-RHS slot must be datetime"
+    assert params[4].tzinfo is not None, "staleness age-RHS slot must be timezone-aware"
 
-    assert params[7] == _GC_FREEZE, (
-        f"staleness interval slot drifted: got {params[7]}, expected {_GC_FREEZE}"
+    assert params[5] == _GC_FREEZE, (
+        f"staleness interval slot drifted: got {params[5]}, expected {_GC_FREEZE}"
     )
 
-    assert isinstance(params[8], _dt.datetime), "staleness new-offer-exemption slot must be datetime"
-    assert params[8].tzinfo is not None, "staleness new-offer-exemption slot must be timezone-aware"
+    assert isinstance(params[6], _dt.datetime), "staleness new-offer-exemption slot must be datetime"
+    assert params[6].tzinfo is not None, "staleness new-offer-exemption slot must be timezone-aware"
 
-    assert params[9] == _GC_FREEZE, (
-        f"new-offer-exemption interval slot drifted: got {params[9]}, expected {_GC_FREEZE}"
+    assert params[7] == _GC_FREEZE, (
+        f"new-offer-exemption interval slot drifted: got {params[7]}, expected {_GC_FREEZE}"
     )
 
     # Shared-reference_time invariant: all three reference_time slots
     # in a single helper call must bind the SAME _now() capture. If they
     # diverge, the helper accidentally called _now() multiple times
     # instead of using the passed-in reference_time argument once.
-    assert params[1] == params[2] == params[6] == params[8], (
+    assert params[1] == params[4] == params[6], (
         "Causality Guard, staleness age-RHS, and new-offer-exemption "
         "reference_time slots must bind the same _now() capture (all "
         "come from the single reference_time argument to "
@@ -242,7 +242,7 @@ def test_offer_ids_only_query_uses_canonical_gc_constants():
     )
 
     # Distance-axis params (shifted to [8:] under new architecture)
-    assert params[10:] == expected[10:], "distance-axis params drifted"
+    assert params[8:] == expected[8:], "distance-axis params drifted"
 
 
 # =============================================================================

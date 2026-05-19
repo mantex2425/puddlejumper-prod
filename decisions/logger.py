@@ -107,7 +107,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                     ORDER BY oh.created_at DESC
                     LIMIT 1
                     """,
-                    (uid,) + live_offer_predicate_params(ep.get("cumulative_miles"), datetime.datetime.now(datetime.timezone.utc)),
+                    (uid,) + live_offer_predicate_params(ep.get("cumulative_miles"), datetime.datetime.now(datetime.timezone.utc), None),
                 )
                 prev_row = cur.fetchone()
                 if prev_row:

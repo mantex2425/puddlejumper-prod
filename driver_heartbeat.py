@@ -676,7 +676,7 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
     return out
 
 
-def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, reference_time):
+def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, reference_time, last_odometer_move_at=None):
     """Find most recent LIVE offer_id with confirmed PUDO. [3b.R, GC-aware]
 
     P0 fix 2026-05-10: applies LIVE_OFFER_PREDICATE_SQL. Stale offers
@@ -708,13 +708,13 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, referenc
         ORDER BY COALESCE(oh.actual_dropoff_at, oh.actual_pickup_at) DESC
         LIMIT 1
         """,
-        (driver_id,) + live_offer_predicate_params(current_cumulative_miles, reference_time),
+        (driver_id,) + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
     )
     row = cur.fetchone()
     return str(row["id"]) if row else None
 
 
-def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time):
+def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time, last_odometer_move_at=None):
     """Detect driver-state lost-mode per §XVIII.
 
     Driver-state lost-mode is the natural operating state of a PUDO
@@ -756,7 +756,7 @@ def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles,
         LIMIT 1
         """,
         (driver_id,)
-        + live_offer_predicate_params(current_cumulative_miles, reference_time),
+        + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
     )
     return cur.fetchone() is not None
 
@@ -1157,7 +1157,35 @@ def post_heartbeat():
     # is logged. Heartbeat continues with the self-healed value, and
     # FirePickup/FireDropoff naturally overwrite the DB pointer.
     queue = DriverQueue(driver_id, target_spec_builder=_bucket_to_target_spec)
-    snap = queue.snapshot(cur, current_cumulative_miles=cumulative_miles)
+    # §XIV.H Odometer-Staleness Gate (2026-05-19): pre-fetch the prior
+    # cumulative_miles and last_odometer_move_at from the row that's about
+    # to be UPDATEd. Computes effective_last_move for THIS tick — if the
+    # odometer just moved, treat the offer-liveness staleness as alive
+    # now (not the prior stale timestamp), preventing the "killed on the
+    # revive tick" race. The SQL UPDATE at line 1192 commits the same
+    # logic atomically via CASE; the two are equivalent by construction.
+    _heartbeat_now = datetime.datetime.now(datetime.timezone.utc)
+    cur.execute("""
+        SELECT last_odometer_move_at,
+               (heartbeat->>'cumulative_miles')::numeric AS prior_cum
+        FROM app_private.driver_trip_state
+        WHERE driver_id = %s
+    """, (driver_id,))
+    _pre = cur.fetchone()
+    if _pre is not None:
+        _prior_cum = float(_pre['prior_cum']) if _pre['prior_cum'] is not None else None
+        _prior_last_move = _pre['last_odometer_move_at']
+    else:
+        _prior_cum = None
+        _prior_last_move = None
+
+    if (cumulative_miles is not None and _prior_cum is not None
+            and cumulative_miles != _prior_cum):
+        effective_last_move = _heartbeat_now
+    else:
+        effective_last_move = _prior_last_move
+
+    snap = queue.snapshot(cur, current_cumulative_miles=cumulative_miles, last_odometer_move_at=effective_last_move)
     current_offer_id = snap.bound_offer_id
     queue_offer_ids = set(snap.offer_ids)
     # Phase 2 (§XIV.I): OfferMeta.created_at reads from offer.accepted_at
@@ -1193,6 +1221,15 @@ def post_heartbeat():
         UPDATE app_private.driver_trip_state
         SET heartbeat = %s::jsonb,
             heartbeat_at = NOW(),
+            -- §XIV.H Odometer-Staleness Gate atomic maintenance.
+            -- IS DISTINCT FROM handles NULL transitions, resets (cumulative
+            -- miles drops to 0 on Android offer_accepted), and numeric
+            -- changes. Bumps timestamp on any movement, preserves on freeze.
+            last_odometer_move_at = CASE
+                WHEN heartbeat IS NULL OR (heartbeat->>'cumulative_miles') IS NULL THEN NOW()
+                WHEN %s::numeric IS DISTINCT FROM (heartbeat->>'cumulative_miles')::numeric THEN NOW()
+                ELSE COALESCE(last_odometer_move_at, NOW())
+            END,
             arrest_started_at = CASE
                 WHEN %s::real = 0.0 AND arrest_started_at IS NULL
                     THEN NOW()
@@ -1208,7 +1245,7 @@ def post_heartbeat():
                 ELSE NULL
             END
         WHERE driver_id = %s
-        RETURNING arrest_started_at, arrest_counter_s
+        RETURNING arrest_started_at, arrest_counter_s, last_odometer_move_at
     """, (json.dumps({
         "lat": current_lat,
         "lng": current_lng,
@@ -1216,7 +1253,7 @@ def post_heartbeat():
         "gps_accuracy_m": gps_accuracy_m,
         "cumulative_miles": cumulative_miles,
         "received_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }), speed_mph, speed_mph, speed_mph, speed_mph, driver_id))
+    }), cumulative_miles, speed_mph, speed_mph, speed_mph, speed_mph, driver_id))
 
     # Capture the post-UPDATE counter state to thread into _log_decision_context.
     # Defensive: if the driver row doesn't exist (shouldn't happen post-LOAD
@@ -1267,8 +1304,8 @@ def post_heartbeat():
     # predicate evaluations in this turn share the same "now",
     # making the dispatch decision deterministic and replayable.
     _heartbeat_now = datetime.datetime.now(datetime.timezone.utc)
-    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, cumulative_miles, _heartbeat_now)
-    lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int, cumulative_miles, _heartbeat_now)
+    last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, cumulative_miles, _heartbeat_now, effective_last_move)
+    lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int, cumulative_miles, _heartbeat_now, effective_last_move)
 
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(

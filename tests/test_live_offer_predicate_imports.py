@@ -97,24 +97,47 @@ class TestPredicateStructuralContract:
         )
 
     def test_detect_lost_mode_signature(self):
-        """_detect_lost_mode signature must include
-        current_cumulative_miles=None for the distance-axis bind.
+        """_detect_lost_mode signature must include current_cumulative_miles
+        and reference_time as required positionals (for distance + clock
+        binding), plus last_odometer_move_at=None as the staleness-gate
+        parameter (defaulted; permissive on NULL).
+
+        Updated 2026-05-19 (P10/P11 staleness gate): the signature grew
+        from 5 to 6 positional parameters. reference_time remains required
+        (no default) per Rule VII; last_odometer_move_at is defaulted to
+        None because the staleness clause short-circuits to permissive
+        when the timestamp is NULL.
         """
         text = _module_text("driver_heartbeat.py")
         assert (
             "def _detect_lost_mode(cur, driver_id, queue_offer_ids, "
-            "current_cumulative_miles, reference_time)" in text
-        ), "_detect_lost_mode signature missing current_cumulative_miles or reference_time"
+            "current_cumulative_miles, reference_time, "
+            "last_odometer_move_at=None)" in text
+        ), (
+            "_detect_lost_mode signature drift: must accept "
+            "(cur, driver_id, queue_offer_ids, current_cumulative_miles, "
+            "reference_time, last_odometer_move_at=None)"
+        )
 
     def test_detect_lost_mode_caller_threads_miles(self):
-        """The caller in driver_heartbeat.py must thread
-        current_cumulative_miles into _detect_lost_mode.
+        """The caller in driver_heartbeat.py must thread cumulative_miles,
+        the captured _heartbeat_now reference time, AND the
+        effective_last_move staleness timestamp computed by the
+        pre-fetch+effective-compute block.
+
+        Updated 2026-05-19 (P10/P11): caller now passes 6 arguments
+        instead of 5. The 6th, effective_last_move, is computed in the
+        heartbeat handler from prior driver_trip_state row + current
+        cumulative_miles per the §XIV.H pre-fetch pattern.
         """
         text = _module_text("driver_heartbeat.py")
         assert (
             "_detect_lost_mode(cur, driver_id, queue_ids_int, "
-            "cumulative_miles, _heartbeat_now)" in text
-        ), "_detect_lost_mode caller missing cumulative_miles/_heartbeat_now thread"
+            "cumulative_miles, _heartbeat_now, effective_last_move)" in text
+        ), (
+            "_detect_lost_mode caller signature drift: must thread "
+            "cumulative_miles, _heartbeat_now, and effective_last_move"
+        )
 
     def test_predicate_does_not_use_server_clock(self):
         """Rule VII final form: LIVE_OFFER_PREDICATE_SQL must NOT
@@ -173,16 +196,42 @@ class TestPredicateStructuralContract:
         )
 
     def test_params_helper_requires_reference_time(self):
-        """The params helper signature must require reference_time
-        as a positional argument (no default). Defaults invite the
-        failure mode where production accidentally picks up
-        wall-clock when the dev meant to inject a test clock.
+        """The params helper signature must require reference_time as
+        a positional argument (no default), per Rule VII deterministic-
+        clock requirement. last_odometer_move_at MAY default to None
+        because the staleness gate's NULL-guard sub-clause provides
+        graceful degradation — but reference_time has no such fallback
+        and must be explicit.
+
+        Updated 2026-05-19 (P10/P11): helper now takes 3 positionals
+        (current_cumulative_miles, reference_time, last_odometer_move_at).
+        The last has a default; the first two do not.
         """
         text = _module_text("driver_queue.py")
         assert (
             "def live_offer_predicate_params(current_cumulative_miles, "
-            "reference_time):" in text
+            "reference_time, last_odometer_move_at=None):" in text
         ), (
-            "live_offer_predicate_params signature must take "
-            "reference_time as a required positional argument"
+            "live_offer_predicate_params signature must be "
+            "(current_cumulative_miles, reference_time, "
+            "last_odometer_move_at=None) — reference_time required, "
+            "last_odometer_move_at defaulted"
+        )
+
+        # Defensive: explicitly assert reference_time has no default.
+        # If someone ever adds `reference_time=None`, this catches it.
+        import re as _re
+        sig_match = _re.search(
+            r"def live_offer_predicate_params\(([^)]*)\):", text
+        )
+        assert sig_match is not None, "helper signature regex failed to match"
+        params_str = sig_match.group(1)
+        # Find the reference_time parameter and verify no `=` follows it
+        # before the next comma or end-of-string.
+        rt_match = _re.search(r"reference_time(\s*=\s*[^,]+)?", params_str)
+        assert rt_match is not None, "reference_time missing from signature"
+        assert rt_match.group(1) is None, (
+            "reference_time has a default value — Rule VII violation. "
+            "The clock must always be explicit; defaults invite the "
+            "failure mode where production accidentally uses wall-clock."
         )

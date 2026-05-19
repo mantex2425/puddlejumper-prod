@@ -86,18 +86,16 @@ GC_MAX_MINUTES = 240      # Ceiling: cap the airport-run window to 4 hours
 # drive data — log rationale in CANONICAL_RULES.md if retuning.
 GC_ODOMETER_FREEZE_MINUTES = 30
 
-# §XIV.H Abandonment Ceiling (2026-05-19): hard cap on how long ANY
-# offer can stay alive after creation. Preserves the GC_MAX_MINUTES
-# = 240 (4 hour) cap that was buried inside the pre-P10 time
-# horizon's clamp — that ceiling was always doing legitimate
-# abandonment work, separate from the per-trip wait math we deleted.
-#
-# Catches cross-shift staleness (yesterday's never-fired offers),
-# Android cumulative_miles accumulator resets between sessions,
-# and any offer that aged out without firing pickup or dropoff.
-# Houston→Austin (~3 hours) fits comfortably. Airport runs (~1 hour)
-# unaffected.
-GC_ABANDONMENT_CEILING_HOURS = 4
+# §XIV.H Legacy Schema Safety Valve (2026-05-19): age ceiling for
+# offers whose miles_at_offer_receipt is NULL. Predates the receipt-
+# capture column (~early May 2026) — these offers cannot use the
+# distance gate, so they fall back to a wall-clock ceiling against
+# created_at. 4 hours covers any plausible single-offer duration
+# (Houston→Austin is ~3 hours) while reaping zombies from pre-schema
+# data. ALSO load-bearing on the modern path: if production ever
+# fails to write miles_at_offer_receipt at receipt time, the
+# resulting orphan gets reaped here instead of living forever.
+GC_LEGACY_AGE_HOURS = 4
 
 
 # =============================================================================
@@ -188,15 +186,16 @@ LIVE_OFFER_PREDICATE_SQL = """
     -- reference_time is not — without this clause, future offers leak
     -- into the live set. See Houston Playback.
     AND oh.created_at <= %s::timestamptz
-    -- Abandonment Ceiling (2026-05-19): no offer can stay alive longer
-    -- than this regardless of distance progress. Preserves the
-    -- GC_MAX_MINUTES = 240 (4 hour) cap from the pre-P10 architecture,
-    -- which was buried inside the deleted time-horizon's clamp. Covers
-    -- cross-shift staleness (yesterday's never-fired offers), Android
-    -- accumulator resets, and any offer that aged out without firing
-    -- pickup or dropoff. Houston→Austin (~3 hours) fits comfortably
-    -- under this ceiling. The IAH airport run (~66 min) is unaffected.
-    AND oh.created_at > %s::timestamptz - INTERVAL '%s hours'
+    -- Legacy Schema Safety Valve (2026-05-19): offers without
+    -- miles_at_offer_receipt (pre-receipt-capture schema, or modern
+    -- offers where the receipt-write pipeline dropped the value) cannot
+    -- use the distance gate. Bound them with a wall-clock age ceiling.
+    -- Modern offers with populated anchor short-circuit on the left side
+    -- of the OR — zero production overhead.
+    AND (
+        oh.miles_at_offer_receipt IS NOT NULL
+        OR oh.created_at > %s::timestamptz - INTERVAL '%s hours'
+    )
     -- Odometer Staleness Gate (2026-05-19): replaces per-trip time
     -- horizon. Three sub-clauses:
     --   1. last_odometer_move_at is tracked (else gate is permissive)
@@ -276,11 +275,11 @@ def live_offer_predicate_params(current_cumulative_miles, reference_time, last_o
         # offers from leaking into the live set during replay.
         reference_time,
         # Legacy Schema Safety Valve (2026-05-19): reference_time and
-        # GC_ABANDONMENT_CEILING_HOURS bound to the `oh.created_at > ref - N hours`
+        # GC_LEGACY_AGE_HOURS bound to the `oh.created_at > ref - N hours`
         # clause. Reaps zombie rows from pre-receipt-capture schema (and
         # modern orphans where the receipt-write pipeline dropped).
         reference_time,
-        GC_ABANDONMENT_CEILING_HOURS,
+        GC_LEGACY_AGE_HOURS,
         # Odometer Staleness Gate (2026-05-19): four params for the
         # 3-sub-clause NOT(...) block — last_odometer_move_at twice
         # (NULL guard + age comparison), reference_time twice (age and
