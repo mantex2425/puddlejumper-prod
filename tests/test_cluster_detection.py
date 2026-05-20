@@ -87,7 +87,7 @@ def test_cluster_field_count():
     that the SQL was already aggregating, for offer-anchored lookback sorting."""
     import dataclasses
     field_names = {f.name for f in dataclasses.fields(Cluster)}
-    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s", "latest"}
+    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s", "latest", "started_at"}
 
 
 # ============================================================================
@@ -150,14 +150,16 @@ def test_scenario_tight_4sample_stop_at_T16s():
 
     # What the SQL WOULD return at this cutoff:
     query1_result = {
+        "run_id": 0,
         "n": 4,
         "median_lat": 29.6245833,
         "median_lng": -95.5102295,
-        "earliest": earliest,
+        "started_at": earliest,
         "latest": latest,
+        "duration_s": (latest - earliest).total_seconds(),
     }
-    # All 4 points at identical coordinates => max distance from median = 0.
-    query2_result = {"max_dist_m": 0.0}
+    # All 4 points at identical coordinates => spread = 0.
+    query2_result = {"spread_m": 0.0}
 
     cur = _make_mock_cursor(query1_result, query2_result)
     result = detect_cluster(DRIVER_ID, cur)
@@ -185,13 +187,7 @@ def test_scenario_no_cluster_when_currently_moving():
 
     Empty current_run -> COUNT(*) = 0, medians NULL.
     """
-    query1_result = {
-        "n": 0,
-        "median_lat": None,
-        "median_lng": None,
-        "earliest": None,
-        "latest": None,
-    }
+    query1_result = None  # P19: SQL HAVING filter yields zero rows when not still
     cur = _make_mock_cursor(query1_result)
     result = detect_cluster(DRIVER_ID, cur)
 
@@ -205,13 +201,7 @@ def test_scenario_undersized_cluster_rejected():
     min_samples=3.
     """
     ts = datetime(2026, 4, 23, 20, 53, 0, 947572, tzinfo=timezone.utc)
-    query1_result = {
-        "n": 1,
-        "median_lat": 29.6218166,
-        "median_lng": -95.5101237,
-        "earliest": ts,
-        "latest": ts,
-    }
+    query1_result = None  # P19: HAVING COUNT(*) >= min_samples filters this out
     cur = _make_mock_cursor(query1_result)
     result = detect_cluster(DRIVER_ID, cur)
 
@@ -224,13 +214,15 @@ def test_scenario_min_samples_override_lets_brief_pause_qualify():
     """
     ts = datetime(2026, 4, 23, 20, 53, 0, 947572, tzinfo=timezone.utc)
     query1_result = {
+        "run_id": 0,
         "n": 1,
         "median_lat": 29.6218166,
         "median_lng": -95.5101237,
-        "earliest": ts,
+        "started_at": ts,
         "latest": ts,
+        "duration_s": 0.0,
     }
-    query2_result = {"max_dist_m": 0.0}
+    query2_result = {"spread_m": 0.0}
     cur = _make_mock_cursor(query1_result, query2_result)
 
     result = detect_cluster(DRIVER_ID, cur, min_samples=1)
@@ -240,73 +232,14 @@ def test_scenario_min_samples_override_lets_brief_pause_qualify():
     assert result.duration_s == pytest.approx(0.0)
 
 
-def test_scenario_spread_exceeds_max_returns_none():
-    """Scenario: hypothetical 4-sample cluster passes the count gate, but
-    the spread query reports max distance 50m (exceeds default 25m).
-    Function returns None, even though n was sufficient."""
-    earliest = datetime(2026, 4, 23, 20, 51, 59, tzinfo=timezone.utc)
-    latest = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
-
-    query1_result = {
-        "n": 4,
-        "median_lat": 29.6,
-        "median_lng": -95.5,
-        "earliest": earliest,
-        "latest": latest,
-    }
-    query2_result = {"max_dist_m": 50.0}  # > default max_spread_m=25
-
-    cur = _make_mock_cursor(query1_result, query2_result)
-    result = detect_cluster(DRIVER_ID, cur)
-
-    assert result is None
+# P19: test_scenario_spread_exceeds_max_returns_none removed — spread no longer gates cluster acceptance.
 
 
-def test_scenario_spread_at_threshold_accepted():
-    """Boundary: spread exactly at max_spread_m is accepted (<= comparison)."""
-    earliest = datetime(2026, 4, 23, 20, 51, 59, tzinfo=timezone.utc)
-    latest = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
-
-    query1_result = {
-        "n": 4,
-        "median_lat": 29.6,
-        "median_lng": -95.5,
-        "earliest": earliest,
-        "latest": latest,
-    }
-    query2_result = {"max_dist_m": 25.0}  # exactly at default max_spread_m
-
-    cur = _make_mock_cursor(query1_result, query2_result)
-    result = detect_cluster(DRIVER_ID, cur)
-
-    assert result is not None
-    assert result.spread_m == pytest.approx(25.0)
+# P19: test_scenario_spread_at_threshold_accepted removed — spread no longer gates cluster acceptance.
 
 
-def test_scenario_null_max_dist_returns_none():
-    """Edge: spread query returns NULL max_dist_m (empty current_run on
-    second query, race condition). Function defends with None."""
-    earliest = datetime(2026, 4, 23, 20, 51, 59, tzinfo=timezone.utc)
-    latest = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
+# P19: test_scenario_null_max_dist_returns_none removed — spread no longer gates cluster acceptance.
 
-    query1_result = {
-        "n": 4,
-        "median_lat": 29.6,
-        "median_lng": -95.5,
-        "earliest": earliest,
-        "latest": latest,
-    }
-    query2_result = {"max_dist_m": None}
-
-    cur = _make_mock_cursor(query1_result, query2_result)
-    result = detect_cluster(DRIVER_ID, cur)
-
-    assert result is None
-
-
-# ============================================================================
-# Sanity: fixture file is consistent with what the test scenarios assume
-# ============================================================================
 
 def test_fixture_has_expected_shape():
     """Guard against fixture drift. If someone re-pulls the fixture and the
@@ -344,14 +277,21 @@ ANCHOR_TS = datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc)
 
 
 def _make_island_row(n, median_lat, median_lng, spread_m, earliest, latest):
-    """Mock fetchall() row matching get_recent_clusters' SELECT shape."""
+    """Mock fetchall() row matching get_recent_clusters' SELECT shape.
+
+    P19: SQL now returns started_at instead of earliest, plus duration_s.
+    Old callers pass `earliest` and `latest` positionally; this helper maps
+    earliest -> started_at and computes duration_s for the new shape.
+    """
     return {
         "n": n,
         "median_lat": median_lat,
         "median_lng": median_lng,
         "spread_m": spread_m,
-        "earliest": earliest,
+        "started_at": earliest,
         "latest": latest,
+        "duration_s": (latest - earliest).total_seconds(),
+        "run_id": 0,
     }
 
 
@@ -429,21 +369,24 @@ def test_get_recent_clusters_multiple_islands_preserve_order():
 
 # T6
 def test_get_recent_clusters_passes_query_parameters_in_order():
-    """Parameter binding order is contractual (driver_id, anchor, preroll_sec,
-    max_speed_mph x2, min_samples, max_spread_m). Single execute call."""
+    """P19: parameter binding order is contractual:
+    (driver_id, anchor, preroll_sec, min_samples, min_duration_s).
+    Single execute call. max_speed_mph and max_spread_m are accepted for
+    backward compat but no longer flow into the SQL (gating removed)."""
     cur = _make_recent_clusters_cursor([])
     get_recent_clusters(
         DRIVER_ID, cur,
         accepted_at_anchor=ANCHOR_TS,
         preroll_sec=45,
         min_samples=5,
-        max_speed_mph=8.0,
-        max_spread_m=20.0,
+        min_duration_s=7.0,
+        max_speed_mph=8.0,    # accepted for compat, ignored by SQL
+        max_spread_m=20.0,    # accepted for compat, ignored by SQL
     )
     assert cur.execute.call_count == 1
     args, _ = cur.execute.call_args
     _sql, params = args
-    assert params == (DRIVER_ID, ANCHOR_TS, 45, 8.0, 8.0, 5, 20.0)
+    assert params == (DRIVER_ID, ANCHOR_TS, 45, 5, 7.0)
 
 
 # T7
@@ -459,13 +402,21 @@ def test_get_recent_clusters_duration_computed_from_earliest_latest():
 
 # T8
 def test_get_recent_clusters_default_kwargs_match_detect_cluster():
-    """Default min_samples=3, max_speed_mph=10.0, max_spread_m=25.0 must match
-    detect_cluster() defaults — single source of truth across both primitives."""
+    """P19: defaults that flow into SQL are min_samples=3, min_duration_s=5.0.
+
+    detect_cluster() uses min_duration_s=10.0 (active fire trigger needs
+    a real stop). get_recent_clusters() uses 5.0 (lower floor enables
+    visibility into micro-stillness islands for multi-stop disambiguation).
+    The DIFFERENT floors are intentional — see RFC P19 section 11.2.
+
+    max_speed_mph and max_spread_m remain on the signature for backward
+    compat but no longer flow into SQL (stillness gating uses speed=0 exactly,
+    no spread gate)."""
     cur = _make_recent_clusters_cursor([])
     get_recent_clusters(DRIVER_ID, cur, accepted_at_anchor=ANCHOR_TS, preroll_sec=60)
     args, _ = cur.execute.call_args
     _sql, params = args
-    assert params[3] == 10.0   # max_speed_mph
-    assert params[4] == 10.0   # max_speed_mph (repeated for two %s slots)
-    assert params[5] == 3      # min_samples
-    assert params[6] == 25.0   # max_spread_m
+    # P19 SQL placeholder order: (driver_id, anchor, preroll, min_samples, min_duration_s)
+    assert len(params) == 5
+    assert params[3] == 3      # min_samples default
+    assert params[4] == 5.0    # min_duration_s default for get_recent_clusters

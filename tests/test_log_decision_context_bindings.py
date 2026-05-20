@@ -62,6 +62,7 @@ class _StandinCluster:
     median_lng: float = -95.50231
     n: int = 7
     duration_s: int = 34
+    started_at: object = None
 
 
 @dataclass
@@ -198,14 +199,15 @@ COL = {
     "cluster_lng": 20,
     "cluster_size": 21,
     "cluster_duration_s": 22,
-    "poi_lookup_source": 23,
-    "poi_match_score": 24,
-    "poi_top_names": 25,
-    "planner_action": 26,
-    "dispatch_executed": 27,
-    "dispatch_error": 28,
-    "motion_gate_result": 29,
-    "tad_decision_context": 33,
+    "cluster_started_at": 23,
+    "poi_lookup_source": 24,
+    "poi_match_score": 25,
+    "poi_top_names": 26,
+    "planner_action": 27,
+    "dispatch_executed": 28,
+    "dispatch_error": 29,
+    "motion_gate_result": 30,
+    "tad_decision_context": 34,
 }
 
 

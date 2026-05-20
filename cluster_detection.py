@@ -51,16 +51,18 @@ class Cluster:
       n             -- number of consecutive low-speed heartbeats in the cluster
       median_lat    -- cluster centroid latitude (PERCENTILE_CONT(0.5))
       median_lng    -- cluster centroid longitude
-      spread_m      -- max distance (meters) from any cluster point to centroid
+      spread_m      -- max distance (meters) from any cluster point to centroid.
+                       Informational only post-P19; no longer a rejection gate.
       duration_s  -- span (seconds) from earliest to latest heartbeat in the
                        cluster. NB: this is the WIDTH of the cluster, not how
                        long the driver has been stopped overall (because the
                        cluster only counts heartbeats in the most recent
-                       uninterrupted low-speed run).
+                       uninterrupted stillness run).
       latest        -- MAX(logged_at) of the cluster's heartbeats. Exposes
-                       data already aggregated by the SQL. Used by
-                       get_recent_clusters() consumers to sort and to anchor
-                       Amendment 1's cluster_revisit topology check.
+                       data already aggregated by the SQL.
+      started_at    -- (P19) MIN(logged_at) of the cluster. Stable anchor for
+                       planner-side dedup across the departure_grace window.
+                       Optional for backward compat with stub-Cluster tests.
     """
     n: int
     median_lat: float
@@ -68,6 +70,7 @@ class Cluster:
     spread_m: float
     duration_s: float
     latest: datetime
+    started_at: Optional[datetime] = None
 
 
 # ============================================================================
@@ -98,7 +101,9 @@ def detect_cluster(driver_id: str, cur,
                    window_sec: int = 60,
                    min_samples: int = 3,
                    max_speed_mph: float = 10.0,
-                   max_spread_m: float = 25.0) -> Optional[Cluster]:
+                   max_spread_m: float = 25.0,
+                   min_duration_s: float = 10.0,
+                   departure_grace_s: float = 5.0) -> Optional[Cluster]:
     """Check if driver has a tight low-speed cluster in the recent past.
 
     Cluster criteria (all must hold):
@@ -121,87 +126,91 @@ def detect_cluster(driver_id: str, cur,
         return None
 
     try:
-        # Find the most recent CONSECUTIVE run of low-speed heartbeats.
-        # This is the "current stopped state" -- not "everything slow in the
-        # last minute" which can conflate a red light earlier with a curb
-        # stop now.
+        # P19 — stillness gating. Find the most recent CONTIGUOUS RUN of
+        # speed_mph = 0.0 heartbeats. Gaps-and-islands SQL groups stillness
+        # samples into runs; we select the run with the latest ended_at that
+        # also ended within `departure_grace_s` of NOW() (covers the
+        # pull-away race window where motion resumes between heartbeats).
+        #
+        # No spread_m gate. By construction, contiguous speed=0 samples are
+        # at a single physical location modulo GPS noise (typically <5m).
+        # spread_m is still computed and returned for forensic visibility.
+        #
+        # max_speed_mph parameter retained for backward compat but no longer
+        # affects gating (stillness is speed=0 exactly).
         cur.execute("""
-            WITH recent AS (
-                SELECT lat, lng, speed_mph, logged_at
+            WITH samples AS (
+                SELECT lat, lng, speed_mph, logged_at,
+                       (speed_mph > 0) AS is_moving
                 FROM app_private.heartbeat_log
                 WHERE driver_id = %s
                   AND logged_at >= NOW() - make_interval(secs => %s)
-                ORDER BY logged_at DESC
+                ORDER BY logged_at
             ),
-            tagged AS (
+            labeled AS (
                 SELECT *,
-                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
-                         OVER (ORDER BY logged_at DESC
+                       SUM(CASE WHEN is_moving THEN 1 ELSE 0 END)
+                         OVER (ORDER BY logged_at
                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-                         AS breaks_before
-                FROM recent
+                         AS run_id
+                FROM samples
             ),
-            current_run AS (
-                SELECT lat, lng, speed_mph, logged_at
-                FROM tagged
-                WHERE breaks_before = 0    -- zero high-speed samples between
-                                            -- this row and the most recent one
-                  AND speed_mph < %s
+            stillness_runs AS (
+                SELECT run_id,
+                       COUNT(*)::int AS n,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat)  AS median_lat,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lng)  AS median_lng,
+                       MIN(logged_at) AS started_at,
+                       MAX(logged_at) AS latest,
+                       EXTRACT(EPOCH FROM (MAX(logged_at) - MIN(logged_at)))::real
+                         AS duration_s
+                FROM labeled
+                WHERE NOT is_moving
+                GROUP BY run_id
+                HAVING COUNT(*) >= %s
+                   AND EXTRACT(EPOCH FROM (MAX(logged_at) - MIN(logged_at))) >= %s
+                   AND MAX(logged_at) >= NOW() - make_interval(secs => %s)
             )
-            SELECT
-                COUNT(*)::int AS n,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY lat)  AS median_lat,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY lng)  AS median_lng,
-                MIN(logged_at) AS earliest,
-                MAX(logged_at) AS latest
-            FROM current_run;
-        """, (driver_id, window_sec, max_speed_mph, max_speed_mph))
+            SELECT run_id, n, median_lat, median_lng, started_at, latest, duration_s
+            FROM stillness_runs
+            ORDER BY latest DESC
+            LIMIT 1
+        """, (driver_id, window_sec, min_samples, min_duration_s, departure_grace_s))
         row = cur.fetchone()
-        if not row or row["n"] is None or row["n"] < min_samples:
+        if not row or row["n"] is None:
             return None
 
         median_lat = float(row["median_lat"])
         median_lng = float(row["median_lng"])
 
-        # Spread check -- spread of CURRENT low-speed run only
+        # Compute spread_m forensically (no gating). This is a second query;
+        # we accept the cost because spread_m is observable in forensic logs
+        # and we want it accurate when GPS noise is non-trivial.
         cur.execute("""
-            WITH recent AS (
+            WITH samples AS (
                 SELECT lat, lng, speed_mph, logged_at
                 FROM app_private.heartbeat_log
                 WHERE driver_id = %s
-                  AND logged_at >= NOW() - make_interval(secs => %s)
-                ORDER BY logged_at DESC
-            ),
-            tagged AS (
-                SELECT *,
-                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
-                         OVER (ORDER BY logged_at DESC
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-                         AS breaks_before
-                FROM recent
+                  AND logged_at >= %s
+                  AND logged_at <= %s
+                  AND speed_mph = 0.0
             )
-            SELECT MAX(
+            SELECT COALESCE(MAX(
                 app_private.distance_miles(lat, lng, %s, %s) * 1609.34
-            ) AS max_dist_m
-            FROM tagged
-            WHERE breaks_before = 0 AND speed_mph < %s;
-        """, (driver_id, window_sec, max_speed_mph,
-              median_lat, median_lng, max_speed_mph))
+            ), 0.0) AS spread_m
+            FROM samples
+        """, (driver_id, row["started_at"], row["latest"], median_lat, median_lng))
         sr = cur.fetchone()
-        if not sr or sr["max_dist_m"] is None:
-            return None
-        spread_m = float(sr["max_dist_m"])
-        if spread_m > max_spread_m:
-            return None
+        spread_m = float(sr["spread_m"]) if sr and sr["spread_m"] is not None else 0.0
 
-        duration_s = (row["latest"] - row["earliest"]).total_seconds()
         return Cluster(
             n=int(row["n"]),
             median_lat=median_lat,
             median_lng=median_lng,
             spread_m=spread_m,
-            duration_s=duration_s,
+            duration_s=float(row["duration_s"]),
             latest=row["latest"],
+            started_at=row["started_at"],
         )
     except Exception as e:
         logging.warning(f"[CLUSTER] detect_cluster failed: {e}")
@@ -223,7 +232,8 @@ def get_recent_clusters(driver_id: str, cur,
                         preroll_sec: int = 60,
                         min_samples: int = 3,
                         max_speed_mph: float = 10.0,
-                        max_spread_m: float = 25.0) -> list:
+                        max_spread_m: float = 25.0,
+                        min_duration_s: float = 5.0) -> list:
     """Find all qualifying stopped clusters in the offer-anchored lookback window.
 
     Window: [accepted_at_anchor - preroll_sec, NOW()].
@@ -247,68 +257,72 @@ def get_recent_clusters(driver_id: str, cur,
         return []
 
     try:
+        # P19 stillness-gating refactor. Identifies contiguous speed=0 runs
+        # (islands) within the offer-anchored lookback window, returns all
+        # qualifying islands oldest-first. min_duration_s defaults to 5s
+        # (lower than detect_cluster's 10s) to give the matcher visibility
+        # into micro-stillness islands for stop-creep-stop disambiguation
+        # at airport curbs and apartment complexes.
+        #
+        # max_speed_mph and max_spread_m parameters retained for backward
+        # compat but no longer affect gating.
         cur.execute("""
-            WITH window_hb AS (
-                SELECT lat, lng, speed_mph, logged_at
+            WITH samples AS (
+                SELECT lat, lng, speed_mph, logged_at,
+                       (speed_mph > 0) AS is_moving
                 FROM app_private.heartbeat_log
                 WHERE driver_id = %s
                   AND logged_at >= %s - make_interval(secs => %s)
                   AND logged_at <= NOW()
-                ORDER BY logged_at DESC
+                ORDER BY logged_at
             ),
-            tagged AS (
+            labeled AS (
                 SELECT *,
-                       SUM(CASE WHEN speed_mph >= %s THEN 1 ELSE 0 END)
-                         OVER (ORDER BY logged_at DESC
+                       SUM(CASE WHEN is_moving THEN 1 ELSE 0 END)
+                         OVER (ORDER BY logged_at
                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-                         AS breaks_before
-                FROM window_hb
+                         AS run_id
+                FROM samples
             ),
-            low_speed AS (
-                SELECT lat, lng, logged_at, breaks_before AS island_id
-                FROM tagged
-                WHERE speed_mph < %s
-            ),
-            per_island AS (
-                SELECT island_id,
+            stillness_runs AS (
+                SELECT run_id,
                        COUNT(*)::int AS n,
                        percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) AS median_lat,
                        percentile_cont(0.5) WITHIN GROUP (ORDER BY lng) AS median_lng,
-                       MIN(logged_at) AS earliest,
-                       MAX(logged_at) AS latest
-                FROM low_speed
-                GROUP BY island_id
+                       MIN(logged_at) AS started_at,
+                       MAX(logged_at) AS latest,
+                       EXTRACT(EPOCH FROM (MAX(logged_at) - MIN(logged_at)))::real
+                         AS duration_s
+                FROM labeled
+                WHERE NOT is_moving
+                GROUP BY run_id
                 HAVING COUNT(*) >= %s
-            ),
-            per_island_spread AS (
-                SELECT pi.island_id, pi.n, pi.median_lat, pi.median_lng,
-                       pi.earliest, pi.latest,
-                       MAX(app_private.distance_miles(ls.lat, ls.lng,
-                                                      pi.median_lat, pi.median_lng) * 1609.34)
-                         AS spread_m
-                FROM per_island pi
-                JOIN low_speed ls ON ls.island_id = pi.island_id
-                GROUP BY pi.island_id, pi.n, pi.median_lat, pi.median_lng,
-                         pi.earliest, pi.latest
+                   AND EXTRACT(EPOCH FROM (MAX(logged_at) - MIN(logged_at))) >= %s
             )
-            SELECT n, median_lat, median_lng, spread_m, earliest, latest
-            FROM per_island_spread
-            WHERE spread_m <= %s
-            ORDER BY latest ASC;
-        """, (driver_id, accepted_at_anchor, preroll_sec,
-              max_speed_mph, max_speed_mph, min_samples, max_spread_m))
-
+            SELECT
+                s.run_id, s.n, s.median_lat, s.median_lng,
+                s.started_at, s.latest, s.duration_s,
+                COALESCE((
+                    SELECT MAX(app_private.distance_miles(
+                        l.lat, l.lng, s.median_lat, s.median_lng) * 1609.34)
+                    FROM labeled l
+                    WHERE l.run_id = s.run_id AND NOT l.is_moving
+                ), 0.0) AS spread_m
+            FROM stillness_runs s
+            ORDER BY s.latest ASC
+        """, (driver_id, accepted_at_anchor, preroll_sec, min_samples, min_duration_s))
         rows = cur.fetchall()
+
         clusters = []
         for row in rows:
-            duration_s = (row["latest"] - row["earliest"]).total_seconds()
             clusters.append(Cluster(
                 n=int(row["n"]),
                 median_lat=float(row["median_lat"]),
                 median_lng=float(row["median_lng"]),
                 spread_m=float(row["spread_m"]),
-                duration_s=duration_s,
+                duration_s=float(row["duration_s"]),
                 latest=row["latest"],
+                started_at=row["started_at"],
             ))
         return clusters
     except Exception as e:
