@@ -804,6 +804,86 @@ def _signal_semantic_anchor(
     return best_score, best_witness
 
 
+def _signal_geofence_membership(
+    cur,
+    cluster_lat: float,
+    cluster_lng: float,
+    target_text: str,
+    fuzzy_floor: float = 0.6,
+) -> tuple[float, "Optional[str]"]:
+    """Head 6 (P18): ground-truth polygon containment from routing.geofence_polygons.
+
+    Ratified Andrew + Gemini revision 3, 2026-05-20. See
+    docs/RFC_P18_GEOFENCE_MEMBERSHIP_HEAD.md.
+
+    Scoring:
+      1.0  — cluster inside polygon AND name/IATA matches target_text
+      0.30 — cluster inside polygon BUT no name/IATA matches
+      0.0  — cluster not inside any polygon
+
+    Iteration: containment results ORDER BY area_m2 ASC LIMIT 5.
+    Phase 2a scans ALL rows for IATA/ICAO word-boundary match (codes
+    are more specific than names — Hobby terminal polygon lacks IATA
+    but the wrapping airport polygon has \'HOU\'; the outer match
+    rightly authorizes the terminal hit).
+    Phase 2b: fuzzy name match across all rows if no IATA hit.
+    Phase 3: containment-without-name returns 0.30 with innermost witness.
+    """
+    import re as _re
+    try:
+        from rapidfuzz import fuzz as _fuzz
+    except ImportError:
+        _fuzz = None
+
+    if not target_text:
+        return 0.0, None
+
+    target_normalized = target_text.lower().strip()
+
+    cur.execute(
+        """
+        SELECT id, name, name_normalized, category, area_m2,
+               tags->>'iata' AS iata, tags->>'icao' AS icao
+        FROM routing.geofence_polygons
+        WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+        ORDER BY area_m2 ASC
+        LIMIT 5
+        """,
+        (cluster_lng, cluster_lat),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return 0.0, None
+
+    for row in rows:
+        for code_field in ("iata", "icao"):
+            code = row.get(code_field) if isinstance(row, dict) else row[code_field]
+            if not code:
+                continue
+            if _re.search(r"\b" + _re.escape(code.lower()) + r"\b", target_normalized):
+                pname = (row.get("name") if isinstance(row, dict) else row["name"]) or (row.get("category") if isinstance(row, dict) else row["category"]) or "unknown"
+                category = row.get("category") if isinstance(row, dict) else row["category"]
+                area = (row.get("area_m2") if isinstance(row, dict) else row["area_m2"]) or 0.0
+                return 1.0, f"geofence:{pname}/{category} [match={code_field}:{code}] (area={area:.0f}m2)"
+
+    if _fuzz is not None:
+        for row in rows:
+            name_norm = row.get("name_normalized") if isinstance(row, dict) else row["name_normalized"]
+            if not name_norm:
+                continue
+            ratio = _fuzz.partial_ratio(name_norm, target_normalized) / 100.0
+            if ratio >= fuzzy_floor:
+                pname = (row.get("name") if isinstance(row, dict) else row["name"]) or (row.get("category") if isinstance(row, dict) else row["category"]) or "unknown"
+                category = row.get("category") if isinstance(row, dict) else row["category"]
+                area = (row.get("area_m2") if isinstance(row, dict) else row["area_m2"]) or 0.0
+                return 1.0, f"geofence:{pname}/{category} [match=fuzzy:{ratio:.2f}] (area={area:.0f}m2)"
+
+    innermost = rows[0]
+    pname = (innermost.get("name") if isinstance(innermost, dict) else innermost["name"]) or (innermost.get("category") if isinstance(innermost, dict) else innermost["category"]) or "unknown"
+    area = (innermost.get("area_m2") if isinstance(innermost, dict) else innermost["area_m2"]) or 0.0
+    return 0.30, f"geofence:contained-no-name-match in {pname} (area={area:.0f}m2)"
+
+
 @dataclass(frozen=True)
 class MatchOutcome:
     """Internal carrier between per-class matchers and evaluate().
@@ -1315,6 +1395,8 @@ def _match_poi_class(
     pois: Optional[list] = None,
     anchors: Optional[list] = None,
     semantic_lookup_source: Optional[str] = None,
+    geofence_score: float = 0.0,
+    geofence_witness: Optional[str] = None,
 ) -> MatchOutcome:
     """Matcher for address_class='poi' (airports, named venues, named
     businesses where the offer text IS the destination identity).
@@ -1378,9 +1460,16 @@ def _match_poi_class(
     # only and is excluded from the confidence ensemble.
     # Composition: max(Head 5, Head 1). Ties broken by source priority
     # Head 5 > Head 1 via argument order in Python's stable max.
+    # P18 — geofence membership (Head 6) ratified Andrew + Gemini revision 3,
+    # 2026-05-20. Geofence ground truth wins when definitive (>=1.0).
+    # Otherwise (h6 in {0.0, 0.30}) fall back to Head 5 (semantic anchor) alone.
+    # Head 1 demoted to witness-only because its fuzzy-match architecture
+    # produces 0.444 for "American Airlines" vs "Braeburn Liquor" — the same
+    # class of false fire P16 closed for Head 4.
     candidates = [
+        (geofence_score if geofence_score >= 1.0 else 0.0, geofence_witness, "head6_geofence"),
         (sem_score, sem_witness, "head5_semantic"),
-        (poi_match_score, poi_witness_str, "head1_fuzzy"),
+        (0.0, poi_witness_str, "head1_fuzzy"),  # demoted; witness recorded, score zeroed
     ]
     confidence, winning_witness, winning_head = max(
         candidates, key=lambda c: c[0]
@@ -2095,10 +2184,20 @@ class WhereAmI:
             matcher_topo = _apply_road_membership_override(
                 self.cur, cluster, topo, target,
             )
+            # P18: compute geofence containment here where self.cur is in scope.
+            # Only _match_poi_class uses it; other matchers ignore via **kwargs.
+            geo_score, geo_witness = _signal_geofence_membership(
+                self.cur,
+                cluster_lat=cluster.median_lat,
+                cluster_lng=cluster.median_lng,
+                target_text=getattr(target, "address", "") or "",
+            )
             outcome = matcher(
                 cluster, matcher_topo, target,
                 pois=cluster_pois, anchors=cluster_anchors,
                 semantic_lookup_source=semantic_source,
+                **({"geofence_score": geo_score, "geofence_witness": geo_witness}
+                    if matcher is _match_poi_class else {}),
             )
             per_target_outcomes.append((offer_id, location_type, outcome))
 
