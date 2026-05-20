@@ -1368,13 +1368,18 @@ def _match_poi_class(
         pois or [], getattr(target, "address", "") or "",
     )
 
-    # Composition: max() per Gemini ratification (defense in depth).
-    # Ties broken by source priority: Head 5 > Head 4 > Head 1.
-    # Pure max-on-tuple would prefer Head 5 at ties due to argument
-    # order in Python's stable max — explicit ordering documented here.
+    # P16: Head 4 demoted to witness (Andrew + Gemini 2026-05-20).
+    # Head 4 was binary (1.0/0.0), proximity-blind within 100m, and
+    # accepted 18 POI types covering most urban categories. Production
+    # data 2026-05-20 showed wai_confidence=1.000 at 15+ wrong locations
+    # and one wrong-location fire (8082 at 05:28:26). Per Bible Rule 2,
+    # witnesses corroborate, scorers score. Head 4 now writes to
+    # MatchOutcome.poi_type_match / poi_type_witness for forensic audit
+    # only and is excluded from the confidence ensemble.
+    # Composition: max(Head 5, Head 1). Ties broken by source priority
+    # Head 5 > Head 1 via argument order in Python's stable max.
     candidates = [
         (sem_score, sem_witness, "head5_semantic"),
-        (h4_score, poi_type_witness_str, "head4_type"),
         (poi_match_score, poi_witness_str, "head1_fuzzy"),
     ]
     confidence, winning_witness, winning_head = max(
