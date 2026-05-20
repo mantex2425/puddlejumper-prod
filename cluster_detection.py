@@ -141,7 +141,7 @@ def detect_cluster(driver_id: str, cur,
         cur.execute("""
             WITH samples AS (
                 SELECT lat, lng, speed_mph, logged_at,
-                       (speed_mph > 0) AS is_moving
+                       (speed_mph >= 0.5) AS is_moving
                 FROM app_private.heartbeat_log
                 WHERE driver_id = %s
                   AND logged_at >= NOW() - make_interval(secs => %s)
@@ -269,7 +269,7 @@ def get_recent_clusters(driver_id: str, cur,
         cur.execute("""
             WITH samples AS (
                 SELECT lat, lng, speed_mph, logged_at,
-                       (speed_mph > 0) AS is_moving
+                       (speed_mph >= 0.5) AS is_moving
                 FROM app_private.heartbeat_log
                 WHERE driver_id = %s
                   AND logged_at >= %s - make_interval(secs => %s)
