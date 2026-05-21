@@ -51,14 +51,15 @@ class TargetSpec:
                          exact match (normalization already happened upstream
                          in arc_band.py street name normalization).
     """
-    lat: float
-    lng: float
+    lat: Optional[float]
+    lng: Optional[float]
     address_class: Literal[
         "single_road",
         "intersection",
         "number_on_street",
         "poi",
         "apartment_complex",
+        "garbage",
     ]
     named_roads: tuple[str, ...]
     # §XVII Patch 3: offer's raw address text, populated from

@@ -1085,9 +1085,13 @@ class TestClassDispatchContract:
 # =============================================================================
 
 class TestClassDispatch:
-    def test_all_five_classes_present(self):
+    def test_all_six_classes_present(self):
+        # §PR-A: "garbage" added 2026-05-21 — routes to _match_poi_class
+        # so OCR-shredded text can be rescued via Head 5 (semantic anchor)
+        # and Head 6 (geofence membership). See test_geocode_signal_admission.py
+        # for the queue-admission contract.
         expected = {"intersection", "single_road", "number_on_street",
-                    "apartment_complex", "poi"}
+                    "apartment_complex", "poi", "garbage"}
         assert set(_CLASS_DISPATCH.keys()) == expected
 
     def test_dispatch_returns_matcher_function(self):

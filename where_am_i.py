@@ -133,6 +133,13 @@ CLASS_TO_TYPE_MAP: dict[str, frozenset] = {
         "shopping_mall", "university", "school", "library",
         "hospital", "church", "place_of_worship", "park",
     }),
+    # §PR-A: "garbage" accepts no specific POI types. The rescue path for
+    # garbage-class offers is Head 5 (semantic anchor) and Head 6 (geofence
+    # membership), both coord-independent on the target side. Head 4
+    # (poi_type_match) is witness-only since P16 and contributes nothing
+    # to confidence; an empty frozenset is the architecturally correct
+    # response — no type witness to record.
+    "garbage": frozenset(),
 }
 
 # Patch 2b (Phase 2c.2, 2026-05-05): _signal_poi_match Option B
@@ -1431,10 +1438,17 @@ def _match_poi_class(
     semantic_anchor_witness / poi_type_witness / poi_witness reflect
     which signal source identified the match, queryable from the
     pudo_decision_context forensic record (Patch 4).
-    """
-    if (skip := _validate_target(target, "poi")) is not None:
-        return skip
 
+    §PR-A: _validate_target removed from this matcher only. The four
+    other matchers retain their entry guards because their _compute_signals
+    path requires coords for proximity math. _match_poi_class does not
+    use _compute_signals — its candidates are built directly from
+    Head 5 (semantic anchor, text-based), Head 6 (geofence, uses driver
+    coords not target coords), Head 4 + Head 1 (witness-only, demoted).
+    All four are coord-independent on the target side; admitting
+    null-coord POI targets lets them rescue OCR-shredded offers that
+    would otherwise be silently dropped.
+    """
     # Head 5: semantic anchor (primary signal for poi class)
     sem_score, sem_witness = _signal_semantic_anchor(anchors or [])
 
@@ -1515,6 +1529,12 @@ _CLASS_DISPATCH = {
     "number_on_street":  _match_number_on_street,
     "apartment_complex": _match_apartment_complex,
     "poi":               _match_poi_class,
+    # §PR-A: "garbage" routes to _match_poi_class so OCR-shredded text
+    # past the classify_address keyword regexes can still be rescued by
+    # Head 5 (semantic anchor) and Head 6 (geofence membership). The poi
+    # matcher's signal stack is coord-independent on the target side,
+    # safe to invoke against null-coord garbage TargetSpecs.
+    "garbage":           _match_poi_class,
 }
 
 

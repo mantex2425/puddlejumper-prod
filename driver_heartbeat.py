@@ -84,10 +84,19 @@ def _bucket_to_target_spec(address_text, lat, lng):
       "street_number"  -> "number_on_street" named_roads=(road,)
       "single_road"    -> "single_road"      named_roads=(road,)
       "poi"            -> "poi"              named_roads=()
-      "garbage" or _   -> None
+      "garbage"        -> "garbage"          named_roads=() — §PR-A:
+                                              admitted with null coords,
+                                              routed to _match_poi_class
+                                              via _CLASS_DISPATCH so geofence
+                                              and semantic anchor can rescue.
+      unrecognized     -> None (defensive; classify_address should never emit)
     """
-    if not address_text or lat is None or lng is None:
+    if not address_text:
         return None
+    # §PR-A: null coords admitted. TargetSpec contract permits per
+    # pudo_types.py:54-55 (Optional[float]). Downstream heads degrade
+    # gracefully: coord-dependent heads contribute 0, coord-independent
+    # heads (Head 5 §XVII, Head 6 P18 geofence) run normally.
     try:
         classification = classify_address(address_text)
     except Exception as e:
@@ -102,33 +111,50 @@ def _bucket_to_target_spec(address_text, lat, lng):
 
     if bucket == "intersection":
         return TargetSpec(
-            lat=float(lat), lng=float(lng),
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
             address_class="intersection",
             named_roads=(parts.get("road_a", ""), parts.get("road_b", "")),
             address=address_text,
         )
     if bucket == "street_number":
         return TargetSpec(
-            lat=float(lat), lng=float(lng),
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
             address_class="number_on_street",
             named_roads=(parts.get("road", ""),),
             address=address_text,
         )
     if bucket == "single_road":
         return TargetSpec(
-            lat=float(lat), lng=float(lng),
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
             address_class="single_road",
             named_roads=(parts.get("road", ""),),
             address=address_text,
         )
     if bucket == "poi":
         return TargetSpec(
-            lat=float(lat), lng=float(lng),
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
             address_class="poi",
             named_roads=(),
             address=address_text,
         )
-    # "garbage" or any unrecognized bucket -> unevaluatable
+    # §PR-A: "garbage" bucket admitted with explicit address_class.
+    # Routes via _CLASS_DISPATCH["garbage"] to _match_poi_class so
+    # geofence (Head 6) and semantic anchor (Head 5) can rescue offers
+    # whose text was OCR-shredded past classify_address keyword regexes.
+    if bucket == "garbage":
+        return TargetSpec(
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
+            address_class="garbage",
+            named_roads=(),
+            address=address_text,
+        )
+    # Defensive: classify_address contract guarantees one of the five
+    # buckets above plus "garbage". Unknown bucket means upstream broke.
     return None
 
 
