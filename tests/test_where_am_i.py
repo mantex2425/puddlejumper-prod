@@ -1024,6 +1024,237 @@ class TestMatchApartmentComplex:
 # (resurrection commit fb56175). Real types only.
 
 
+# =============================================================================
+# TestMatchPOIClassGeocodeSignal — PR-A behavioral tests
+#
+# Verifies _match_poi_class behavior under the "geocode as signal, not gate"
+# architecture (commit 9c3ea17, ratified Andrew + Gemini Rev 4 2026-05-21).
+# Null-coord targets and "garbage" address-class targets must still match
+# when coord-independent signal heads fire: Head 6 geofence membership at
+# score 1.0, Head 5 semantic anchor at score >= MIN_REPORT_THRESHOLD.
+#
+# These tests are the 8094 regression's structural proof. Pre-PR-A,
+# _validate_target inside _match_poi_class would fail-closed any null-coord
+# target. PR-A removed _validate_target from this matcher only, letting
+# Head 5 and Head 6 (both coord-independent on the target side) rescue
+# offers whose geocode failed upstream.
+# =============================================================================
+
+from unittest.mock import patch
+from where_am_i import _match_poi_class
+
+
+class TestMatchPOIClassGeocodeSignal:
+    """PR-A behavioral tests for _match_poi_class with null-coord and garbage targets."""
+
+    def test_null_coords_geofence_hit_fires(self):
+        """Head 6 = 1.0, all other heads silent, null coords -> fires at confidence=1.0.
+
+        Canonical PR-A case: 8094-class airport pickup where the only matching
+        signal is geofence containment with IATA word-boundary match. Pre-PR-A:
+        _validate_target fail-closed. Post-PR-A: geofence rescues at ground truth.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            ms.return_value = (0.0, None)
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            target = TargetSpec(
+                lat=None, lng=None,
+                address_class="poi",
+                named_roads=(),
+                address="Main Terminal, Arrivals (Baggage, Texas",
+            )
+            outcome = _match_poi_class(
+                _cluster(), _topo(), target,
+                geofence_score=1.0,
+                geofence_witness="hou_iata_match",
+            )
+
+            assert outcome.matched is True
+            assert outcome.confidence == 1.0
+            # geofence_witness is not stored on MatchOutcome (line 1511-1520);
+            # absence of semantic_anchor_witness confirms Head 6 took it, not Head 5.
+            assert outcome.semantic_anchor_witness is None
+            # PR-A: address text preserved through the null-coord pipeline
+            assert outcome.target_address == "Main Terminal, Arrivals (Baggage, Texas"
+
+    def test_null_coords_anchor_hit_fires(self):
+        """Head 5 = 0.82, geofence silent, null coords -> fires at confidence=0.82.
+
+        IAH United dropoff class: text resolves to semantic anchor via §XVII
+        even though pickup_lat is null. Driver en route, hasn't entered the
+        polygon yet. Head 5 takes the match.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            ms.return_value = (0.82, "semantic_anchor:united_terminal/airport (45m)")
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            target = TargetSpec(
+                lat=None, lng=None,
+                address_class="poi",
+                named_roads=(),
+                address="United, Houston, Texas",
+            )
+            outcome = _match_poi_class(
+                _cluster(), _topo(), target,
+                geofence_score=0.0,
+                geofence_witness=None,
+            )
+
+            assert outcome.matched is True
+            assert outcome.confidence == 0.82
+            assert outcome.semantic_anchor_witness == "semantic_anchor:united_terminal/airport (45m)"
+            assert outcome.semantic_anchor_score == 0.82
+
+    def test_null_coords_both_hit_geofence_wins_tie(self):
+        """Both heads at 1.0 -> Head 6 wins via list-order tie-break (line 1483-1490).
+
+        Tie-break is observable only via INFO log; MatchOutcome stores both
+        witnesses. Test confirms the outcome's confidence and that both
+        heads' contributions made it through.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            ms.return_value = (1.0, "semantic_anchor:hobby_arrivals/airport (12m)")
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            target = TargetSpec(
+                lat=None, lng=None,
+                address_class="poi",
+                named_roads=(),
+                address="William P. Hobby Airport",
+            )
+            outcome = _match_poi_class(
+                _cluster(), _topo(), target,
+                geofence_score=1.0,
+                geofence_witness="hou_iata_match",
+            )
+
+            assert outcome.matched is True
+            assert outcome.confidence == 1.0
+            # Both heads scored; both witnesses survive _build_outcome.
+            # The winning_head label ("head6_geofence") is visible only in
+            # the INFO log; tie-break is documented at where_am_i.py:1475.
+            assert outcome.semantic_anchor_witness == "semantic_anchor:hobby_arrivals/airport (12m)"
+
+    def test_null_coords_no_heads_score_skips_honestly(self):
+        """All heads silent + null coords -> matched=False, confidence=0.0.
+
+        §0.D.4: skip beats pollute. When no head can identify the venue,
+        the system honestly reports no match. No false fire risk.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            ms.return_value = (0.0, None)
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            target = TargetSpec(
+                lat=None, lng=None,
+                address_class="poi",
+                named_roads=(),
+                address="Unknown POI",
+            )
+            outcome = _match_poi_class(
+                _cluster(), _topo(), target,
+                geofence_score=0.0,
+                geofence_witness=None,
+            )
+
+            assert outcome.matched is False
+            assert outcome.confidence == 0.0
+
+    def test_garbage_class_geofence_hit_fires(self):
+        """Garbage-class target + geofence hit -> fires.
+
+        OCR-shredded text past classify_address keywords lands in the
+        "garbage" bucket per PR-A's driver_heartbeat.py change.
+        _CLASS_DISPATCH routes "garbage" to _match_poi_class. Driver
+        arrests inside a known polygon. Head 6 fires at 1.0.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            ms.return_value = (0.0, None)
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            target = TargetSpec(
+                lat=None, lng=None,
+                address_class="garbage",
+                named_roads=(),
+                address="x9$z totally shredded",
+            )
+            outcome = _match_poi_class(
+                _cluster(), _topo(), target,
+                geofence_score=1.0,
+                geofence_witness="hou_iata_match",
+            )
+
+            assert outcome.matched is True
+            assert outcome.confidence == 1.0
+
+    def test_regression_8094_main_terminal_at_hobby_fires(self):
+        """8094 regression backfill: 2026-05-20 production failure now passes.
+
+        Original failure: offer 8094 created with pickup_address
+        "Main Terminal, Arrivals (Baggage, Texas" — OCR truncation of the
+        real Uber-rendered "Main Terminal, Arrivals (Baggage Claim level)
+        Zone 5". HALLUCINATION_GUARD correctly nulled pickup_lat/lng
+        (Google returned state-centroid 317mi away). _bucket_to_target_spec
+        returned None at line 89-90. Offer dropped from queue. Matcher blind.
+
+        Post-PR-A: offer survives queue (driver_heartbeat.py:89 strip),
+        reaches _match_poi_class via "poi" routing (Terminal is a POI token),
+        Head 6 fires at 1.0 via HOU IATA word-boundary match when driver
+        arrests inside Hobby polygon at (29.6479, -95.2773).
+
+        End-to-end production validation: tomorrow's drive.
+        """
+        with patch("where_am_i._signal_semantic_anchor") as ms, \
+             patch("where_am_i._signal_poi_match") as m1, \
+             patch("where_am_i._signal_poi_type_match") as m4:
+            # Realistic head returns for the 8094 input shape.
+            ms.return_value = (0.78, "semantic_anchor:hobby_terminal/airport (28m)")
+            m1.return_value = (0.0, None)
+            m4.return_value = (False, None)
+
+            # Reproduce 8094's offer_history row state at the moment
+            # _bucket_to_target_spec would have run post-PR-A.
+            target = TargetSpec(
+                lat=None,
+                lng=None,
+                address_class="poi",
+                named_roads=(),
+                address="Main Terminal, Arrivals (Baggage, Texas",
+            )
+            # Cluster at Hobby airport curb (8094's real arrest location).
+            hobby_cluster = _cluster(
+                median_lat=29.6479,
+                median_lng=-95.2773,
+            )
+
+            outcome = _match_poi_class(
+                hobby_cluster, _topo(), target,
+                geofence_score=1.0,
+                geofence_witness="hou_iata_match",
+            )
+
+            assert outcome.matched is True
+            assert outcome.confidence == 1.0
+            # Address text survived the null-coord queue admission unchanged.
+            assert outcome.target_address == "Main Terminal, Arrivals (Baggage, Texas"
+
+
 class TestClassDispatchContract:
     """L-6 corollary regression: dispatch-call signature contract.
 
