@@ -1083,7 +1083,8 @@ def _log_decision_context(
             %s,
             %s, %s,
             %s, %s, %s,
-            %s, %s
+            %s, %s,
+            %s
         )
         """,
         (
