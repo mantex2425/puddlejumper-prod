@@ -967,18 +967,20 @@ The matcher uses the existing trustworthy signals — TAD odometer position, WAI
 
 The mistake this rule prevents: requiring TAD or WAI to "pass" before the state machine begins watching for stops. Brief or imprecise stops at moments when TAD/WAI haven't yet converged are then invisible. By detecting the stop first and consulting TAD/WAI as filters after, the detection layer remains responsive to physics while the matching layer remains protective against false positives.
 
-### C. Both TAD and WAI gates are required for offer matching.
+### C. WAI confidence ≥ 0.40 is the canonical match signal. TAD is input to WAI, not a separate gate.
 
-A detected stop only fires a PUDO for offer X if:
+**Amended 2026-05-22** (ratified via Andrew + Claude + Gemini paired-programming protocol). Previous text required both TAD and WAI gates to pass for offer matching. That doctrine treated TAD as a separate gate when in practice TAD's verdict is already passed into WAI's evaluation via `per_offer_state` and contributes to WAI's confidence score. The dual-gate framing double-counted TAD, and produced a real false-negative class: an offer driven out-of-order from what TAD predicted (the stacked-offer case) had its WAI confidence cleared but its TAD gate blocked, causing the observation to be missed.
 
-- **TAD verdict for offer X**: `distance_gate.passed = True` — the driver's odometer position is consistent with arriving at offer X's destination leg (within the 85%-115% window for trips ≥2 miles, ±0.5 mi for shorter trips).
-- **WAI confidence for offer X**: outcome confidence ≥ 0.40 — the geometric and POI signals plausibly match offer X.
+A detected arrest fires a PUDO for offer X if:
 
-If only one gate passes, the stop is logged but no fire occurs. The system prefers a missed PUDO (recoverable) to a wrong-narrative PUDO (corrupts forensic record).
+- **WAI confidence for offer X**: outcome confidence ≥ 0.40 — the matcher's composite spatial verdict, with TAD verdict as one input among many.
+- **Arrest counter**: ≥ 5.0 seconds of contiguous zero velocity (§XVI.F Phase 2; see also `ARREST_DURATION_THRESHOLD_S` in `driver_heartbeat.py`).
 
-The mistake this rule prevents: trusting one signal alone. TAD alone fires on coffee-shop stops in destination neighborhoods. WAI alone fires on geometric coincidences before the driver has actually traveled the leg distance. Both together provide the triple-lock: physics + odometer + geometry.
+Both gates together provide the two-key lock: spatial (WAI) + temporal (arrest counter). TAD's verdict is consulted by WAI internally and is preserved in `tad_decision_context` JSONB for forensic analysis, but it does not gate candidate inclusion at the matcher boundary.
 
-**§XVIII override.** When the driver is in lost-mode per §XVIII, the TAD gate is bypassed; only the WAI floor applies. See §XVIII.C for the full behavioral specification.
+**The mistake this rule prevents:** trusting TAD as a load-bearing gate. TAD encodes a hypothesis about which destination the driver is heading to, derived from offer geometry and odometer position. WAI's spatial signals (Heads 1-5 including the §XVII semantic anchor) are ground-truth observations of where the car actually is. When the two disagree, ground truth wins. The previous gate-era doctrine treated TAD's hypothesis as load-bearing; the amended doctrine treats it as advisory.
+
+**§XVIII relationship.** Lost-mode no longer "bypasses" TAD — there is no gate to bypass. Lost-mode's behavior simplifies: WAI runs against all live ACCEPTed offers in the queue, the matcher commits when WAI ≥ 0.40 and arrest fires. The historical "TAD bypass" framing in §XVIII.C is preserved as documentation of the prior doctrine; the §XVIII.C.1 section now notes the subsumption.
 
 ### D. Distance-to-geocode is never a gate.
 
@@ -1010,7 +1012,7 @@ Rule XVI is implemented as a five-phase ladder. Each phase has a defined heartbe
 
 This is the cheapest check the system runs. It gates entry to all higher-cost phases. If no offer in the queue is plausibly close to a destination, the system does nothing further this heartbeat.
 
-**§XVIII override.** When the driver is in lost-mode, Phase 1's TAD pre-filter is bypassed and the heartbeat unconditionally proceeds to Phase 2. See §XVIII.C.1.
+**§XVIII relationship (post-§XVI.C amendment, 2026-05-22).** Phase 1's TAD pre-filter no longer gates Phase 2 advancement — TAD is input to WAI, not a separate gate. The "lost-mode bypass" framing in §XVIII.C.1 is historical; in the amended doctrine, all heartbeats with live offers advance to candidate evaluation regardless of TAD verdict or lost-mode state.
 
 #### Phase 2 — The Engagement
 
@@ -1025,14 +1027,14 @@ Phase 2 is the watching window. The driver is in the destination zone; the syste
 #### Phase 2b — The Arrest
 
 - **State:** Preliminary commitment.
-- **Trigger:** 6s of contiguous zero velocity reached in Phase 2.
+- **Trigger:** 5s of contiguous zero velocity reached in Phase 2 (threshold lowered 6.0→5.0 per §XVI.C amendment, 2026-05-22; paired with 1Hz Horny cadence delivering 5 confirming samples).
 - **Check:** WAI confidence on the best-matching offer.
-- **Gate:** Is WAI confidence > 0.40 for any offer that also has TAD passed?
+- **Gate:** Is WAI confidence ≥ 0.40 for any offer? (TAD verdict is internal to WAI's confidence calculation, not a separate gate — see §XVI.C amended 2026-05-22.)
 - **Transition:** If yes → mark PUDO event as "happened" (commit intent), proceed to Phase 3. If no → return to Phase 2 (this is a stoplight, traffic, etc., not a transaction).
 
 Phase 2b is where the PUDO is *marked* — the system commits that an event happened — but the coordinates are not yet finalized. Coordinates remain refinable through Phase 4.
 
-**§XVIII override.** When the driver is in lost-mode, Phase 2b's candidate set expands to every ACCEPTed live-queue offer regardless of TAD verdict. See §XVIII.C.2.
+**§XVIII relationship (post-§XVI.C amendment).** Lost-mode's candidate set is the same as cold-mode's: every offer in the live queue. The previous "expands to every ACCEPTed live-queue offer regardless of TAD verdict" framing is now redundant — all candidates are considered regardless of TAD verdict in both modes. Lost-mode's distinct behavior is now limited to (a) demoting narrative fires to observation fires per §XVIII.C.4, and (b) firing on offers without an existing narrative anchor.
 
 #### Phase 3 — The Flashbulb
 
@@ -1091,7 +1093,7 @@ When a PUDO fires via the Forensic Ladder, the `pudo_decision_context` row recor
 - `arrest_started_at`: when the 0.0 mph counter began
 - `arrest_duration_s`: total contiguous zero-velocity time at fire
 - `matched_offer_id`: which offer the matcher selected
-- `match_signal`: which gate combination produced the match (`tad_and_wai`, `tad_and_wai_ambiguous`, `dispatch_resolved`, or one of the §XVIII lost-mode signals per §XVIII.D.1)
+- `match_signal`: which path produced the match (`wai_above_floor` for single-match commit, `dispatch_resolved` for §5.3 ambiguity resolution, or one of the §XVIII lost-mode signals per §XVIII.D.1). The legacy values `tad_and_wai` and `tad_and_wai_ambiguous` are deprecated per §XVI.C amendment (2026-05-22) — pre-amendment rows retain the historical labels and remain forensically valid.
 - `matcher_candidates`: full list of offers that passed both gates, for ambiguity forensics
 - `phase_reached`: which Forensic Ladder phase the heartbeat reached (1, 2, 3, 4, 5)
 - `poi_source`: where Phase 3's POI data came from (`local_cache`, `google_live`)
@@ -1105,7 +1107,7 @@ When a stop is detected but no offer matches, the row records:
 - `match_signal`: `no_match`
 - `matcher_candidates`: empty array
 - `unmatched_reason`: which precondition or gate failed. Values:
-    - `tad_failed`: TAD distance gate rejected the closest candidate
+    - `tad_failed`: **DEPRECATED 2026-05-22** per §XVI.C amendment — TAD is no longer a separate gate, so it can no longer "fail" as one. Pre-amendment rows retain this label and remain forensically valid. New rows that would have emitted this label now emit `wai_below_floor` (the collapsed reason: no offer's WAI confidence cleared the canonical 0.40 floor).
     - `wai_below_floor`: TAD passed but WAI confidence < 0.40 floor
     - `both_failed`: TAD and WAI both rejected (legacy, retained for back-compat)
     - `queue_actually_empty`: `snap.offers` was empty — no live offers in queue (Bug B'-1 surface; time-horizon scrubbing)
@@ -1553,7 +1555,13 @@ regardless of the driver's intent. The narrative does not engage
 When the driver is in lost-mode, the following apply at every
 heartbeat where §XVI Phase 2b is consulted:
 
-#### C.1 TAD bypass
+#### C.1 TAD bypass (subsumed by §XVI.C amendment 2026-05-22)
+
+**Status: historical.** The §XVI.C amendment (2026-05-22) removed TAD as a separate gate. There is no longer a TAD gate to bypass in lost-mode — all heartbeats with live offers evaluate WAI regardless of TAD verdict or lost-mode state. The text below is preserved as documentation of the prior doctrine and explains the rationale that drove the §XVI.C amendment.
+
+**Historical text follows:**
+
+#### C.1 TAD bypass [historical]
 
 The TAD distance gate is **not consulted** for any queued offer's
 evaluation. TAD anchors during lost-mode are mathematically poisoned
@@ -1568,7 +1576,25 @@ has a plausible TAD position; in lost-mode, no offer has a plausible
 TAD position by definition, but that fact does not justify exiting
 Phase 1. The driver may be at any queued offer's destination.
 
-#### C.2 Expanded Phase 2b candidate set
+#### C.2 Expanded Phase 2b candidate set (subsumed by §XVI.C amendment 2026-05-22)
+
+**Status: historical.** The §XVI.C amendment (2026-05-22) removed TAD
+as a separate gate. Phase 2b now consults every offer in the
+`LIVE_OFFER_PREDICATE_SQL`-filtered queue regardless of lost-mode
+state — the "expansion" this section describes is no longer
+lost-mode-specific; it is the canonical Phase 2b behavior in all
+modes. The text below is preserved as documentation of the prior
+doctrine.
+
+**Post-amendment behavior:** Phase 2b consults every offer in the
+live queue with `actual_pickup_at IS NULL`. WAI confidence is
+computed against each. The 0.40 floor (§XIV.C) is the canonical
+match signal; TAD verdict is one input to WAI's confidence
+calculation, not a separate gate. The candidate set is NOT filtered
+by `app_verdict` (per §0.B and §XV) — physical arrest at an offer's
+geocode reveals driver intent after the fact.
+
+**Historical text follows:**
 
 §XVI Phase 2b normally consults TAD-passing offers. In lost-mode,
 Phase 2b consults **every offer** in the `LIVE_OFFER_PREDICATE_SQL`

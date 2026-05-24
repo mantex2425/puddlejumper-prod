@@ -5,7 +5,11 @@ failure that motivated it: offer 7932 (Palm Desert → Irish Hill) was
 accepted at 15:31:53Z on 2026-05-17, and at 15:57:25Z the driver arrested
 ~90m from the pickup curb for 17.3s. The pickup observation never fired
 because the §XVI Phase 2b candidate-builder was gating inclusion on
-`tad_verdict.distance_gate.passed is True` — and in driver-state lost-mode
+`tad_verdict.distance_gate.passed is True` (DEPRECATED 2026-05-22 per
+§XVI.C amendment: TAD is input to WAI, not a gate; this precondition
+no longer applies. This test needs full repurposing as a regression
+guard for "WAI fires when TAD verdict fails" — see Apply Script 1
+docstring) — and in driver-state lost-mode
 that field is `null` (correct §XVIII.C.1 abstention).
 
 The fix (commit landing today) makes Phase 2b candidate inclusion

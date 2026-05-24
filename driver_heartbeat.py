@@ -53,11 +53,20 @@ from driver_queue import DriverQueue
 from bead_on_wire import classify_address
 
 
-# ── Rule XVI B-3 — Active Interrogation matcher constants ──
-# Arrest threshold: contiguous zero-velocity seconds required
-# to enter Phase 2b of the Forensic Ladder (§XVI.F).
-# WAI floor is imported from pudo_types per §XIV.C.
-ARREST_DURATION_THRESHOLD_S = 6.0
+# ── §XVI.C TAD-as-Input matcher constants (ratified 2026-05-22) ──
+# Arrest threshold: contiguous zero-velocity seconds required for
+# PUDO commit. At 5s cold cadence: 1 confirming sample. At 1Hz Horny
+# cadence: 5 confirming samples. Per §XVI.C amended doctrine, this
+# composes with WAI ≥ WAI_CONFIDENCE_THRESHOLD as the canonical
+# two-key commit gate. TAD is no longer a separate gate.
+ARREST_DURATION_THRESHOLD_S = 5.0
+
+# Horny mode speed threshold: cadence target jumps to 1Hz when WAI
+# confidence ≥ floor AND speed drops below this value. Two existing
+# signals composed into a per-heartbeat cadence hint. No mode flag,
+# no state machine — cadence is recomputed every heartbeat from
+# current signals.
+HORNY_SPEED_THRESHOLD_MPH = 5.0
 
 driver_heartbeat_bp = Blueprint('driver_heartbeat', __name__)
 
@@ -1367,7 +1376,6 @@ def post_heartbeat():
     if (arrest_counter_s_post is not None
             and arrest_counter_s_post >= ARREST_DURATION_THRESHOLD_S):
         candidates = []  # list[(offer_id, leg, confidence)]
-        tad_passed_any = False
 
         # P15-final consolidated candidate loop (2026-05-19): the matcher's
         # source of truth is diagnostics.per_target_outcomes (WAI's spatial-
@@ -1380,62 +1388,33 @@ def post_heartbeat():
         #       matcher-blindness bug where empty tad_verdicts produced
         #       empty matcher_candidates despite live offers in the queue.
         #
-        #   (2) tad_passed_any flips BEFORE the WAI confidence skip, so
-        #       the downstream unmatched_reason classifier can distinguish
-        #       'wai_below_floor' (TAD passed, spatial weak) from
-        #       'tad_failed' (TAD rejected).
+        #   (2) §XVI.C (amended 2026-05-22): TAD verdict no longer
+        #       gates candidates. The candidate loop adds any offer
+        #       whose WAI confidence clears the floor; TAD's verdict
+        #       is preserved only in tad_decision_context for
+        #       forensic analysis.
         #
-        #   (3) Leg alignment: per_target_outcomes has TWO entries per
-        #       offer (pickup + dropoff). tad_verdicts has ONE entry per
-        #       offer (the active leg for that offer's lifecycle state).
-        #       Pair them ONLY when verdict.leg_evaluated == loop's leg.
-        #       Otherwise the inactive leg would inherit the active leg's
-        #       TAD authorization (cross-leg leak).
         for offer_id, leg, outcome in diagnostics.per_target_outcomes:
             if leg not in ('pickup', 'dropoff'):
                 continue
 
-            # Isolate the offer's active-leg verdict. verdict_for_offer is
-            # the raw lookup (used to detect "TAD active on other leg"
-            # below). verdict is the leg-aligned form (used for the gate
-            # state variables).
-            verdict_for_offer = (
-                diagnostics.tad_verdicts.get(offer_id)
-                if diagnostics.tad_verdicts else None
-            )
-            verdict = (
-                verdict_for_offer
-                if (verdict_for_offer is not None
-                    and verdict_for_offer.leg_evaluated == leg)
-                else None
-            )
-
-            # tad_passed_any reflects TAD's view of THIS leg, independent
-            # of WAI confidence (drives the unmatched_reason classifier
-            # downstream — 'wai_below_floor' vs 'tad_failed').
-            if verdict is not None and verdict.distance_gate.get('passed') is True:
-                tad_passed_any = True
-
-            # WAI confidence floor: cheap spatial cutoff before the
-            # TAD authorization decision.
+            # WAI confidence floor: the canonical match signal per
+            # §XVI.C (amended 2026-05-22). TAD verdict is consulted
+            # only for forensic recording in tad_decision_context;
+            # it does not gate candidates here.
             if outcome is None or outcome.confidence < WAI_CONFIDENCE_THRESHOLD:
                 continue
 
-            # Normal-mode gates (lost-mode bypasses both per §XVIII.C.2):
+            # §XVI.C (amended 2026-05-22): TAD is input to WAI's
+            # confidence calculation, not a separate gate. An offer
+            # with WAI ≥ WAI_CONFIDENCE_THRESHOLD is a candidate
+            # regardless of TAD verdict. The §XVIII lost-mode bypass
+            # framing is subsumed — there is no gate to bypass.
             #
-            #   (a) TAD active on the OTHER leg → this leg unauthorized.
-            #       Driver is in the lifecycle state where TAD picked the
-            #       other direction; firing on this leg would be premature.
-            #
-            #   (b) TAD active on THIS leg AND rejected → skip.
-            #       TAD's distance-gate said no; honor it.
-            #
-            # Bridge state (verdict_for_offer is None — TAD didn't run)
-            # falls through both gates: permissive abstention.
-            if not lost_mode and verdict_for_offer is not None and verdict is None:
-                continue
-            if not lost_mode and verdict is not None and verdict.distance_gate.get('passed') is not True:
-                continue
+            # The TAD verdict remains forensically valuable; it is
+            # preserved in tad_decision_context JSONB per §V Flight
+            # Recorder. Future analysis of "WAI fired but TAD said
+            # no" cases informs WAI's calibration of TAD as a signal.
 
             candidates.append((offer_id, leg, outcome.confidence))
 
@@ -1456,10 +1435,16 @@ def post_heartbeat():
                 action_cls = FireDropoffObservation if lost_mode else FireDropoff
             matcher_actions = [action_cls(offer_id=offer_id)]
             matched_offer_id = offer_id
-            # §XVIII.D.1: lost-mode fires get canonical lost_mode_observation
-            # label; cold-mode fires retain tad_and_wai.
-            match_signal = 'lost_mode_observation' if lost_mode else 'tad_and_wai'
-            phase_reached = 5
+            # §XVI.C / §XVIII.D.1: lost-mode fires get canonical
+            # lost_mode_observation label; non-lost fires use
+            # wai_above_floor (post-2026-05-22 taxonomy; 'tad_and_wai'
+            # deprecated when TAD became input, not gate).
+            match_signal = 'lost_mode_observation' if lost_mode else 'wai_above_floor'
+            # phase_reached: write-frozen per Decision 1 of §XVI.C
+            # amendment (2026-05-22). Field deprecated; derive
+            # equivalents from matched_offer_id, unmatched_reason,
+            # cluster_lat populations.
+            phase_reached = None
         elif len(candidates) >= 2:
             # §5.3 ambiguity — hand to dispatch (Option α).
             synth = [WAIMatch(offer_id=oid, location_type=lg, confidence=cf)
@@ -1519,16 +1504,17 @@ def post_heartbeat():
                     )
             elif lost_mode:
                 # §XVIII.D.2: lost-mode misses get canonical
-                # lost_mode_no_candidate; matcher consulted WAI on every
-                # queued offer, so phase_reached = 3.
+                # lost_mode_no_candidate label.
                 unmatched_reason = 'lost_mode_no_candidate'
-                phase_reached = 3
-            elif tad_passed_any:
-                unmatched_reason = 'wai_below_floor'
-                phase_reached = 3
             else:
-                unmatched_reason = 'tad_failed'
-                # phase_reached retains perimeter-scan value (1 or 2)
+                # §XVI.C (amended 2026-05-22): with TAD as input not
+                # gate, the only non-lost miss reason at this point is
+                # that no offer's WAI confidence cleared the floor.
+                # 'tad_failed' is deprecated (collapsed into
+                # 'wai_below_floor').
+                unmatched_reason = 'wai_below_floor'
+            # phase_reached write-frozen per §XVI.C amendment (2026-05-22)
+            phase_reached = None
 
     # ── DECIDE ───────────────────────────────────────────────────────
     # Phase 2b (§XVI Forensic Ladder + §XVIII Driver-State Lost Mode) is
@@ -1583,7 +1569,27 @@ def post_heartbeat():
 
     conn.commit()
 
-    response = {"ok": True}
+    # ── CADENCE HINT (§XVI.C Horny Mode, ratified 2026-05-22) ────────
+    # Compute cadence_target_hz from two existing signals: WAI's max
+    # confidence across candidates AND current speed. When WAI says
+    # we're at a match AND we're slowing down, sample faster so the
+    # arrest counter can detect a short stop. Stateless per-heartbeat
+    # decision — no mode flag, no state machine, no exit conditions.
+    #
+    # Client honors the hint subject to its own battery cap (3 min
+    # continuous Horny) and 30s hard timeout per Horny window.
+    _max_wai_confidence = max(
+        (m.confidence for m in matches),
+        default=0.0,
+    )
+    _horny = (
+        _max_wai_confidence >= WAI_CONFIDENCE_THRESHOLD
+        and speed_mph is not None
+        and speed_mph < HORNY_SPEED_THRESHOLD_MPH
+    )
+    cadence_target_hz = 1.0 if _horny else 0.2
+
+    response = {"ok": True, "cadence_target_hz": cadence_target_hz}
     voice = _voice_for_actions(executed_actions)
     if voice is not None:
         response["voice"] = voice
