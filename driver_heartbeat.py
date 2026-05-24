@@ -949,6 +949,7 @@ def _log_decision_context(
     match_signal=None,                  # [Rule XVI B-3]
     matcher_candidates=None,            # [Rule XVI B-3]
     unmatched_reason=None,              # [Rule XVI B-3]
+    cadence_target_hz=None,             # §XVI.C cadence hint (2026-05-24)
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -1063,7 +1064,8 @@ def _log_decision_context(
             tad_decision_context,
             arrest_started_at, arrest_duration_s,
             phase_reached, matched_offer_id, match_signal,
-            matcher_candidates, unmatched_reason
+            matcher_candidates, unmatched_reason,
+            cadence_target_hz
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
@@ -1129,6 +1131,7 @@ def _log_decision_context(
             match_signal,
             matcher_candidates,
             unmatched_reason,
+            cadence_target_hz,
         ),
     )
 
@@ -1545,6 +1548,23 @@ def post_heartbeat():
 
     # ── LOG ──────────────────────────────────────────────────────────
     try:
+        # Compute cadence_target_hz BEFORE logging so the forensic row
+        # captures the hint that was actually emitted to the client. §XVI.C
+        # amendment (2026-05-22); persistence added 2026-05-24.
+        #
+        # Horny trigger: WAI ≥ 0.40 AND speed_mph < 5.0. Stateless per
+        # heartbeat — no mode flag, no state machine, no exit conditions.
+        _max_wai_confidence = max(
+            (m.confidence for m in matches),
+            default=0.0,
+        )
+        _horny = (
+            _max_wai_confidence >= WAI_CONFIDENCE_THRESHOLD
+            and speed_mph is not None
+            and speed_mph < HORNY_SPEED_THRESHOLD_MPH
+        )
+        cadence_target_hz = 1.0 if _horny else 0.2
+
         _log_decision_context(
             cur, driver_id, body,
             current_lat, current_lng, speed_mph, gps_accuracy_m,
@@ -1561,6 +1581,7 @@ def post_heartbeat():
             match_signal=match_signal,                        # [Rule XVI B-3]
             matcher_candidates=matcher_candidates,            # [Rule XVI B-3]
             unmatched_reason=unmatched_reason,                # [Rule XVI B-3]
+            cadence_target_hz=cadence_target_hz,              # §XVI.C forensic (2026-05-24)
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is
@@ -1569,26 +1590,10 @@ def post_heartbeat():
 
     conn.commit()
 
-    # ── CADENCE HINT (§XVI.C Horny Mode, ratified 2026-05-22) ────────
-    # Compute cadence_target_hz from two existing signals: WAI's max
-    # confidence across candidates AND current speed. When WAI says
-    # we're at a match AND we're slowing down, sample faster so the
-    # arrest counter can detect a short stop. Stateless per-heartbeat
-    # decision — no mode flag, no state machine, no exit conditions.
-    #
-    # Client honors the hint subject to its own battery cap (3 min
-    # continuous Horny) and 30s hard timeout per Horny window.
-    _max_wai_confidence = max(
-        (m.confidence for m in matches),
-        default=0.0,
-    )
-    _horny = (
-        _max_wai_confidence >= WAI_CONFIDENCE_THRESHOLD
-        and speed_mph is not None
-        and speed_mph < HORNY_SPEED_THRESHOLD_MPH
-    )
-    cadence_target_hz = 1.0 if _horny else 0.2
-
+    # ── RESPONSE ─────────────────────────────────────────────────────
+    # cadence_target_hz was computed earlier (before _log_decision_context)
+    # for forensic persistence per §XVI.C cadence column (2026-05-24).
+    # The variable is still in scope here.
     response = {"ok": True, "cadence_target_hz": cadence_target_hz}
     voice = _voice_for_actions(executed_actions)
     if voice is not None:
