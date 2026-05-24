@@ -944,7 +944,7 @@ def _log_decision_context(
     queue_metadata=None,                # [Phase 4]
     arrest_started_at_post=None,        # [Rule XVI B-2]
     arrest_counter_s_post=None,         # [Rule XVI B-2]
-    phase_reached=1,                    # [Rule XVI B-3]
+    phase_reached=None,                 # write-frozen per §XVI.C amendment
     matched_offer_id=None,              # [Rule XVI B-3]
     match_signal=None,                  # [Rule XVI B-3]
     matcher_candidates=None,            # [Rule XVI B-3]
@@ -1358,7 +1358,7 @@ def post_heartbeat():
     # Forensic Ladder. matcher_actions is None when the matcher
     # abstains (arrest < threshold OR all candidates rejected) — in
     # those cases the lazy dispatch path retains agency below.
-    phase_reached = 1
+    phase_reached = None  # write-frozen per §XVI.C amendment (2026-05-22)
     matched_offer_id = None
     match_signal = None
     matcher_candidates = []
@@ -1371,7 +1371,7 @@ def post_heartbeat():
     if (lost_mode
             or any(v.distance_gate.get('passed') is True
                    for v in diagnostics.tad_verdicts.values())):
-        phase_reached = 2
+        phase_reached = None  # write-frozen per §XVI.C amendment (Phase economy collapsed)
 
     if (arrest_counter_s_post is not None
             and arrest_counter_s_post >= ARREST_DURATION_THRESHOLD_S):
@@ -1453,7 +1453,7 @@ def post_heartbeat():
             # §XVIII.D.1: lost-mode ambiguous fires get canonical
             # lost_mode_ambiguous_observation; cold-mode retains dispatch_resolved.
             match_signal = 'lost_mode_ambiguous_observation' if lost_mode else 'dispatch_resolved'
-            phase_reached = 5
+            phase_reached = None  # write-frozen per §XVI.C amendment (success path)
             # Pull narrative winner from dispatch's action list (None for
             # §5.3-mirror ClearNarrative case where no fire occurs).
             for a in matcher_actions:
