@@ -1082,7 +1082,15 @@ After a PUDO fires for a specific offer's specific leg (`FirePickup` for offer X
 - The car has moved at least 500 feet from the fire location, **OR**
 - The car has maintained `speed_mph > 5` for 10 contiguous seconds.
 
-**Primary defense remains the SQL idempotency guards** (`WHERE actual_pickup_at IS NULL`). The Transaction Lock is belt-and-suspenders, preventing wasted compute and ensuring that long stops with brief speed flickers don't produce machine-gun firing.
+**The Transaction Lock is the primary defense against same-leg refire.** SQL idempotency guards (`WHERE actual_pickup_at IS NULL`) operate at the storage boundary and prevent duplicate column writes, but the underlying matcher continues to evaluate and emit lock-eligible actions on every heartbeat — producing redundant `pudo_decision_context` rows and consuming heartbeat cycles even when the writes are no-ops. The Transaction Lock prevents the match-and-emit cycle from running at all when a recent fire's release conditions haven't been met. The SQL idempotency guards remain in place as belt-and-suspenders below the Lock.
+
+**Status:** implemented 2026-05-26 as Sprint A. Artifacts:
+- `migrations/2026-05-26_sprintA_driver_trip_locks.sql` — lock state table
+- `migrations/2026-05-26_sprintA_speed_streak_columns.sql` — temporal release substrate on `driver_trip_state`
+- `decisions/transaction_lock.py` — application API (acquire_lock, is_locked, release_lock, LockContext)
+- `tests/test_transaction_lock.py` — 13-test verification matrix
+- `driver_heartbeat.py` matcher integration (12 surgical edits, commit 3a49d70)
+- Forensic context: `docs/sprint_notes/xvi_c_validation_amendment_brief_2026-05-26.md`
 
 Other offers' legs are not locked. A pickup fire for offer X does not block a pickup fire for offer Y at a different location, nor a dropoff fire for offer X later in the leg.
 
@@ -1114,6 +1122,7 @@ When a stop is detected but no offer matches, the row records:
     - `cluster_unavailable`: `diagnostics.cluster is None` — cluster detector returned no cluster despite arrest
     - `odometer_unavailable`: `cumulative_miles is None` — heartbeat body lacked odometer (structurally impossible from current Android client; firing this label is itself an alert)
     - `tad_skipped_unknown`: queue non-empty, cluster present, odometer present, TAD still didn't run — **Bug B'-2 recurrence sentinel**. When this label fires, a Cloud Run WARNING tagged `[Bug B'-2]` is also emitted carrying driver_id, snap.offers length, and cumulative_miles for investigation.
+    - `lock_suppressed`: one or more candidates cleared the WAI floor but were caught by the §XVI.G Transaction Lock from a recent fire on the same `(offer_id, pudo_type)`. The forensic payload (locked offer IDs, lock_age_s, current vs. target release metrics for both spatial and temporal axes) is threaded into `tad_decision_context.lock_suppressions` as a JSONB array. Distinct from `wai_below_floor` because candidates *did* satisfy the matcher; the lock suppressed emission. Sprint A (2026-05-26).
     - one of the §XVIII lost-mode reasons per §XVIII.D.2
     - **Deprecated:** `empty_queue` was the historical conflated label; replaced 2026-05-18 by the four-way split above. Pre-2026-05-18 PDC rows retain `empty_queue` and should be interpreted as "one of {queue_actually_empty, cluster_unavailable, odometer_unavailable, tad_skipped_unknown} but unknowable which without replay."
 - `phase_reached`: highest phase reached before failure
@@ -1127,6 +1136,8 @@ These forensics make false negatives investigable. A miss is not silent — ever
 **§XV (Observation Before Narrative)**: §XVI extends §XV's separation of observation from narrative into the detection layer. §XV says cache writes (observation) are durable while `current_offer_id` (narrative) is provisional. §XVI says stop detection (observation) is the primitive while offer matching (narrative) is the secondary step. Same shape, applied earlier in the pipeline.
 
 **§XIV.I (§5.3 Asymmetric Handling)**: The §5.3 dispatcher continues to operate at the dispatch layer. The Forensic Ladder's Phase 2b/3/4/5 produces match candidates; dispatch resolves any ambiguity among them per §XIV.I. §XVI and §XIV.I compose cleanly.
+
+**§XVI.G (Transaction Lock)**: the lock is consulted at Phase 2b *after* candidate identification but *before* action emission. Candidates that satisfy the WAI confidence floor but are locked from a recent fire on the same `(offer_id, pudo_type)` produce a `lock_suppressed` PDC row (per §XVI.H taxonomy) instead of being emitted. The §XVI Forensic Ladder's Phase 1/2/2b/3/4/5 physics-based detection runs unchanged; the lock filters *which* of the detected candidates fire. Stacked offers maintain independent locks per Sprint A composite-key design (driver_id, offer_id, pudo_type), so locking offer A's pickup does not block offer B's pickup.
 
 **§XVIII (Driver-State Lost Mode)**: §XVIII conditionally overrides the TAD gates at Phase 1 (pre-filter) and Phase 2b (candidate set) when the driver is in lost-mode. The physics-based arrest detection (Phase 2 velocity counter, Phase 3 POI lookup, Phase 4 hill-climb, Phase 5 notarization) runs unchanged in both modes. See §XVIII for the full specification.
 
