@@ -48,6 +48,9 @@ from dispatch import (
     FirePickupObservation, FireDropoffObservation, ClearNarrative,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
+from decisions.transaction_lock import (
+    acquire_lock, is_locked, release_lock, LockContext,
+)
 from pudo_types import Offer, OfferMeta, TargetSpec, WAIMatch, WAI_CONFIDENCE_THRESHOLD
 from driver_queue import DriverQueue
 from bead_on_wire import classify_address
@@ -313,6 +316,19 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                   )
             """, (action.offer_id,))
 
+            # §XVI.G: latch the transaction lock on this fire so the
+            # matcher won't re-emit FirePickup for the same offer until
+            # the driver moves 500ft OR sustains >5mph for 10s.
+            acquire_lock(
+                cur=cur,
+                driver_id=driver_id,
+                offer_id=action.offer_id,
+                pudo_type='pickup',
+                fired_at=datetime.datetime.now(datetime.timezone.utc),
+                fired_lat=nail_lat,
+                fired_lng=nail_lng,
+                fired_cumulative_miles=cumulative_miles,
+            )
             log.info("[heartbeat] FirePickup offer=%s", action.offer_id)
             return True, None
 
@@ -403,6 +419,22 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                   )
             """, (action.offer_id,))
 
+            # §XVI.G: latch dropoff lock and release any orphan locks
+            # for this offer. Once an offer's dropoff fires, it leaves
+            # the live queue per §XIV.H, so any pickup-leg lock that
+            # didn't release spatially is cleaned up here.
+            acquire_lock(
+                cur=cur,
+                driver_id=driver_id,
+                offer_id=action.offer_id,
+                pudo_type='dropoff',
+                fired_at=datetime.datetime.now(datetime.timezone.utc),
+                fired_lat=nail_lat,
+                fired_lng=nail_lng,
+                fired_cumulative_miles=cumulative_miles,
+            )
+            release_lock(cur, driver_id, action.offer_id, 'pickup')
+            release_lock(cur, driver_id, action.offer_id, 'dropoff')
             sev_map = {None: logging.INFO,
                        "canceled": logging.INFO,
                        "pickup_missed": logging.WARNING}
@@ -504,6 +536,20 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                   )
             """, (action.offer_id,))
 
+            # §XVI.G: latch the transaction lock on this observation
+            # fire. Observation-class fires use the same lock as
+            # narrative-class fires — the matcher should not re-emit
+            # observations for the same (offer, leg) until release.
+            acquire_lock(
+                cur=cur,
+                driver_id=driver_id,
+                offer_id=action.offer_id,
+                pudo_type='pickup',
+                fired_at=datetime.datetime.now(datetime.timezone.utc),
+                fired_lat=nail_lat,
+                fired_lng=nail_lng,
+                fired_cumulative_miles=cumulative_miles,
+            )
             log.info("[heartbeat] FirePickupObservation offer=%s", action.offer_id)
             # executed=True so dispatch_executed reflects "we did real work";
             # the cache writes are the work. Forensic visibility for §XIV.I.
@@ -552,6 +598,22 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 action.offer_id,
             ))
 
+            # §XVI.G: latch dropoff observation lock and release any
+            # orphan locks for this offer. Same cleanup semantics as
+            # FireDropoff — once dropoff observation fires, the offer
+            # leaves the live queue.
+            acquire_lock(
+                cur=cur,
+                driver_id=driver_id,
+                offer_id=action.offer_id,
+                pudo_type='dropoff',
+                fired_at=datetime.datetime.now(datetime.timezone.utc),
+                fired_lat=nail_lat,
+                fired_lng=nail_lng,
+                fired_cumulative_miles=cumulative_miles,
+            )
+            release_lock(cur, driver_id, action.offer_id, 'pickup')
+            release_lock(cur, driver_id, action.offer_id, 'dropoff')
             log.info("[heartbeat] FireDropoffObservation offer=%s", action.offer_id)
             return True, None
 
@@ -950,6 +1012,7 @@ def _log_decision_context(
     matcher_candidates=None,            # [Rule XVI B-3]
     unmatched_reason=None,              # [Rule XVI B-3]
     cadence_target_hz=None,             # §XVI.C cadence hint (2026-05-24)
+    suppressed_contexts=None,           # §XVI.G lock_suppressed forensic payload
 ):
     """Insert pudo_decision_context row from DiagnosticContext + dispatch result.
 
@@ -986,6 +1049,26 @@ def _log_decision_context(
         executed_actions=executed_actions,
         queue_metadata=queue_metadata,
     )
+
+    # §XVI.G: when heartbeats were suppressed by active transaction
+    # locks, attach the forensic payload per Gemini Sprint A C6
+    # ratification. The payload carries enough release-metric detail
+    # for Sprint C re-validation to measure lock behavior.
+    if suppressed_contexts:
+        tad_decision_context["lock_suppressions"] = [
+            {
+                "locked_offer_id": ctx.locked_offer_id,
+                "locked_pudo_type": ctx.locked_pudo_type,
+                "lock_age_s": ctx.lock_age_s,
+                "release_metrics": {
+                    "current_speed_streak_s": ctx.current_speed_streak_s,
+                    "target_speed_streak_s": ctx.target_speed_streak_s,
+                    "current_distance_delta_m": ctx.current_distance_delta_m,
+                    "target_distance_delta_m": ctx.target_distance_delta_m,
+                },
+            }
+            for ctx in suppressed_contexts
+        ]
 
     # Project executed-action list into a forensic-readable string.
     # Multiple actions (Case D, §5.2) join with '+'. We project executed_
@@ -1285,9 +1368,31 @@ def post_heartbeat():
                 WHEN %s::real = 0.0 AND arrest_started_at IS NULL
                     THEN 0.0
                 ELSE NULL
+            END,
+            -- §XVI.G Transaction Lock temporal release substrate.
+            -- Parallel structure to arrest_counter_s but inverted:
+            -- tracks contiguous seconds above 5.0 mph. NULL/0.0 means
+            -- "not currently above threshold" (mirrors arrest's
+            -- semantics for the opposite condition). speed_mph IS NULL
+            -- is treated as "below threshold" (NULL > 5.0 is false) so
+            -- missing-data heartbeats reset, consistent with arrest.
+            speed_streak_started_at = CASE
+                WHEN %s::real > 5.0 AND speed_streak_started_at IS NULL
+                    THEN NOW()
+                WHEN %s::real > 5.0 AND speed_streak_started_at IS NOT NULL
+                    THEN speed_streak_started_at
+                ELSE NULL
+            END,
+            current_speed_streak_s = CASE
+                WHEN %s::real > 5.0 AND speed_streak_started_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (NOW() - speed_streak_started_at))::real
+                WHEN %s::real > 5.0 AND speed_streak_started_at IS NULL
+                    THEN 0.0
+                ELSE 0.0
             END
         WHERE driver_id = %s
-        RETURNING arrest_started_at, arrest_counter_s, last_odometer_move_at
+        RETURNING arrest_started_at, arrest_counter_s, last_odometer_move_at,
+                  current_speed_streak_s
     """, (json.dumps({
         "lat": current_lat,
         "lng": current_lng,
@@ -1295,7 +1400,10 @@ def post_heartbeat():
         "gps_accuracy_m": gps_accuracy_m,
         "cumulative_miles": cumulative_miles,
         "received_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }), cumulative_miles, speed_mph, speed_mph, speed_mph, speed_mph, driver_id))
+    }), cumulative_miles,
+        speed_mph, speed_mph, speed_mph, speed_mph,           # arrest CASE binds
+        speed_mph, speed_mph, speed_mph, speed_mph,           # §XVI.G speed-streak CASE binds
+        driver_id))
 
     # Capture the post-UPDATE counter state to thread into _log_decision_context.
     # Defensive: if the driver row doesn't exist (shouldn't happen post-LOAD
@@ -1305,8 +1413,11 @@ def post_heartbeat():
         # RealDictCursor: iteration yields KEYS not values; use key access.
         arrest_started_at_post = _arrest_row['arrest_started_at']
         arrest_counter_s_post = _arrest_row['arrest_counter_s']
+        # §XVI.G: speed-streak counter for the temporal release condition.
+        current_speed_streak_s = _arrest_row['current_speed_streak_s'] or 0.0
     else:
         arrest_started_at_post, arrest_counter_s_post = None, None
+        current_speed_streak_s = 0.0
 
     # ── HEARTBEAT_LOG (flight recorder for cluster detection) ───────
     # cluster_detection.detect_cluster + pivot_context + bead_on_wire
@@ -1422,6 +1533,33 @@ def post_heartbeat():
 
             candidates.append((offer_id, leg, outcome.confidence))
 
+        # §XVI.G Transaction Lock: filter candidates that are currently
+        # locked from a recent fire on the same (offer, leg). Locked
+        # candidates produce a lock_suppressed PDC row instead of
+        # executing redundant actions. Per Sprint A composite-key
+        # design, locks are per-(offer, leg) — stacked offers maintain
+        # independent lock state.
+        suppressed_contexts = []  # list[LockContext] for forensic payload
+        _unlocked_candidates = []
+        _now_utc = datetime.datetime.now(datetime.timezone.utc)
+        for offer_id, leg, conf in candidates:
+            lock_ctx = is_locked(
+                cur=cur,
+                driver_id=driver_id,
+                offer_id=offer_id,
+                pudo_type=leg,
+                current_lat=current_lat,
+                current_lng=current_lng,
+                current_cumulative_miles=cumulative_miles,
+                current_speed_streak_s=current_speed_streak_s,
+                now=_now_utc,
+            )
+            if lock_ctx is not None:
+                suppressed_contexts.append(lock_ctx)
+            else:
+                _unlocked_candidates.append((offer_id, leg, conf))
+        candidates = _unlocked_candidates
+
         matcher_candidates = [c[0] for c in candidates]
 
         if len(candidates) == 1:
@@ -1467,7 +1605,13 @@ def post_heartbeat():
         else:
             # Arrest reached but no candidate passed both gates.
             match_signal = 'no_match'
-            if not diagnostics.tad_verdicts:
+            if suppressed_contexts:
+                # §XVI.G: candidates cleared the WAI floor but were
+                # caught by the transaction lock. Forensic payload
+                # threaded into tad_decision_context.lock_suppressions
+                # via _log_decision_context's suppressed_contexts kwarg.
+                unmatched_reason = 'lock_suppressed'
+            elif not diagnostics.tad_verdicts:
                 # Bug B' 2026-05-18: the historical 'empty_queue' label
                 # conflated four distinct precondition failures. Split
                 # them so the next miss self-classifies. The WAI guard
@@ -1583,6 +1727,7 @@ def post_heartbeat():
             matcher_candidates=matcher_candidates,            # [Rule XVI B-3]
             unmatched_reason=unmatched_reason,                # [Rule XVI B-3]
             cadence_target_hz=cadence_target_hz,              # §XVI.C forensic (2026-05-24)
+            suppressed_contexts=suppressed_contexts,          # §XVI.G forensic (2026-05-26)
         )
     except Exception as e:
         # LOG failure must not break the heartbeat — the API contract is
