@@ -861,6 +861,7 @@ def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles,
 def _build_tad_decision_context(
     diagnostics, matches, lost_mode, last_known_anchor_id,
     executed_actions=None, queue_metadata=None,
+    suppressed_contexts=None,  # §XVI.G recovery (2026-05-27)
 ):
     """Serialize tad_decision_context JSONB blob. [3b.R + Phase 4 narrative_tiebreaker]
 
@@ -928,6 +929,27 @@ def _build_tad_decision_context(
         )
         if narrative_tiebreaker is not None:
             blob["narrative_tiebreaker"] = narrative_tiebreaker
+
+    # §XVI.G recovery (2026-05-27): inject lock_suppressions on the dict
+    # before serialization. Previously this lived in _log_decision_context
+    # AFTER json.dumps had returned a string, producing TypeError on every
+    # heartbeat that carried suppressed contexts. Ownership lives here now;
+    # the builder owns the blob shape end-to-end.
+    if suppressed_contexts:
+        blob["lock_suppressions"] = [
+            {
+                "locked_offer_id": ctx.locked_offer_id,
+                "locked_pudo_type": ctx.locked_pudo_type,
+                "lock_age_s": ctx.lock_age_s,
+                "release_metrics": {
+                    "current_speed_streak_s": ctx.current_speed_streak_s,
+                    "target_speed_streak_s": ctx.target_speed_streak_s,
+                    "current_distance_delta_m": ctx.current_distance_delta_m,
+                    "target_distance_delta_m": ctx.target_distance_delta_m,
+                },
+            }
+            for ctx in suppressed_contexts
+        ]
 
     return json.dumps(blob)
 
@@ -1043,32 +1065,15 @@ def _log_decision_context(
     cluster = diagnostics.cluster
     topo = diagnostics.topology
 
-    # [3b.R] Build TAD forensic blob (Bible Rule 5: JSONB-resident, never flat)
+    # [3b.R] Build TAD forensic blob (Bible Rule 5: JSONB-resident, never flat).
+    # §XVI.G recovery (2026-05-27): suppressed_contexts now threaded into
+    # the builder so lock_suppressions lands on the dict before json.dumps.
     tad_decision_context = _build_tad_decision_context(
         diagnostics, matches, lost_mode, last_known_anchor_id,
         executed_actions=executed_actions,
         queue_metadata=queue_metadata,
+        suppressed_contexts=suppressed_contexts,
     )
-
-    # §XVI.G: when heartbeats were suppressed by active transaction
-    # locks, attach the forensic payload per Gemini Sprint A C6
-    # ratification. The payload carries enough release-metric detail
-    # for Sprint C re-validation to measure lock behavior.
-    if suppressed_contexts:
-        tad_decision_context["lock_suppressions"] = [
-            {
-                "locked_offer_id": ctx.locked_offer_id,
-                "locked_pudo_type": ctx.locked_pudo_type,
-                "lock_age_s": ctx.lock_age_s,
-                "release_metrics": {
-                    "current_speed_streak_s": ctx.current_speed_streak_s,
-                    "target_speed_streak_s": ctx.target_speed_streak_s,
-                    "current_distance_delta_m": ctx.current_distance_delta_m,
-                    "target_distance_delta_m": ctx.target_distance_delta_m,
-                },
-            }
-            for ctx in suppressed_contexts
-        ]
 
     # Project executed-action list into a forensic-readable string.
     # Multiple actions (Case D, §5.2) join with '+'. We project executed_
@@ -1270,6 +1275,14 @@ def post_heartbeat():
     speed_mph = body.get('speed_mph')
     gps_accuracy_m = body.get('gps_accuracy_m')
     cumulative_miles = body.get('cumulative_miles')
+
+    # §XVI.G recovery (2026-05-27): function-scope binding ensures the
+    # _log_decision_context call site (which runs on every heartbeat,
+    # including the many that bypass the matcher block) always sees a
+    # bound `suppressed_contexts`. The matcher block overwrites this
+    # with actual LockContext entries when arrest-driven candidate
+    # evaluation runs.
+    suppressed_contexts = []
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
