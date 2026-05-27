@@ -1229,39 +1229,106 @@ def _log_decision_context(
 # Orchestrator: the Quarterback
 # =============================================================================
 
-def _voice_for_actions(executed_actions):
-    """Map an executed-action list to a single voice utterance, or None.
+def _voice_for_actions(
+    executed_actions,
+    last_voiced_offer_id=None,
+    last_voiced_action_type=None,
+):
+    """Map an executed-action list to a single voice utterance.
 
-    Voice is suppressed unless a STATE-CHANGING action ran. This is the
-    natural rate limiter: FirePickup / FireDropoff fire once per state
-    transition, never per heartbeat. Detection-only actions
-    (LogAmbiguousMatch, LogNoMatch, LogPickupRematch) never voice — they
-    surface via /driver/status.last_3_dispatch_actions for forensic review.
+    Voice is suppressed unless a STATE-CHANGING or OBSERVATION action
+    ran. State-changing actions (FirePickup / FireDropoff) are the
+    narrative path; Observation actions (FirePickupObservation /
+    FireDropoffObservation) are the §XVIII lost-mode path. Detection-only
+    actions (LogAmbiguousMatch, LogNoMatch, LogPickupRematch) never voice.
+
+    §XVIII LOST-MODE EXTENSION (2026-05-27): per Andrew + Claude Code's
+    diagnosis, the production system is permanently in lost-mode due to
+    a 272-offer unfired-pickup backlog. §XVIII demotes every PUDO fire
+    to its Observation variant. Without matching Observation variants
+    here, voice goes silent entirely.
+
+    Wording (per Andrew, 2026-05-27): identical voice for narrative and
+    observation variants. The driver should hear "Pickup confirmed" or
+    "Dropoff confirmed" without needing to distinguish architectural state.
 
     Priority handles the implicit-cancel pair: when both
     FireDropoff(outcome="canceled") and FirePickup execute on the same
     heartbeat, the cancel string wins and suppresses the redundant
     "Pickup confirmed".
 
-    Returns None if no executed action warrants a voice utterance.
+    DEDUP GATE (2026-05-27): Observation variants fire multiple times
+    per (offer, leg) within a short window. Without dedup the driver
+    would hear the same utterance 2-3+ times per real PUDO event. The
+    last_voiced_offer_id / last_voiced_action_type kwargs hold the
+    prior voiced tuple (read from driver_trip_state by the caller).
+    When the candidate (offer_id, action_type) equals the prior, voice
+    is suppressed.
+
+    Returns:
+      tuple[Optional[str], Optional[str], Optional[str]]:
+        (voice_string, voiced_offer_id, voiced_action_type)
+      All three are None when no voice should be emitted (either no
+      voice-worthy action present, or dedup gate suppressed). When
+      voice fires, the caller persists the two non-None ID strings to
+      driver_trip_state for the next heartbeat's dedup check.
     """
+    candidate = None  # tuple of (voice_str, offer_id, action_type)
+
     # 1. Implicit cancel — paired FireDropoff(canceled) + FirePickup
     for action in executed_actions:
         if isinstance(action, FireDropoff) and action.outcome == "canceled":
-            return "Implicit cancel, new ride starting"
+            candidate = ("Implicit cancel, new ride starting",
+                         action.offer_id, "cancel")
+            break
+
     # 2. Pickup missed (Case F)
-    for action in executed_actions:
-        if isinstance(action, FireDropoff) and action.outcome == "pickup_missed":
-            return "Dropoff confirmed, pickup was missed"
-    # 3. Normal dropoff
-    for action in executed_actions:
-        if isinstance(action, FireDropoff) and action.outcome is None:
-            return "Dropoff confirmed"
-    # 4. Standalone pickup
-    for action in executed_actions:
-        if isinstance(action, FirePickup):
-            return "Pickup confirmed"
-    return None
+    if candidate is None:
+        for action in executed_actions:
+            if isinstance(action, FireDropoff) and action.outcome == "pickup_missed":
+                candidate = ("Dropoff confirmed, pickup was missed",
+                             action.offer_id, "dropoff_missed_pickup")
+                break
+
+    # 3. Normal dropoff (narrative)
+    if candidate is None:
+        for action in executed_actions:
+            if isinstance(action, FireDropoff) and action.outcome is None:
+                candidate = ("Dropoff confirmed", action.offer_id, "dropoff")
+                break
+
+    # 4. Dropoff observation (§XVIII lost-mode demotion path)
+    if candidate is None:
+        for action in executed_actions:
+            if isinstance(action, FireDropoffObservation):
+                candidate = ("Dropoff confirmed", action.offer_id, "dropoff")
+                break
+
+    # 5. Pickup (narrative)
+    if candidate is None:
+        for action in executed_actions:
+            if isinstance(action, FirePickup):
+                candidate = ("Pickup confirmed", action.offer_id, "pickup")
+                break
+
+    # 6. Pickup observation (§XVIII lost-mode demotion path)
+    if candidate is None:
+        for action in executed_actions:
+            if isinstance(action, FirePickupObservation):
+                candidate = ("Pickup confirmed", action.offer_id, "pickup")
+                break
+
+    if candidate is None:
+        return (None, None, None)
+
+    voice_str, offer_id, action_type = candidate
+
+    # Dedup gate: same (offer_id, action_type) as last voiced → suppress.
+    if (offer_id == last_voiced_offer_id
+            and action_type == last_voiced_action_type):
+        return (None, None, None)
+
+    return (voice_str, offer_id, action_type)
 
 
 @driver_heartbeat_bp.route('/driver/heartbeat', methods=['POST'])
@@ -1754,7 +1821,37 @@ def post_heartbeat():
     # for forensic persistence per §XVI.C cadence column (2026-05-24).
     # The variable is still in scope here.
     response = {"ok": True, "cadence_target_hz": cadence_target_hz}
-    voice = _voice_for_actions(executed_actions)
+    # §IV recovery (2026-05-27): voice dedup state read from driver_trip_state
+    # before _voice_for_actions, written back when voice fires. State persists
+    # across container restarts per Andrew's directive (do the right thing).
+    cur.execute(
+        '''SELECT last_voiced_offer_id, last_voiced_action_type
+           FROM app_private.driver_trip_state
+           WHERE driver_id = %s''',
+        (driver_id,),
+    )
+    _voice_row = cur.fetchone()
+    _prior_voiced_offer_id = (
+        _voice_row['last_voiced_offer_id'] if _voice_row else None
+    )
+    _prior_voiced_action_type = (
+        _voice_row['last_voiced_action_type'] if _voice_row else None
+    )
+
+    voice, _voiced_offer_id, _voiced_action_type = _voice_for_actions(
+        executed_actions,
+        last_voiced_offer_id=_prior_voiced_offer_id,
+        last_voiced_action_type=_prior_voiced_action_type,
+    )
+
+    if voice is not None:
+        cur.execute(
+            '''UPDATE app_private.driver_trip_state
+               SET last_voiced_offer_id = %s,
+                   last_voiced_action_type = %s
+               WHERE driver_id = %s''',
+            (_voiced_offer_id, _voiced_action_type, driver_id),
+        )
     if voice is not None:
         response["voice"] = voice
     return jsonify(response), 200# rebuild 1777679926
