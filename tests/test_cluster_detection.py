@@ -35,7 +35,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cluster_detection import detect_cluster, Cluster, is_stable, get_recent_clusters
+from cluster_detection import detect_cluster, Cluster, get_recent_clusters, ARREST_DURATION_THRESHOLD_S
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -91,23 +91,23 @@ def test_cluster_field_count():
 
 
 # ============================================================================
-# is_stable predicate
+# ARREST_DURATION_THRESHOLD_S unification (One Arrest Period, 2026-05-29)
 # ============================================================================
 
-def test_is_stable_at_threshold_is_true():
-    """Boundary: duration == threshold should be stable (>= comparison)."""
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=15.0, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
-    assert is_stable(c, threshold_s=15.0) is True
-
-
-def test_is_stable_below_threshold_is_false():
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=14.99, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
-    assert is_stable(c, threshold_s=15.0) is False
-
-
-def test_is_stable_well_above_threshold():
-    c = Cluster(n=4, median_lat=29.6, median_lng=-95.5, spread_m=0.0, duration_s=300.0, latest=datetime(2026, 4, 23, 20, 52, 16, tzinfo=timezone.utc))
-    assert is_stable(c, threshold_s=15.0) is True
+def test_detect_cluster_min_duration_default_equals_arrest_threshold():
+    """Regression (2026-05-29 dead zone): detect_cluster's min_duration_s
+    default MUST equal ARREST_DURATION_THRESHOLD_S. If these silently diverge
+    again, arrests fire but no cluster matures and PUDOs miss. This test is
+    the structural guard that pins the two clocks to one value.
+    """
+    import inspect
+    sig = inspect.signature(detect_cluster)
+    default = sig.parameters['min_duration_s'].default
+    assert default == ARREST_DURATION_THRESHOLD_S, (
+        f'detect_cluster min_duration_s default {default!r} != '
+        f'ARREST_DURATION_THRESHOLD_S {ARREST_DURATION_THRESHOLD_S!r} — '
+        f'the dead zone has reopened'
+    )
 
 
 # ============================================================================
@@ -172,11 +172,6 @@ def test_scenario_tight_4sample_stop_at_T16s():
     assert result.spread_m == pytest.approx(0.0, abs=0.01)
     # Duration = 20:52:16.278843 - 20:51:59.735134 = 16.543709 seconds
     assert result.duration_s == pytest.approx(16.543709, abs=0.001)
-
-    # Cluster meets the v1 stability threshold of 15s
-    assert is_stable(result, threshold_s=15.0) is True
-    # But not a stricter 20s threshold
-    assert is_stable(result, threshold_s=20.0) is False
 
 
 def test_scenario_no_cluster_when_currently_moving():

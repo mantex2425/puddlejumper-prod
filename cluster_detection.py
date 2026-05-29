@@ -36,6 +36,22 @@ import logging
 
 
 # ============================================================================
+# ARREST_DURATION_THRESHOLD_S -- the single source of truth for PUDO dwell.
+# ============================================================================
+# Contiguous zero-velocity seconds required to call a stop an arrest. This
+# value governs BOTH the heartbeat arrest counter (driver_heartbeat.py imports
+# it from here) AND detect_cluster's min_duration_s default below. One number,
+# one home. It lives in this stdlib-only leaf module because the dependency
+# graph forbids any other cycle-free placement (pudo_types imports Cluster
+# from here, so it cannot host a constant this module needs).
+#
+# History: was 5.0 in driver_heartbeat while detect_cluster defaulted to 10.0,
+# creating a 5-10s dead zone where arrests fired but no cluster matured (see
+# 2026-05-29 forensic). Unified here per One Arrest Period ratification.
+ARREST_DURATION_THRESHOLD_S = 5.0
+
+
+# ============================================================================
 # Cluster -- immutable snapshot returned by detect_cluster()
 # ============================================================================
 
@@ -74,26 +90,6 @@ class Cluster:
 
 
 # ============================================================================
-# is_stable -- policy predicate, kept OUT of the Cluster dataclass
-# ============================================================================
-
-def is_stable(cluster: Cluster, threshold_s: float) -> bool:
-    """True if the cluster has persisted at least threshold_s seconds.
-
-    Kept as a free function (not a Cluster method) because the threshold is a
-    POLICY decision, not a property of the cluster itself. Different consumers
-    apply different thresholds:
-      - WAI PUDO planner v1: 15s for residential pickups
-      - Future: longer for apartment complex pivots, shorter for "definitely
-        parked" verification, etc.
-
-    The v1 default lives in routing.known_stops_config.min_cluster_duration_s
-    and should be loaded at the consumer level, not bound to Cluster.
-    """
-    return cluster.duration_s >= threshold_s
-
-
-# ============================================================================
 # detect_cluster -- the primitive
 # ============================================================================
 
@@ -102,7 +98,7 @@ def detect_cluster(driver_id: str, cur,
                    min_samples: int = 3,
                    max_speed_mph: float = 10.0,
                    max_spread_m: float = 25.0,
-                   min_duration_s: float = 10.0,
+                   min_duration_s: float = ARREST_DURATION_THRESHOLD_S,
                    departure_grace_s: float = 5.0) -> Optional[Cluster]:
     """Check if driver has a tight low-speed cluster in the recent past.
 

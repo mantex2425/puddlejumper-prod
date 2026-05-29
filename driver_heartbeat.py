@@ -54,6 +54,7 @@ from decisions.transaction_lock import (
 from pudo_types import Offer, OfferMeta, TargetSpec, WAIMatch, WAI_CONFIDENCE_THRESHOLD
 from driver_queue import DriverQueue
 from bead_on_wire import classify_address
+from cluster_detection import ARREST_DURATION_THRESHOLD_S
 
 
 # ── §XVI.C TAD-as-Input matcher constants (ratified 2026-05-22) ──
@@ -62,7 +63,9 @@ from bead_on_wire import classify_address
 # cadence: 5 confirming samples. Per §XVI.C amended doctrine, this
 # composes with WAI ≥ WAI_CONFIDENCE_THRESHOLD as the canonical
 # two-key commit gate. TAD is no longer a separate gate.
-ARREST_DURATION_THRESHOLD_S = 5.0
+# NOTE: the value itself is defined ONCE in cluster_detection.py
+# (the stdlib-only leaf) and imported above — single source of truth
+# shared with detect_cluster's min_duration_s default. Do not redefine here.
 
 # Horny mode speed threshold: cadence target jumps to 1Hz when WAI
 # confidence ≥ floor AND speed drops below this value. Two existing
