@@ -1273,7 +1273,7 @@ def _voice_for_actions(
       voice fires, the caller persists the two non-None ID strings to
       driver_trip_state for the next heartbeat's dedup check.
     """
-    candidate = None  # tuple of (voice_str, offer_id, action_type)
+    candidate = None  # tuple of (voice_base, offer_id, action_type)
 
     # 1. Implicit cancel — paired FireDropoff(canceled) + FirePickup
     for action in executed_actions:
@@ -1321,13 +1321,30 @@ def _voice_for_actions(
     if candidate is None:
         return (None, None, None)
 
-    voice_str, offer_id, action_type = candidate
+    voice_base, offer_id, action_type = candidate
 
     # Dedup gate: same (offer_id, action_type) as last voiced → suppress.
+    # §IV-v2 (2026-05-29): emit forensic log line so Cloud Run captures
+    # every suppression event for post-drive audit.
     if (offer_id == last_voiced_offer_id
             and action_type == last_voiced_action_type):
+        log.info(
+            "VOICE_DEDUP_SUPPRESSED candidate_offer=%s candidate_action=%s "
+            "prior_offer=%s prior_action=%s",
+            offer_id, action_type,
+            last_voiced_offer_id, last_voiced_action_type,
+        )
         return (None, None, None)
 
+    # §IV-v2 (2026-05-29): append offer_id to every voice utterance so
+    # the driver can disambiguate which offer the system is announcing.
+    # Format: "<base>, <offer_id>" (Option 2 — natural English with
+    # comma pause). Forensic log line records exact emitted voice.
+    voice_str = f"{voice_base}, {offer_id}"
+    log.info(
+        "VOICE_EMITTED voice=%r offer=%s action=%s",
+        voice_str, offer_id, action_type,
+    )
     return (voice_str, offer_id, action_type)
 
 

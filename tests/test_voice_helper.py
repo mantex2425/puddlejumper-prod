@@ -84,14 +84,14 @@ def test_log_ambiguous_match_silent():
 
 def test_fire_pickup_alone():
     voice, offer_id, action_type = _voice_for_actions([FirePickup("OFFER1")])
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "pickup"
 
 
 def test_fire_dropoff_normal():
     voice, offer_id, action_type = _voice_for_actions([FireDropoff("OFFER1")])
-    assert voice == "Dropoff confirmed"
+    assert voice == "Dropoff confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "dropoff"
 
@@ -99,7 +99,7 @@ def test_fire_dropoff_normal():
 def test_fire_dropoff_canceled():
     actions = [FireDropoff("OFFER1", outcome="canceled")]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Implicit cancel, new ride starting"
+    assert voice == "Implicit cancel, new ride starting, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "cancel"
 
@@ -107,7 +107,7 @@ def test_fire_dropoff_canceled():
 def test_fire_dropoff_pickup_missed():
     actions = [FireDropoff("OFFER1", outcome="pickup_missed")]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Dropoff confirmed, pickup was missed"
+    assert voice == "Dropoff confirmed, pickup was missed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "dropoff_missed_pickup"
 
@@ -122,7 +122,7 @@ def test_fire_pickup_observation_voices():
     voice, offer_id, action_type = _voice_for_actions(
         [FirePickupObservation("OFFER1")]
     )
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "pickup"
 
@@ -134,7 +134,7 @@ def test_fire_dropoff_observation_voices():
     voice, offer_id, action_type = _voice_for_actions(
         [FireDropoffObservation("OFFER1")]
     )
-    assert voice == "Dropoff confirmed"
+    assert voice == "Dropoff confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "dropoff"
 
@@ -151,7 +151,7 @@ def test_implicit_cancel_pair_case_d():
         FirePickup("NEW_OFFER"),
     ]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Implicit cancel, new ride starting"
+    assert voice == "Implicit cancel, new ride starting, OLD_OFFER"
     assert offer_id == "OLD_OFFER"
     assert action_type == "cancel"
 
@@ -165,7 +165,7 @@ def test_priority_canceled_beats_pickup_missed():
         FireDropoff("B", outcome="canceled"),
     ]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Implicit cancel, new ride starting"
+    assert voice == "Implicit cancel, new ride starting, B"
     assert offer_id == "B"
     assert action_type == "cancel"
 
@@ -177,7 +177,7 @@ def test_priority_dropoff_beats_pickup():
         FirePickup("B"),
     ]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Dropoff confirmed"
+    assert voice == "Dropoff confirmed, A"
     assert offer_id == "A"
     assert action_type == "dropoff"
 
@@ -189,7 +189,7 @@ def test_priority_narrative_dropoff_beats_observation_dropoff():
         FireDropoffObservation("B"),
     ]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Dropoff confirmed"
+    assert voice == "Dropoff confirmed, A"
     assert offer_id == "A"
     assert action_type == "dropoff"
 
@@ -201,7 +201,7 @@ def test_priority_narrative_pickup_beats_observation_pickup():
         FirePickupObservation("B"),
     ]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, A"
     assert offer_id == "A"
     assert action_type == "pickup"
 
@@ -210,7 +210,7 @@ def test_silent_actions_alongside_state_change_dont_block_voice():
     """If a LogNoMatch is next to a FirePickup (defensive), pickup still voices."""
     actions = [LogNoMatch(), FirePickup("OFFER1")]
     voice, offer_id, action_type = _voice_for_actions(actions)
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "pickup"
 
@@ -242,7 +242,7 @@ def test_dedup_different_offer_voices():
         last_voiced_offer_id="OFFER1",
         last_voiced_action_type="pickup",
     )
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, OFFER2"
     assert offer_id == "OFFER2"
     assert action_type == "pickup"
 
@@ -258,7 +258,7 @@ def test_dedup_same_offer_different_action_voices():
         last_voiced_offer_id="OFFER1",
         last_voiced_action_type="pickup",
     )
-    assert voice == "Dropoff confirmed"
+    assert voice == "Dropoff confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "dropoff"
 
@@ -271,7 +271,7 @@ def test_dedup_narrative_and_observation_share_key():
     """
     # First: narrative dropoff fires. Voice produced.
     voice1, oid1, atype1 = _voice_for_actions([FireDropoff("OFFER1")])
-    assert voice1 == "Dropoff confirmed"
+    assert voice1 == "Dropoff confirmed, OFFER1"
     assert oid1 == "OFFER1"
     assert atype1 == "dropoff"
 
@@ -295,6 +295,6 @@ def test_dedup_fresh_session_voices():
         last_voiced_offer_id=None,
         last_voiced_action_type=None,
     )
-    assert voice == "Pickup confirmed"
+    assert voice == "Pickup confirmed, OFFER1"
     assert offer_id == "OFFER1"
     assert action_type == "pickup"
