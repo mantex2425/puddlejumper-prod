@@ -367,7 +367,18 @@ class DriverQueue:
                 objects should use `offer_ids_only()` and
                 `bound_offer_id()` instead.
         """
-        offers = self._project_offers(cur, current_cumulative_miles=current_cumulative_miles)
+        # 2026-05-30 bind-drift fix: snapshot() previously dropped
+        # last_odometer_move_at silently when calling _project_offers,
+        # leaving the matcher's odometer-staleness gate permissive
+        # despite the heartbeat handler threading a real value through.
+        # Both kwargs now forwarded explicitly. See
+        # docs/RECON_MATCHER_EMPTY_CANDIDATES_2026-05-30.md §A.3 +
+        # "secondary latent bug" note.
+        offers = self._project_offers(
+            cur,
+            current_cumulative_miles=current_cumulative_miles,
+            last_odometer_move_at=last_odometer_move_at,
+        )
         raw_bound = self._select_bound_offer_id(cur)
 
         # Apply L-19 invariant.
@@ -396,7 +407,15 @@ class DriverQueue:
             RuntimeError: if no target_spec_builder was supplied at
                 construction time.
         """
-        return self._project_offers(cur, current_cumulative_miles=current_cumulative_miles)
+        # 2026-05-30 bind-drift fix (same as snapshot()): forward both
+        # kwargs to _project_offers so the odometer-staleness gate
+        # evaluates against caller-supplied state, not silently against
+        # None. See docs/RECON_MATCHER_EMPTY_CANDIDATES_2026-05-30.md.
+        return self._project_offers(
+            cur,
+            current_cumulative_miles=current_cumulative_miles,
+            last_odometer_move_at=last_odometer_move_at,
+        )
 
     def offer_ids_only(self, cur, current_cumulative_miles=None, last_odometer_move_at=None) -> tuple[str, ...]:
         """Project just the queue's offer_ids — no coord building, no
