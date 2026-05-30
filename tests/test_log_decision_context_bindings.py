@@ -104,12 +104,25 @@ class _StandinMatch:
 
 @dataclass
 class _StandinDiagnostics:
-    """Duck-types where_am_i.DiagnosticContext for writer-level tests."""
+    """Duck-types where_am_i.DiagnosticContext for writer-level tests.
+
+    per_target_outcomes mirrors where_am_i.DiagnosticContext's field of
+    the same name (where_am_i.py:1742): list[tuple[offer_id, leg,
+    MatchOutcome]]. Added 2026-05-30 alongside the wai_per_offer_scores
+    telemetry column — _build_wai_per_offer_scores in driver_heartbeat.py
+    reads diagnostics.per_target_outcomes unconditionally, so the standin
+    must define it or AttributeError fires before INSERT runs. Default
+    empty list: helper returns None for empty input (same path as a
+    heartbeat with no offers in queue), which matches what these
+    writer-level tests want — they assert on flat wai_* / poi_* columns,
+    not on the JSONB blob.
+    """
     cluster: Optional[_StandinCluster] = field(default_factory=_StandinCluster)
     topology: Optional[_StandinTopo] = field(default_factory=_StandinTopo)
     cluster_revisit: bool = False
     tad_verdicts: dict = field(default_factory=dict)
     cluster_poi_names: list = field(default_factory=list)
+    per_target_outcomes: list = field(default_factory=list)
     _outcomes_by_match: dict = field(default_factory=dict)
 
     def outcome_for(self, match):

@@ -957,6 +957,47 @@ def _build_tad_decision_context(
     return json.dumps(blob)
 
 
+def _build_wai_per_offer_scores(diagnostics):
+    """Serialize WAI's per_target_outcomes for forensic capture in
+    pudo_decision_context.wai_per_offer_scores JSONB.
+
+    Returns str (json.dumps output) or None.
+      None: per_target_outcomes is empty (no offers in queue, WAI
+        evaluation short-circuited, or cluster unavailable).
+      str: one entry per (offer_id, leg) WAI scored, recording
+        confidence, per-signal breakdown, target address, and reason.
+
+    Closes the forensic gap surfaced by the 2026-05-30 starved-pickup
+    recon (RECON_ROAD_NAME_CANONICALIZATION_GAP_2026-05-30.md §4.2):
+    the existing wai_* flat columns only populate for the WINNING
+    outcome of a heartbeat. Offers that scored below
+    WAI_CONFIDENCE_THRESHOLD (or below the winner) left no trace,
+    making wai_below_floor and lost_mode_no_candidate failure modes
+    undiagnosable from PDC alone. This blob captures all losers.
+
+    Per-signal breakdown shape mirrors _CONFIDENCE_WEIGHTS keys
+    (proximity, breadcrumb_match, on_target_road, etc.). Reading the
+    signals dict in a failed heartbeat shows immediately which signal
+    zeroed out — distinguishing canonicalization gaps (road signals
+    zero) from geocode-distance misses (proximity zero) from cluster
+    weakness (cluster_tightness / cluster_duration low).
+    """
+    if not diagnostics.per_target_outcomes:
+        return None
+    return json.dumps([
+        {
+            "offer_id": offer_id,
+            "leg": leg,
+            "matched": outcome.matched,
+            "confidence": outcome.confidence,
+            "signals": outcome.signals,
+            "target_address": outcome.target_address,
+            "reason": outcome.reason,
+        }
+        for offer_id, leg, outcome in diagnostics.per_target_outcomes
+    ])
+
+
 def _detect_narrative_tiebreaker(executed_actions, queue_metadata):
     """Detect which §XIV.I §5.3 case fired in this heartbeat.
 
@@ -1078,6 +1119,13 @@ def _log_decision_context(
         suppressed_contexts=suppressed_contexts,
     )
 
+    # WAI per-offer signal-score forensic blob (2026-05-30): captures the
+    # signals breakdown for every offer WAI scored, not just the winner.
+    # Closes the diagnostic gap behind wai_below_floor /
+    # lost_mode_no_candidate failure modes — see
+    # docs/RECON_ROAD_NAME_CANONICALIZATION_GAP_2026-05-30.md §4.2.
+    wai_per_offer_scores = _build_wai_per_offer_scores(diagnostics)
+
     # Project executed-action list into a forensic-readable string.
     # Multiple actions (Case D, §5.2) join with '+'. We project executed_
     # actions (not the dispatched intent) because forensic truthfulness
@@ -1156,7 +1204,8 @@ def _log_decision_context(
             arrest_started_at, arrest_duration_s,
             phase_reached, matched_offer_id, match_signal,
             matcher_candidates, unmatched_reason,
-            cadence_target_hz
+            cadence_target_hz,
+            wai_per_offer_scores
         ) VALUES (
             %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
@@ -1175,6 +1224,7 @@ def _log_decision_context(
             %s, %s,
             %s, %s, %s,
             %s, %s,
+            %s,
             %s
         )
         """,
@@ -1224,6 +1274,7 @@ def _log_decision_context(
             matcher_candidates,
             unmatched_reason,
             cadence_target_hz,
+            wai_per_offer_scores,
         ),
     )
 
