@@ -40,11 +40,27 @@ class _FakeCluster:
     median_lng = -95.3698
 
 
-def _setup_cur_and_queue():
-    """Build a mock cursor and queue with sensible defaults for _execute_action."""
+def _setup_cur_and_queue(existing_actual_pickup_at=None, offer_exists=True):
+    """Build a mock cursor and queue with sensible defaults for _execute_action.
+
+    The FirePickup handler does a SELECT for the offer's current
+    actual_pickup_at BEFORE any cache writes (Rule XV idempotency guard,
+    2026-05-30). This helper mocks cur.fetchone() accordingly:
+
+      offer_exists=True, existing_actual_pickup_at=None  (default)
+        → SELECT returns (None,) → "offer exists, not yet fired" → normal path
+      offer_exists=True, existing_actual_pickup_at=<ts>
+        → SELECT returns (ts,) → "Rule XV catch-up" → skip cache UPDATEs
+      offer_exists=False
+        → SELECT returns None → "offer not in offer_history" → fire_pickup_zero_rows
+    """
     cur = MagicMock()
     # Default: every UPDATE/INSERT writes 1 row (success path).
     cur.rowcount = 1
+    if offer_exists:
+        cur.fetchone.return_value = (existing_actual_pickup_at,)
+    else:
+        cur.fetchone.return_value = None
     conn = MagicMock()
     queue = MagicMock()
     return cur, conn, queue
@@ -105,26 +121,16 @@ class TestFirePickupSqlRealignment:
         assert "SELECT decision_log_id FROM app_private.offer_history" in co_sql
         assert "WHERE id = %s::bigint" in co_sql
 
-    def test_rowcount_zero_on_offer_history_returns_failure(self):
-        """If offer_history UPDATE writes 0 rows, return failure tuple."""
-        cur, conn, queue = _setup_cur_and_queue()
+    def test_offer_not_found_via_select_returns_failure(self):
+        """Offer absent from offer_history → SELECT returns None → failure.
 
-        # Make rowcount return 1 for everything EXCEPT the offer_history UPDATE.
-        # We model this by tracking which call we're on and checking the SQL.
-        call_count = {"n": 0}
-        rowcount_values = []
-
-        def execute_side_effect(sql, *_args):
-            call_count["n"] += 1
-            # offer_history UPDATE is the 2nd execute() call in FirePickup
-            # (after pms UPDATE). Set rowcount=0 only for it.
-            if "UPDATE app_private.offer_history" in sql and "actual_pickup_lat" in sql:
-                cur.rowcount = 0
-            else:
-                cur.rowcount = 1
-            rowcount_values.append(cur.rowcount)
-
-        cur.execute.side_effect = execute_side_effect
+        Renamed from test_rowcount_zero_on_offer_history_returns_failure
+        (2026-05-30): the Rule XV idempotency guard moved the
+        offer-existence check from the offer_history UPDATE's rowcount
+        to a leading SELECT. Semantics preserved (nonexistent offer →
+        (False, "fire_pickup_zero_rows")); detection mechanism changed.
+        """
+        cur, conn, queue = _setup_cur_and_queue(offer_exists=False)
 
         action = FirePickup(offer_id="9999999")  # nonexistent
         executed, err = _execute_action(
@@ -133,6 +139,18 @@ class TestFirePickupSqlRealignment:
         )
         assert executed is False
         assert err == "fire_pickup_zero_rows"
+
+        # No cache UPDATEs should have run — we exited at the leading SELECT.
+        sqls = _executed_sql(cur)
+        assert not any("UPDATE app_private.offer_history" in s for s in sqls), (
+            "FirePickup must not attempt offer_history UPDATE when SELECT "
+            "proved the offer doesn't exist"
+        )
+        assert not any("UPDATE app_private.pickup_market_signals" in s
+                       for s in sqls), (
+            "FirePickup must not attempt pms UPDATE when SELECT proved the "
+            "offer doesn't exist"
+        )
 
     def test_rowcount_zero_on_pms_does_not_fail(self):
         """pms zero-row UPDATE is normal (sparse table); must NOT fail."""
@@ -153,6 +171,151 @@ class TestFirePickupSqlRealignment:
         # pms zero-row is NOT a failure condition.
         assert executed is True
         assert err is None
+
+
+# ============================================================================
+# TestFirePickupRuleXvIdempotency — Rule XV: Observation Over Narrative
+# ============================================================================
+#
+# When a FirePickupObservation already wrote actual_pickup_at at the true
+# pickup location (e.g. while §XVIII lost-mode was active), a subsequent
+# FirePickup arriving after lost-mode lifts MUST NOT overwrite that cache
+# write with the FirePickup's (potentially wrong-location) coordinates.
+# Rule XV: "We would rather have a perfectly populated map and a 'Lost'
+# narrative than a 'Found' narrative and a blank map."
+#
+# These tests pin the behavior introduced 2026-05-30 in response to
+# pickup 5 of that drive (offer 8585: Observation fired correctly at the
+# true pickup (30.0278, -95.4203) at 13:59:31; FirePickup fired 10min
+# later at the wrong location (30.0221, -95.3900) and overwrote
+# offer_history.actual_pickup_at with the wrong timestamp and lat/lng).
+# See docs/RECON_IMPERIAL_VALLEY_PICKUP5_2026-05-30.md VERDICT section.
+
+
+class TestFirePickupRuleXvIdempotency:
+    """Rule XV: FirePickup must preserve a prior Observation's cache write."""
+
+    def test_catchup_skips_cache_updates(self):
+        """FirePickup after Observation skips both pms and offer_history UPDATEs.
+
+        Cache is the Observation's correct write; narrative still binds.
+        """
+        import datetime
+        prior_fire_time = datetime.datetime(
+            2026, 5, 30, 13, 59, 31, 615027,
+            tzinfo=datetime.timezone.utc,
+        )
+        cur, conn, queue = _setup_cur_and_queue(
+            existing_actual_pickup_at=prior_fire_time,
+        )
+
+        action = FirePickup(offer_id="8585")
+        executed, err = _execute_action(
+            action, cur, conn, "driver-x", queue,
+            cluster=_FakeCluster(), cumulative_miles=67.46,
+        )
+
+        assert executed is True
+        assert err is None
+
+        sqls = _executed_sql(cur)
+        # NO cache UPDATEs should have run.
+        assert not any("UPDATE app_private.offer_history" in s for s in sqls), (
+            "Rule XV violated: FirePickup ran offer_history UPDATE despite "
+            "actual_pickup_at being already populated by prior Observation"
+        )
+        assert not any("UPDATE app_private.pickup_market_signals" in s
+                       for s in sqls), (
+            "Rule XV violated: FirePickup ran pms UPDATE despite "
+            "actual_pickup_at being already populated by prior Observation"
+        )
+        # No community_offers INSERT either — it derives from pms which
+        # we are NOT touching in the catch-up case.
+        assert not any("INSERT INTO public.community_offers" in s
+                       for s in sqls), (
+            "Rule XV violated: FirePickup ran community_offers INSERT in "
+            "the Observation-catch-up case"
+        )
+
+    def test_catchup_still_binds_narrative(self):
+        """FirePickup catch-up MUST bind current_offer_id (queue.bind)."""
+        import datetime
+        prior_fire_time = datetime.datetime(
+            2026, 5, 30, 13, 59, 31,
+            tzinfo=datetime.timezone.utc,
+        )
+        cur, conn, queue = _setup_cur_and_queue(
+            existing_actual_pickup_at=prior_fire_time,
+        )
+
+        action = FirePickup(offer_id="8585")
+        _execute_action(
+            action, cur, conn, "driver-x", queue,
+            cluster=_FakeCluster(), cumulative_miles=67.46,
+        )
+
+        # queue.bind is the narrative bind; catch-up MUST still do it.
+        queue.bind.assert_called_once_with("8585", cur)
+
+    def test_normal_path_offer_history_update_has_idempotency_guard(self):
+        """Normal-path offer_history UPDATE must include `actual_pickup_at IS NULL`.
+
+        Defense-in-depth: even when the leading SELECT proved
+        actual_pickup_at IS NULL, the UPDATE's WHERE keeps the guard so
+        a race between SELECT and UPDATE can't corrupt the cache.
+        """
+        cur, conn, queue = _setup_cur_and_queue()  # default: not yet fired
+        action = FirePickup(offer_id="7771")
+        _execute_action(
+            action, cur, conn, "driver-x", queue,
+            cluster=_FakeCluster(), cumulative_miles=145.5,
+        )
+
+        sqls = _executed_sql(cur)
+        oh_sql = next(s for s in sqls
+                      if "UPDATE app_private.offer_history" in s
+                      and "actual_pickup_lat" in s)
+        # The guard must appear in the WHERE clause.
+        assert "actual_pickup_at IS NULL" in oh_sql, (
+            "Rule XV idempotency guard missing on offer_history UPDATE"
+        )
+
+    def test_normal_path_pms_update_has_idempotency_guard(self):
+        """Normal-path pms UPDATE must include `actual_pickup_at IS NULL`."""
+        cur, conn, queue = _setup_cur_and_queue()  # default: not yet fired
+        action = FirePickup(offer_id="7771")
+        _execute_action(
+            action, cur, conn, "driver-x", queue,
+            cluster=_FakeCluster(), cumulative_miles=145.5,
+        )
+
+        sqls = _executed_sql(cur)
+        pms_sql = next(s for s in sqls if "pickup_market_signals" in s)
+        assert "actual_pickup_at IS NULL" in pms_sql, (
+            "Rule XV idempotency guard missing on pms UPDATE"
+        )
+
+    def test_normal_path_first_fire_still_runs_all_updates(self):
+        """Sanity: normal first-fire path must still run pms + oh + co."""
+        cur, conn, queue = _setup_cur_and_queue()  # default: not yet fired
+        action = FirePickup(offer_id="7771")
+        executed, err = _execute_action(
+            action, cur, conn, "driver-x", queue,
+            cluster=_FakeCluster(), cumulative_miles=145.5,
+        )
+
+        assert executed is True
+        assert err is None
+
+        sqls = _executed_sql(cur)
+        assert any("UPDATE app_private.pickup_market_signals" in s
+                   for s in sqls), "Normal path must run pms UPDATE"
+        assert any("UPDATE app_private.offer_history" in s
+                   and "actual_pickup_lat" in s for s in sqls), (
+            "Normal path must run offer_history UPDATE"
+        )
+        assert any("INSERT INTO public.community_offers" in s
+                   for s in sqls), "Normal path must run community_offers INSERT"
 
 
 # ============================================================================

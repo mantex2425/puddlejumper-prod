@@ -227,6 +227,74 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 # Defensive guard — heartbeat path supplies cluster, manual
                 # path supplies fallback_lat/lng; one of them must resolve.
                 return False, "fire_pickup_without_coords"
+
+            # [Rule XV Observation Over Narrative — 2026-05-30] Before any
+            # cache writes, detect whether this offer was already fired by
+            # a prior FirePickupObservation. If so, this FirePickup is a
+            # "narrative catch-up": lost-mode demoted the original fire to
+            # Observation (which correctly wrote the cache at the true
+            # pickup location and moment), then lost-mode lifted and the
+            # matcher re-emitted FirePickup — potentially minutes later
+            # and miles away from where the rider actually got in.
+            #
+            # Mandate per Rule XV: preserve the Observation's cache write
+            # (offer_history.actual_pickup_*, pms.actual_pickup_*, and
+            # community_offers — all populated at the true location). DO
+            # still bind the narrative (queue.bind → current_offer_id)
+            # and write the current nail position (driver_trip_state's
+            # nailed_pickup_* fields are a per-driver state snapshot, not
+            # a per-offer record, so they reflect the current fire).
+            #
+            # See docs/RECON_IMPERIAL_VALLEY_PICKUP5_2026-05-30.md VERDICT
+            # for the verbatim 1.8mi / 10-min geographic drift this guard
+            # prevents. Pickup 5 of the 2026-05-30 drive corrupted
+            # offer_history.actual_pickup_at + .actual_pickup_lat/lng
+            # because this guard was absent.
+            cur.execute("""
+                SELECT actual_pickup_at FROM app_private.offer_history
+                WHERE id = %s::bigint
+            """, (action.offer_id,))
+            existing_row = cur.fetchone()
+            if existing_row is None:
+                # Offer not in offer_history — matcher must never emit
+                # FirePickup for an unknown id. Preserves the original
+                # "fire_pickup_zero_rows" failure mode semantically.
+                log.warning(
+                    "[α-fix] FirePickup offer not found in offer_history "
+                    "for offer_id=%s",
+                    action.offer_id,
+                )
+                return False, "fire_pickup_zero_rows"
+            already_fired_at = existing_row[0]
+            if already_fired_at is not None:
+                # [Rule XV catch-up] Cache write was already captured by a
+                # prior fire (typically a FirePickupObservation while
+                # lost-mode was active). Bind narrative, snapshot driver
+                # nail-state, acquire the §XVI.G lock — but DO NOT
+                # overwrite the cache (Rule XV invariant: preserve the
+                # observation's location data; narrative is secondary).
+                write_nailed_position(cur, driver_id, 'pickup',
+                                      nail_lat, nail_lng, 0)
+                queue.bind(action.offer_id, cur)
+                acquire_lock(
+                    cur=cur,
+                    driver_id=driver_id,
+                    offer_id=action.offer_id,
+                    pudo_type='pickup',
+                    fired_at=datetime.datetime.now(datetime.timezone.utc),
+                    fired_lat=nail_lat,
+                    fired_lng=nail_lng,
+                    fired_cumulative_miles=cumulative_miles,
+                )
+                log.info(
+                    "[Rule XV catch-up] FirePickup offer=%s: cache "
+                    "preserved (prior fire at %s), narrative bound",
+                    action.offer_id, already_fired_at,
+                )
+                return True, None
+
+            # Normal path: first fire for this offer. Cache writes +
+            # narrative bind together.
             write_nailed_position(cur, driver_id, 'pickup',
                                   nail_lat, nail_lng, 0)
             queue.bind(action.offer_id, cur)
@@ -234,6 +302,13 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # [α-fix] pickup_market_signals: actual_pickup_* + nail_it elevation.
             # pms.offer_id REFERENCES decision_log(id), but action.offer_id is
             # offer_history.id; translate via subquery at schema boundary.
+            #
+            # [Rule XV 2026-05-30] AND actual_pickup_at IS NULL — defense-
+            # in-depth. The SELECT above proved offer_history's actual_pickup_at
+            # is NULL in this transaction, but the guard also makes the UPDATE
+            # idempotent under race conditions and makes the symmetry with
+            # FirePickupObservation's idempotency contract (driver_heartbeat.py
+            # FPO handler) explicit at the call site.
             cur.execute("""
                 UPDATE app_private.pickup_market_signals
                 SET actual_pickup_lat     = %s,
@@ -246,12 +321,19 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     SELECT decision_log_id FROM app_private.offer_history
                     WHERE id = %s::bigint
                 )
+                  AND actual_pickup_at IS NULL
             """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
 
             # [α-fix] offer_history: canonical PUDO record. action.offer_id
-            # IS offer_history.id, so target it directly. Rowcount guard fires
-            # on zero-row UPDATE — that means the offer doesn't exist (logged
-            # WARNING + return failure).
+            # IS offer_history.id, so target it directly.
+            #
+            # [Rule XV 2026-05-30] AND actual_pickup_at IS NULL — same
+            # idempotency contract FirePickupObservation has advertised since
+            # the α-fix (see FPO handler comment "subsequent ... for the same
+            # offer is a no-op"). Without this guard, a FirePickup arriving
+            # AFTER a FirePickupObservation overwrites the Observation's
+            # correct cache write with whatever location the current
+            # heartbeat is at, violating Rule XV.
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_pickup_lat                   = %s,
@@ -265,15 +347,21 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
                     expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval
                 WHERE id = %s::bigint
+                  AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles, cumulative_miles, cumulative_miles,
                 action.offer_id,
             ))
             if cur.rowcount == 0:
+                # Should not happen: the SELECT above proved this offer
+                # exists AND actual_pickup_at IS NULL in the same
+                # transaction. Zero rows here means a race or transaction
+                # anomaly — log loudly and fail.
                 log.warning(
                     "[α-fix] FirePickup offer_history UPDATE wrote 0 rows "
-                    "for offer_id=%s — offer not found in offer_history",
+                    "for offer_id=%s after SELECT confirmed actual_pickup_at "
+                    "IS NULL — race or transactional anomaly",
                     action.offer_id,
                 )
                 return False, "fire_pickup_zero_rows"
