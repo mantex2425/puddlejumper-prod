@@ -1531,12 +1531,60 @@ has no such matrix because the underlying bits ARE the state.
 
 Lost-mode exits automatically when either bit flips:
 
-- `current_offer_id` binds (next clean ACCEPT cycle engages narrative), or
+- `current_offer_id` binds (see "Binding paths" below), or
 - The queue empties of unmatched ACCEPTED offers (existing
   `LIVE_OFFER_PREDICATE_SQL` GC sweeps them per §XIV.H — no parallel
   cleanup process)
 
 There is no `ClearLostMode` action. There is no stored flag to clear.
+
+##### Binding paths (2026-05-31 amendment)
+
+`current_offer_id` binds via exactly two paths in production. Both
+live inside the `FirePickup` / `FirePickupObservation` execution
+handlers; no HTTP endpoint, webhook, or offer-acceptance flow binds
+`current_offer_id` (binding on accept would violate §XVI advice-
+blindness).
+
+1. **Normal narrative path** — when lost-mode is False, the matcher
+   emits a `FirePickup` action; its handler calls
+   `driver_queue.bind(offer_id)`. This is the cold-mode bind, used
+   on every subsequent pickup once the trap is broken.
+
+2. **§XVIII cold-start bind** — when an FPO fires AND the heartbeat's
+   alive-unpicked set is exactly `{action.offer_id}`, the FPO handler
+   ALSO calls `driver_queue.bind(offer_id)`. The bind is additive: the
+   FPO's cache writes (`pms`, `offer_history`, `community_offers`) run
+   unconditionally per Rule XV regardless of whether the bind fires.
+
+The cold-start bind closes a structural defect ratified
+2026-05-31: without it, a driver's first pickup of any shift is
+deterministically demoted to `FirePickupObservation` (because bit 2
+trips the moment the first offer arrives), and the demotion's silence
+on `current_offer_id` means lost-mode never releases. The bind only
+fires in the unambiguous case — "exactly ONE alive unpicked offer
+AND it is this one" — which is precisely the case where the queue's
+narrative is uncontested. Multiple alive-unpicked offers
+(`len(set) >= 2`) preserve the §XIV.I §5.3 ambiguity discipline
+(stay observation-only, defer narrative).
+
+The bind path is defined inside the Observation handler rather than
+in `dispatch.py` because the demotion to Observation is a `dispatch.py`
+concern; the conditional re-binding is a runtime semantic that depends
+on the live queue state, which is naturally available at the
+handler's call site.
+
+**Single-source-of-truth contract.** The alive-unpicked set the bind
+gate reads MUST be the same set the lost-mode detector evaluates
+against. To enforce this structurally, `_detect_lost_mode` and the
+cold-start bind both read from `_get_alive_unpicked_offer_ids`,
+which is the single canonical definition of the §XVIII bit-2
+predicate. A parallel definition (hand-rolled SQL in either consumer)
+would silently drift the bind from the trigger and is forbidden — see
+`tests/test_live_offer_predicate_imports.py::test_detect_lost_mode_delegates_to_helper`.
+
+See `docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md` for the full
+forensic record of the original trap.
 
 ### B. The Physical Sensor Axiom
 

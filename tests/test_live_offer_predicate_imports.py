@@ -59,10 +59,60 @@ class TestPredicateStructuralContract:
             + ", ".join(offenders)
         )
 
-    def test_detect_lost_mode_uses_horizon_predicate(self):
-        """_detect_lost_mode body must reference the predicate and
-        must NOT contain the old pickup-state-proxy or 2-hour-window
-        clauses.
+    def test_get_alive_unpicked_offer_ids_uses_horizon_predicate(self):
+        """_get_alive_unpicked_offer_ids body must reference the canonical
+        predicate and must NOT contain the old pickup-state-proxy or
+        2-hour-window clauses.
+
+        Updated 2026-05-31 (§XVIII cold-start bind sprint): the predicate
+        body was extracted from _detect_lost_mode into a new helper
+        _get_alive_unpicked_offer_ids that returns the set of alive-
+        unpicked offer IDs (so the FirePickupObservation cold-start bind
+        can consume the same set). _detect_lost_mode now delegates to
+        this helper. Single source of truth — the body must live exactly
+        here. test_detect_lost_mode_delegates_to_helper enforces the
+        delegation; this test enforces the body's content.
+        """
+        text = _module_text("driver_heartbeat.py")
+        m = re.search(
+            r"def _get_alive_unpicked_offer_ids\(.*?(?=\n(?:def |class ))",
+            text,
+            re.DOTALL,
+        )
+        assert m is not None, "_get_alive_unpicked_offer_ids function not found"
+        body_with_docstring = m.group(0)
+        # Strip the docstring before checking for old proxies — the
+        # new docstring explains the old rule by name, which would
+        # false-positive this test.
+        body = re.sub(r'"""(?:.|\n)*?"""', '', body_with_docstring, count=1)
+
+        assert "LIVE_OFFER_PREDICATE_SQL" in body, (
+            "_get_alive_unpicked_offer_ids must use LIVE_OFFER_PREDICATE_SQL"
+        )
+        assert "live_offer_predicate_params" in body, (
+            "_get_alive_unpicked_offer_ids must pass the params helper to "
+            "splice the bind tuple"
+        )
+        assert "interval '2 hours'" not in body, (
+            "_get_alive_unpicked_offer_ids still has the old 2-hour wall-clock proxy"
+        )
+        # §XVIII bit-2 trigger (2026-05-16, recast 2026-05-31): the
+        # `actual_pickup_at IS NULL` clause expresses "queue contains an
+        # offer whose pickup has not been observed." See CANONICAL_RULES §XVIII.A.
+        assert "actual_pickup_at IS NULL" in body, (
+            "_get_alive_unpicked_offer_ids missing §XVIII bit-2 trigger "
+            "`actual_pickup_at IS NULL`"
+        )
+
+    def test_detect_lost_mode_delegates_to_helper(self):
+        """_detect_lost_mode must delegate to _get_alive_unpicked_offer_ids,
+        not duplicate the query body.
+
+        Added 2026-05-31 alongside the helper extraction. Without this
+        test, a future commit could re-inline the query into
+        _detect_lost_mode (well-intentioned consolidation) and silently
+        recreate the parallel-function drift surface the helper was
+        created to eliminate.
         """
         text = _module_text("driver_heartbeat.py")
         m = re.search(
@@ -72,28 +122,21 @@ class TestPredicateStructuralContract:
         )
         assert m is not None, "_detect_lost_mode function not found"
         body_with_docstring = m.group(0)
-        # Strip the docstring before checking for old proxies — the
-        # new docstring explains the old rule by name, which would
-        # false-positive this test.
         body = re.sub(r'"""(?:.|\n)*?"""', '', body_with_docstring, count=1)
 
-        assert "LIVE_OFFER_PREDICATE_SQL" in body, (
-            "_detect_lost_mode must use LIVE_OFFER_PREDICATE_SQL"
+        assert "_get_alive_unpicked_offer_ids" in body, (
+            "_detect_lost_mode must delegate to _get_alive_unpicked_offer_ids "
+            "(single-source-of-truth contract per 2026-05-31 cold-start fix)"
         )
-        assert "live_offer_predicate_params" in body, (
-            "_detect_lost_mode must pass the params helper to splice "
-            "the bind tuple"
+        # Negative: the query body must NOT live here anymore.
+        assert "LIVE_OFFER_PREDICATE_SQL" not in body, (
+            "_detect_lost_mode must NOT reference LIVE_OFFER_PREDICATE_SQL "
+            "directly — the predicate lives in _get_alive_unpicked_offer_ids. "
+            "Delegate, don't duplicate."
         )
-        assert "interval '2 hours'" not in body, (
-            "_detect_lost_mode still has the old 2-hour wall-clock proxy"
-        )
-        # §XVIII bit-2 trigger (2026-05-16): the `actual_pickup_at IS NULL`
-        # clause is back, with new semantics. It is no longer a proxy for
-        # "narrative broken" — it now expresses "queue contains an offer
-        # whose pickup has not been observed." See CANONICAL_RULES §XVIII.A.
-        assert "actual_pickup_at IS NULL" in body, (
-            "_detect_lost_mode missing §XVIII bit-2 trigger "
-            "`actual_pickup_at IS NULL`"
+        assert "actual_pickup_at IS NULL" not in body, (
+            "_detect_lost_mode must NOT reference the bit-2 SQL clause "
+            "directly — that lives in _get_alive_unpicked_offer_ids."
         )
 
     def test_detect_lost_mode_signature(self):
