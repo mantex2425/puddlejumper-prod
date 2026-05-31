@@ -162,9 +162,9 @@ class TestPredicateStructuralContract:
             "reference_time, last_odometer_move_at=None)"
         )
 
-    def test_detect_lost_mode_caller_threads_miles(self):
-        """The caller in driver_heartbeat.py must thread cumulative_miles,
-        the captured _heartbeat_now reference time, AND the
+    def test_predicate_caller_threads_miles(self):
+        """The heartbeat caller must thread cumulative_miles, the
+        captured _heartbeat_now reference time, AND the
         effective_last_move staleness timestamp computed by the
         pre-fetch+effective-compute block.
 
@@ -172,14 +172,26 @@ class TestPredicateStructuralContract:
         instead of 5. The 6th, effective_last_move, is computed in the
         heartbeat handler from prior driver_trip_state row + current
         cumulative_miles per the §XIV.H pre-fetch pattern.
+
+        Renamed 2026-05-31: the call target changed from _detect_lost_mode
+        to _get_alive_unpicked_offer_ids when the predicate body was
+        extracted into the new helper (the bind on FirePickupObservation
+        needs the SET of alive-unpicked IDs, not just the bool from the
+        old helper). _detect_lost_mode now delegates and is no longer
+        called by the heartbeat path. The thread-the-right-params
+        property is enforced against the new symbol, but the intent
+        (heartbeat caller must pass cumulative_miles + _heartbeat_now +
+        effective_last_move to the predicate evaluator) is unchanged.
         """
         text = _module_text("driver_heartbeat.py")
         assert (
-            "_detect_lost_mode(cur, driver_id, queue_ids_int, "
-            "cumulative_miles, _heartbeat_now, effective_last_move)" in text
+            "_get_alive_unpicked_offer_ids(\n"
+            "        cur, driver_id, cumulative_miles, _heartbeat_now, effective_last_move,\n"
+            "    )" in text
         ), (
-            "_detect_lost_mode caller signature drift: must thread "
-            "cumulative_miles, _heartbeat_now, and effective_last_move"
+            "Predicate caller signature drift: heartbeat must thread "
+            "cumulative_miles, _heartbeat_now, and effective_last_move "
+            "to _get_alive_unpicked_offer_ids"
         )
 
     def test_predicate_does_not_use_server_clock(self):
