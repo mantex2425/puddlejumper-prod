@@ -183,16 +183,29 @@ class TestStalePointerReconciliation:
         or in a unit-test mock where _project_offers returns []).
         Without the dead-predicate gate, clearing here would race
         with the next FirePickup attempting to bind the same offer.
+
+        Clock note: this test's `created_at` MUST be computed against
+        the live wall-clock, not the module-level _NOW constant. The
+        helper uses _now() internally (per ratified design — no
+        reference_time threading), so a fixed _NOW would drift past
+        the 4h ceiling whenever real UTC moves past _NOW + 4h,
+        spuriously tripping the abandonment branch. The other tests
+        in this file are robust to clock drift by accident (their
+        fixtures are deliberately ≥4h old). This test's "recent"
+        semantic requires live-clock anchoring.
         """
         cur = MagicMock()
-        # Recent (well within 4h), no dropoff, row exists.
+        # Recent (well within 4h), no dropoff, row exists. Anchored to
+        # live wall-clock for deterministic comparison against the
+        # helper's internal _now() call.
+        real_now = datetime.datetime.now(datetime.timezone.utc)
         _wire_cursor(
             cur,
             stale_pointer_row={"current_offer_id": _STALE_OFFER_ID},
             live_offers=[],
             dead_check_row={
                 "actual_dropoff_at": None,
-                "created_at": _NOW - datetime.timedelta(minutes=10),
+                "created_at": real_now - datetime.timedelta(minutes=10),
             },
         )
 
