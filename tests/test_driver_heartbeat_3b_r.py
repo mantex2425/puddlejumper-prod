@@ -283,11 +283,17 @@ class TestGetLastKnownAnchorId:
 class TestDetectLostMode:
 
     def test_no_orphan_returns_false(self):
-        cur = _mock_cursor(fetchone_value=None)
+        # 2026-05-31: predicate body extracted to _get_alive_unpicked_offer_ids
+        # which reads cur.fetchall() (returns the SET of alive-unpicked ids),
+        # not cur.fetchone(). _detect_lost_mode delegates and returns len > 0.
+        # Empty rows -> empty set -> False.
+        cur = _mock_cursor(rows=[])
         assert _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW) is False
 
     def test_orphan_present_returns_true(self):
-        cur = _mock_cursor(fetchone_value={"id": 7770})
+        # 2026-05-31: see test_no_orphan_returns_false comment. Non-empty
+        # rows -> non-empty set -> True.
+        cur = _mock_cursor(rows=[{"id": 7770}])
         assert _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW) is True
 
     def test_sql_does_not_filter_by_app_verdict(self):
