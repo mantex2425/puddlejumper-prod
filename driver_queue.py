@@ -246,6 +246,73 @@ def _now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+def _is_offer_definitively_dead(cur, offer_id, reference_time=None):
+    """Return a reason string if `offer_id` is definitively dead, else None.
+
+    "Definitively dead" requires POSITIVE evidence from an existing
+    offer_history row. Absence is NOT death — bind() can outrun
+    offer_history INSERT in ingestion paths (notably the test_endpoints
+    seed_offer flow), so a missing row is treated as transient.
+    Ratified 2026-05-31 (see fix/stale-current-offer-id-reconciliation
+    brief §3 clarification): "Drop the orphan branch — clear only on
+    terminated or abandoned, both requiring positive evidence of death
+    from an existing row. Absence-as-death races mid-ingestion."
+
+    Return values (string reasons used in reconciliation log lines AND
+    docs/CANONICAL_RULES.md §XVIII.A):
+      "terminated" — actual_dropoff_at IS NOT NULL (trip fired dropoff)
+      "abandoned"  — created_at older than GC_ABANDONMENT_CEILING_HOURS
+                     against reference_time (4h cap, the same canonical
+                     ceiling LIVE_OFFER_PREDICATE_SQL enforces)
+      None         — row absent, OR row present and neither dead
+                     condition holds (transient — DO NOT reconcile)
+
+    Order is deterministic for log clarity (terminated → abandoned):
+    a row could satisfy both clauses (old AND fired-dropoff); we report
+    the more specific cause first. The two conditions are individually
+    sufficient, never required together.
+
+    Args:
+        cur: psycopg2 cursor; RealDictCursor or anything where fetchone
+            returns a dict-like with the queried columns.
+        offer_id: offer_history.id (str-castable to bigint).
+        reference_time: UTC datetime, optional. Defaults to _now().
+            Pass an explicit value from replay harnesses to make the
+            abandonment check deterministic against historical data.
+
+    Used by DriverQueue.snapshot() to gate the active clearing of a
+    stale driver_trip_state.current_offer_id pointer. See
+    docs/CANONICAL_RULES.md §XVIII.A "Stale-pointer reconciliation"
+    for the canonical specification.
+    """
+    if reference_time is None:
+        reference_time = _now()
+
+    cur.execute(
+        """
+        SELECT actual_dropoff_at, created_at
+        FROM app_private.offer_history
+        WHERE id = %s::bigint
+        """,
+        (offer_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        # Absent — transient, NOT dead. Reconciliation MUST skip.
+        # The bind/snapshot ingestion race window can leave a
+        # current_offer_id pointer ahead of its offer_history row;
+        # the next heartbeat after the INSERT commits will see the
+        # row and route normally.
+        return None
+    if row["actual_dropoff_at"] is not None:
+        return "terminated"
+    import datetime
+    ceiling = reference_time - datetime.timedelta(hours=GC_ABANDONMENT_CEILING_HOURS)
+    if row["created_at"] < ceiling:
+        return "abandoned"
+    return None
+
+
 def live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at=None):
     """Build the params tuple for LIVE_OFFER_PREDICATE_SQL.
 
@@ -354,12 +421,37 @@ class DriverQueue:
 
         Applies the L-19 invariant: if `bound_offer_id` is set but does
         NOT appear in the projected offer set, return None for the hint
-        and emit a WARNING tagged INVARIANT_VIOLATION carrying the full
-        forensic payload (driver_id, stale bound_offer_id, sorted queue
-        offer_ids, queue size). The DB row is NOT corrected here — the
-        next bind() or unbind() naturally overwrites it. Self-healing on
-        read keeps this module read-only-by-default; only the dispatch
-        wiring layer mutates the column.
+        and reconcile the DB pointer when the bound offer is
+        DEFINITIVELY DEAD per `_is_offer_definitively_dead`. Two
+        outcomes:
+
+          - Dead (terminated OR abandoned, per existing offer_history
+            row): issue id-guarded `UPDATE driver_trip_state SET
+            current_offer_id = NULL WHERE driver_id = %s AND
+            current_offer_id = %s` and emit INFO. The id-guarded WHERE
+            ensures a concurrent fresh bind() to a different offer
+            cannot be clobbered. Ratified 2026-05-31 to fix the
+            offer 8585 / offer 8657 class — pickup fired, dropoff
+            never fired (lost-mode, GC-reaped dropoff leg), pointer
+            dangled across shifts because "next bind/unbind" never
+            arrived in lost-mode.
+
+          - Not dead (offer is transient — row absent mid-ingestion,
+            OR present but recent + no dropoff): emit the historical
+            WARNING tagged INVARIANT_VIOLATION carrying the full
+            forensic payload. DB row is NOT touched. Preserves the
+            original L-19 self-heal semantics for genuinely transient
+            cases. This is the closed-race version: a live offer that
+            just hasn't projected yet (mid-snapshot, mid-bind, network
+            blip) fails the dead predicate and is left alone.
+
+        Either outcome returns `QueueSnapshot(bound_offer_id=None)` —
+        the in-memory hint always self-heals; only the DB write
+        differs between the two branches.
+
+        See docs/CANONICAL_RULES.md §XVIII.A "Stale-pointer
+        reconciliation" for the canonical specification of the
+        dead predicate.
 
         Raises:
             RuntimeError: if no target_spec_builder was supplied at
@@ -384,16 +476,53 @@ class DriverQueue:
         # Apply L-19 invariant.
         if raw_bound is not None and raw_bound not in {o.offer_id for o in offers}:
             sorted_ids = sorted(o.offer_id for o in offers)
-            log.warning(
-                "[driver_queue] INVARIANT_VIOLATION: bound_offer_id points "
-                "outside queue. driver_id=%s bound_offer_id=%s "
-                "queue_size=%d queue_offer_ids=[%s]. Returning None for "
-                "hint; next bind/unbind will correct the DB pointer.",
-                self.driver_id,
-                raw_bound,
-                len(offers),
-                ",".join(sorted_ids),
-            )
+            dead_reason = _is_offer_definitively_dead(cur, raw_bound)
+            if dead_reason is not None:
+                # 2026-05-31: actively reconcile the stale DB pointer.
+                # The id-guarded WHERE makes the UPDATE idempotent AND
+                # safe under concurrent bind() — if another transaction
+                # bound a fresh offer_id between our _select_bound_offer_id
+                # read above and this UPDATE, the WHERE current_offer_id=%s
+                # clause fails to match and the UPDATE no-ops, preserving
+                # the fresh bind. See brief §2 "definitively-dead predicate
+                # closes the race by construction."
+                cur.execute(
+                    """
+                    UPDATE app_private.driver_trip_state
+                    SET current_offer_id = NULL
+                    WHERE driver_id = %s
+                      AND current_offer_id = %s
+                    """,
+                    (self.driver_id, raw_bound),
+                )
+                log.info(
+                    "[driver_queue] reconciled stale current_offer_id: "
+                    "driver_id=%s cleared_offer_id=%s reason=%s "
+                    "queue_size=%d queue_offer_ids=[%s]",
+                    self.driver_id,
+                    raw_bound,
+                    dead_reason,
+                    len(offers),
+                    ",".join(sorted_ids),
+                )
+            else:
+                # Not definitively dead — leave the DB pointer alone.
+                # Either the offer is mid-ingestion (row not yet in
+                # offer_history) or genuinely recent + still-alive
+                # but un-projected for some other reason. Either way,
+                # clearing would be premature. Next heartbeat re-runs
+                # the same predicate; if the row ever lands in a dead
+                # state, the next snapshot reconciles.
+                log.warning(
+                    "[driver_queue] INVARIANT_VIOLATION: bound_offer_id points "
+                    "outside queue but not definitively dead. driver_id=%s "
+                    "bound_offer_id=%s queue_size=%d queue_offer_ids=[%s]. "
+                    "Returning None for hint; DB pointer preserved (transient).",
+                    self.driver_id,
+                    raw_bound,
+                    len(offers),
+                    ",".join(sorted_ids),
+                )
             return QueueSnapshot(offers=offers, bound_offer_id=None)
 
         return QueueSnapshot(offers=offers, bound_offer_id=raw_bound)

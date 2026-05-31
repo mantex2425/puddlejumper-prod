@@ -1586,6 +1586,79 @@ would silently drift the bind from the trigger and is forbidden — see
 See `docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md` for the full
 forensic record of the original trap.
 
+##### Stale-pointer reconciliation (2026-05-31 amendment)
+
+The dual of the cold-start bind: when `current_offer_id` points at an
+offer that is NO LONGER live (the trip terminated abnormally, or the
+dropoff was GC-reaped), the pointer must clear so the next narrative
+can bind cleanly. The historical L-19 invariant in
+`DriverQueue.snapshot()` detected this case (`bound_offer_id NOT IN
+projected live queue`) but only WARNED and deferred DB correction to
+"next bind/unbind." In lost-mode that bind/unbind never arrives, so
+the pointer dangled across shifts — empirically confirmed by
+offers 8585 (May 30 pickup-5) and 8657 (May 31), both pickup-fired,
+dropoff never fired, pointer persistent.
+
+`snapshot()` now ACTIVELY clears the DB pointer when the stale offer
+is **definitively dead**. Definitive death requires POSITIVE evidence
+from an existing `offer_history` row — never inferred from absence:
+
+1. **`actual_dropoff_at IS NOT NULL`** — the trip explicitly terminated
+   via FireDropoff or FireDropoffObservation. Reason: `terminated`.
+2. **`created_at < (reference_time - INTERVAL 'GC_ABANDONMENT_CEILING_HOURS hours')`**
+   — the offer is past the canonical 4h abandonment ceiling
+   (`driver_queue.GC_ABANDONMENT_CEILING_HOURS`, the same constant
+   `LIVE_OFFER_PREDICATE_SQL` enforces, NEVER hardcoded). Reason:
+   `abandoned`.
+
+Order of evaluation (terminated → abandoned) is deterministic so
+reconciliation log lines have a stable cause; the two conditions are
+individually sufficient and never required together.
+
+**Absence is NOT death.** A `bound_offer_id` pointing at an
+offer_history row that doesn't exist (orphan) is treated as
+**transient**, not reconciled. The ingestion path (notably
+`test_endpoints.seed_offer`) can write `current_offer_id` BEFORE the
+offer_history INSERT commits — a same-transaction race window where
+the pointer is briefly "ahead of" its row. Clearing on absence would
+silently undo legitimate binds in that window. Two heartbeats later
+the row commits and the pointer is healthy; if the row never commits
+and ages past 4h, the abandonment branch reconciles it. There is no
+case where treating absence as transient strands a real defect — only
+delays it by ≤4h.
+
+The reconciling UPDATE is **id-guarded**:
+
+```sql
+UPDATE app_private.driver_trip_state
+SET current_offer_id = NULL
+WHERE driver_id = %s AND current_offer_id = %s
+```
+
+The `AND current_offer_id = %s` clause binds the SPECIFIC stale id
+detected during the snapshot read. If a concurrent transaction (a
+fresh FirePickup, the §XVIII cold-start bind from this same heartbeat
+chain, or a test_endpoint bind) wrote a different `current_offer_id`
+between the snapshot's SELECT and this UPDATE, the WHERE no-ops and
+the fresh bind is preserved. Without the id-guard, the UPDATE would
+clobber concurrent writes.
+
+The reconciling write is the ONLY production code path that clears
+`current_offer_id` based on read-detected staleness rather than an
+explicit dispatch action (FireDropoff / ClearNarrative / unbind).
+This is a deliberate, narrow, evidence-gated extension of the
+"only the dispatch wiring layer mutates the column" discipline that
+governed snapshot() previously.
+
+Single-source-of-truth contract for "definitively dead": the
+`_is_offer_definitively_dead(cur, offer_id, reference_time=None)`
+helper in `driver_queue.py` is the canonical predicate. No consumer
+may re-implement the dead conditions in hand-rolled SQL — same
+discipline as `_get_alive_unpicked_offer_ids` for the bit-2
+predicate. Pinned by
+`tests/test_driver_queue_reconcile_stale_pointer.py::test_transient_unprojected_live_offer_NOT_cleared`
+(the race-closure proof) and the absent-NOT-cleared sibling.
+
 ### B. The Physical Sensor Axiom
 
 > *"The driver's physical presence IS our sensor."*
