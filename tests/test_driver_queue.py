@@ -324,12 +324,24 @@ def test_snapshot_l19_invariant_violation_self_heals(caplog):
     offer_history row. snapshot() must (a) return None for the hint and
     (b) emit a WARNING tagged INVARIANT_VIOLATION carrying the full
     forensic payload.
+
+    Updated 2026-05-31: snapshot() now also consults
+    _is_offer_definitively_dead when the invariant trips. Two fetchone
+    returns are wired via side_effect — first the bound row (matches
+    pre-amendment behavior), then None (offer absent from
+    offer_history → TRANSIENT, NOT dead). The original WARNING
+    semantics are preserved on the transient branch; the dead-and-
+    reconcile branch is covered by tests in
+    tests/test_driver_queue_reconcile_stale_pointer.py.
     """
     q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
     cur = make_cursor()
     # Queue has offer 9000, but bound_offer_id points at 7712 (stale)
     cur.fetchall.return_value = [make_offer_row("9000")]
-    cur.fetchone.return_value = {"current_offer_id": "7712"}
+    cur.fetchone.side_effect = [
+        {"current_offer_id": "7712"},  # _select_bound_offer_id
+        None,                          # _is_offer_definitively_dead -> absent -> transient
+    ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
         snap = q.snapshot(cur)
@@ -353,11 +365,18 @@ def test_snapshot_l19_invariant_violation_self_heals(caplog):
 def test_snapshot_l19_violation_with_empty_queue(caplog):
     """The exact L-19 scenario: queue is empty (offers aged out), bound
     still set. Self-heal to None, log the full payload including empty
-    queue list."""
+    queue list.
+
+    Updated 2026-05-31: see test_snapshot_l19_invariant_violation_self_heals
+    comment for the fetchone.side_effect rationale.
+    """
     q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
     cur = make_cursor()
     cur.fetchall.return_value = []
-    cur.fetchone.return_value = {"current_offer_id": "7712"}
+    cur.fetchone.side_effect = [
+        {"current_offer_id": "7712"},  # _select_bound_offer_id
+        None,                          # _is_offer_definitively_dead -> absent
+    ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
         snap = q.snapshot(cur)
@@ -372,7 +391,11 @@ def test_snapshot_l19_violation_with_empty_queue(caplog):
 def test_snapshot_l19_violation_logs_sorted_ids(caplog):
     """Forensic stability: queue ID list in the warning is sorted, so a
     grep for a known-offending ID matches deterministically regardless
-    of created_at ordering."""
+    of created_at ordering.
+
+    Updated 2026-05-31: see test_snapshot_l19_invariant_violation_self_heals
+    comment for the fetchone.side_effect rationale.
+    """
     q = DriverQueue(DRIVER_ID, target_spec_builder=passthrough_builder)
     cur = make_cursor()
     cur.fetchall.return_value = [
@@ -380,7 +403,10 @@ def test_snapshot_l19_violation_logs_sorted_ids(caplog):
         make_offer_row("1111"),
         make_offer_row("5555"),
     ]
-    cur.fetchone.return_value = {"current_offer_id": "7712"}
+    cur.fetchone.side_effect = [
+        {"current_offer_id": "7712"},  # _select_bound_offer_id
+        None,                          # _is_offer_definitively_dead -> absent
+    ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
         q.snapshot(cur)

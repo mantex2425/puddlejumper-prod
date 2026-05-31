@@ -1607,12 +1607,26 @@ def post_heartbeat():
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     # ── LOAD ─────────────────────────────────────────────────────────
-    # DriverQueue.snapshot() applies the L-19 invariant on read: if
-    # bound_offer_id points outside the projected queue (e.g. seed_offer
-    # priming wrote the pointer but no live offer_history row exists),
-    # snap.bound_offer_id is None and a WARNING tagged INVARIANT_VIOLATION
-    # is logged. Heartbeat continues with the self-healed value, and
-    # FirePickup/FireDropoff naturally overwrite the DB pointer.
+    # DriverQueue.snapshot() applies the L-19 invariant on read AND
+    # actively reconciles the DB pointer when the stale bound offer is
+    # definitively dead (2026-05-31). Two outcomes when bound_offer_id
+    # points outside the projected queue:
+    #
+    #   - Dead (terminated dropoff OR >4h abandoned): snapshot() issues
+    #     an id-guarded UPDATE clearing current_offer_id, logs INFO
+    #     [reconciled stale current_offer_id]. Fixes the offer 8585 /
+    #     8657 class — pickup fired, dropoff never fired (lost-mode,
+    #     GC-reaped dropoff leg), pointer dangled across shifts
+    #     because "next bind/unbind" never arrived in lost-mode.
+    #
+    #   - Transient (offer present + recent, OR row absent mid-
+    #     ingestion): snapshot() preserves the DB pointer, logs
+    #     WARNING. Closes the race condition that motivated keeping
+    #     the original L-19 read-only design.
+    #
+    # Either way, snap.bound_offer_id is None for downstream consumers
+    # (the in-memory hint always self-heals). FirePickup/FireDropoff
+    # naturally overwrite the DB pointer when they fire in the future.
     queue = DriverQueue(driver_id, target_spec_builder=_bucket_to_target_spec)
     # §XIV.H Odometer-Staleness Gate (2026-05-19): pre-fetch the prior
     # cumulative_miles and last_odometer_move_at from the row that's about
