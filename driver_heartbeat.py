@@ -192,14 +192,18 @@ def _bucket_to_target_spec(address_text, lat, lng):
 
 def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     fallback_lat=None, fallback_lng=None,
-                    cumulative_miles=None):
+                    cumulative_miles=None,
+                    alive_unpicked_offer_ids=frozenset()):
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
       FirePickup             -> write_nailed_position(pickup) + UPDATE current_offer_id
       FireDropoff            -> write_nailed_position(dropoff) + UPDATE current_offer_id = NULL
       FirePickupObservation  -> cache writes only (pms + offer_history + community_offers);
-                                no narrative state change. Rule XV / §XIV.I §5.3 pickup loser.
+                                MAY bind current_offer_id when the queue contains exactly
+                                ONE alive-unpicked offer == this action's offer_id (the
+                                §XVIII cold-start exit, 2026-05-31). Rule XV / §XIV.I §5.3
+                                pickup loser otherwise.
       FireDropoffObservation -> observation record only (offer_history + pms.offer_status);
                                 no narrative state change. Rule XV / §XIV.I §5.3-mirror.
       ClearNarrative         -> queue.unbind only (UPDATE current_offer_id = NULL); no
@@ -211,6 +215,13 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
     cluster is diagnostics.cluster from WAI; centroid is the canonical
     PUDO position under the simplified architecture (no "corrected"
     coordinate step exists in the new flow).
+
+    alive_unpicked_offer_ids is the §XVIII bit-2 set as computed by
+    _get_alive_unpicked_offer_ids at the heartbeat's top. Pass-through
+    enables the FirePickupObservation cold-start bind to read the
+    same canonical set _detect_lost_mode evaluated against, avoiding
+    a parallel query. Default frozenset() preserves callers that pre-
+    date the cold-start fix (and tests that don't exercise the bind).
 
     Returns: (executed: bool, error: Optional[str])
       executed is True when a state-changing action ran (FirePickup,
@@ -561,6 +572,48 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 )
             """, (nail_lat, nail_lng, nail_lat, nail_lng, action.offer_id))
 
+            # [§XVIII cold-start bind — 2026-05-31] When the heartbeat's
+            # alive-unpicked set contains EXACTLY this fire's offer and
+            # nothing else, the queue's narrative is unambiguous — there
+            # is one and only one offer waiting on a pickup observation,
+            # and that observation is happening right now. Bind
+            # current_offer_id so the next heartbeat's lost-mode check
+            # flips False (bit 2 clears once this offer_history UPDATE
+            # writes actual_pickup_at), allowing normal narrative
+            # routing to resume.
+            #
+            # Sampling BEFORE the offer_history UPDATE below is the
+            # whole point: at this moment the firing offer is still
+            # in the alive-unpicked set, so the singleton-match gate
+            # reads as the brief's literal phrasing ("exactly ONE
+            # alive unpicked offer"). After the UPDATE, action.offer_id
+            # would be excluded and the gate would invert; that was
+            # the alternative phrasing in recon §Q3's sub-finding,
+            # rejected in favor of this one for reader clarity.
+            #
+            # The bind is ADDITIVE. Cache writes (pms above,
+            # offer_history below, community_offers further down) and
+            # the §XVI.G lock all run regardless. Rule XV preserved:
+            # the Observation's role as cache populator is unchanged;
+            # this only adds the narrative bind in the unambiguous case.
+            #
+            # The gate uses frozenset equality (not membership) so it
+            # falsifies cleanly whenever the queue has any other
+            # alive-unpicked offer — count>=2 stays ambiguous,
+            # count==0 means this fire is a no-op redo (idempotency
+            # case) and must not bind.
+            #
+            # See docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md
+            # for the full diagnosis and §11.2-§11.3 ratification.
+            if alive_unpicked_offer_ids == frozenset({str(action.offer_id)}):
+                queue.bind(action.offer_id, cur)
+                log.info(
+                    "[§XVIII cold-start bind] FirePickupObservation "
+                    "offer=%s narrative bound (alive-unpicked queue "
+                    "singleton matched fire)",
+                    action.offer_id,
+                )
+
             # [α-fix mirror] offer_history: per-offer observation record. The
             # WHERE actual_pickup_at IS NULL guard makes this idempotent — a
             # subsequent FirePickupObservation for the same offer is a no-op.
@@ -902,6 +955,52 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, referenc
     return str(row["id"]) if row else None
 
 
+def _get_alive_unpicked_offer_ids(cur, driver_id, current_cumulative_miles,
+                                  reference_time, last_odometer_move_at=None):
+    """Return the set of offer_history.id values that are predicate-alive
+    AND have no pickup observation recorded yet.
+
+    Single canonical definition of the §XVIII bit-2 predicate, factored
+    out 2026-05-31 so the cold-start bind in the FirePickupObservation
+    handler can read the same set that _detect_lost_mode evaluates
+    against (recon: RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md §2.1
+    no-hand-rolled-predicate constraint). _detect_lost_mode delegates
+    to this helper, so the predicate has exactly one body.
+
+    The set composition mirrors _detect_lost_mode's prior query:
+    LIVE_OFFER_PREDICATE_SQL (the canonical horizon predicate from
+    driver_queue.py) + `AND oh.actual_pickup_at IS NULL`. No new
+    filters, no divergent definition of "alive."
+
+    Args:
+        cur: psycopg2 cursor.
+        driver_id: Firebase UID.
+        current_cumulative_miles: float or None. When None, the distance
+            axis of LIVE_OFFER_PREDICATE_SQL short-circuits to TRUE
+            (time-only fallback). Production heartbeat path always supplies.
+        reference_time: UTC datetime; the heartbeat's reference point for
+            horizon evaluation.
+        last_odometer_move_at: UTC datetime or None; the staleness-gate
+            anchor. Permissive on NULL.
+
+    Returns frozenset[str] of offer_history.id values (string-typed
+    to match action.offer_id at call sites that compare them).
+    """
+    cur.execute(
+        f"""
+        SELECT oh.id
+        FROM app_private.offer_history oh
+        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+        WHERE dl.driver_id = %s
+          AND oh.actual_pickup_at IS NULL
+          AND {LIVE_OFFER_PREDICATE_SQL}
+        """,
+        (driver_id,)
+        + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
+    )
+    return frozenset(str(row["id"]) for row in cur.fetchall())
+
+
 def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time, last_odometer_move_at=None):
     """Detect driver-state lost-mode per §XVIII.
 
@@ -930,23 +1029,17 @@ def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles,
 
     Returns True iff bit 2 holds — at least one queued offer is
     predicate-alive AND has no pickup observation recorded.
+
+    Implementation note (2026-05-31): the predicate body was extracted
+    to _get_alive_unpicked_offer_ids so the FirePickupObservation
+    cold-start bind can read the same set this function evaluates. This
+    function delegates rather than duplicating the query — single source
+    of truth, no parallel-function drift surface.
     """
     _ = queue_offer_ids  # legacy parameter; unused under §XVIII (see docstring)
-    cur.execute(
-        f"""
-        SELECT oh.id
-        FROM app_private.offer_history oh
-        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
-        WHERE dl.driver_id = %s
-          AND oh.actual_pickup_at IS NULL
-          AND {LIVE_OFFER_PREDICATE_SQL}
-        ORDER BY oh.created_at DESC
-        LIMIT 1
-        """,
-        (driver_id,)
-        + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
-    )
-    return cur.fetchone() is not None
+    return len(_get_alive_unpicked_offer_ids(
+        cur, driver_id, current_cumulative_miles, reference_time, last_odometer_move_at,
+    )) > 0
 
 
 def _build_tad_decision_context(
@@ -1697,7 +1790,15 @@ def post_heartbeat():
     # making the dispatch decision deterministic and replayable.
     _heartbeat_now = datetime.datetime.now(datetime.timezone.utc)
     last_known_anchor_id = _get_last_known_anchor_id(cur, driver_id, cumulative_miles, _heartbeat_now, effective_last_move)
-    lost_mode = _detect_lost_mode(cur, driver_id, queue_ids_int, cumulative_miles, _heartbeat_now, effective_last_move)
+    # §XVIII bit-2 evaluation. Compute the alive-unpicked offer set
+    # ONCE and derive lost_mode from it; pass the set through to
+    # _execute_action so the FirePickupObservation cold-start bind
+    # (driver_heartbeat.py FPO handler, 2026-05-31) reads the same
+    # source-of-truth — no parallel query, no possibility of drift.
+    alive_unpicked_offer_ids = _get_alive_unpicked_offer_ids(
+        cur, driver_id, cumulative_miles, _heartbeat_now, effective_last_move,
+    )
+    lost_mode = len(alive_unpicked_offer_ids) > 0
 
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(
@@ -1922,6 +2023,7 @@ def post_heartbeat():
             action, cur, conn, driver_id, queue, cluster,
             cumulative_miles=cumulative_miles,
             fallback_lat=current_lat, fallback_lng=current_lng,
+            alive_unpicked_offer_ids=alive_unpicked_offer_ids,
         )
         if executed:
             executed_actions.append(action)
