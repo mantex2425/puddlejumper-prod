@@ -373,6 +373,55 @@ def live_offer_predicate_params(current_cumulative_miles, reference_time, last_o
         GC_MAX_DIST_MI,
     )
 
+
+def _log_distance_cull_if_any(cur, driver_id, current_cumulative_miles,
+                              reference_time, last_odometer_move_at,
+                              method_label, live_count):
+    """Emit a DEBUG line when the distance envelope reaps offers that
+    otherwise cleared the temporal gates (causality + 4h ceiling +
+    odometer-staleness). Provides permanent observability on what the
+    distance axis is doing under live driving.
+
+    Gated twice to keep the cost honest in a 3 s-cadence single-driver
+    system:
+
+      - Skipped entirely when current_cumulative_miles is None (the
+        forensic/replay path can't cull on distance by construction).
+      - Log line emitted ONLY when culled_count > 0; idle ticks with
+        nothing in the envelope produce no log noise. The COUNT query
+        still runs every active-drive call to observe the diff.
+
+    Compares the caller's live_count (full predicate) against a
+    temporal-only count produced by re-running LIVE_OFFER_PREDICATE_SQL
+    with cum_miles=None — that NULL short-circuits the distance gate to
+    TRUE while leaving every other gate evaluating against the real
+    reference_time and last_odometer_move_at.
+    """
+    if current_cumulative_miles is None:
+        return
+    cur.execute(
+        f"""
+        SELECT COUNT(*)::int AS n
+        FROM app_private.offer_history oh
+        WHERE decision_log_id IN (
+            SELECT id FROM app_private.decision_log WHERE driver_id = %s
+        )
+          AND {LIVE_OFFER_PREDICATE_SQL}
+        """,
+        (driver_id,) + live_offer_predicate_params(None, reference_time, last_odometer_move_at),
+    )
+    temporal_n = cur.fetchone()["n"]
+    culled = temporal_n - live_count
+    if culled > 0:
+        log.debug(
+            "[driver_queue] distance_envelope culled %d offer(s) "
+            "method=%s driver_id=%s cum_miles=%s lom_at=%s "
+            "temporal_pass=%d live=%d",
+            culled, method_label, driver_id, current_cumulative_miles,
+            last_odometer_move_at, temporal_n, live_count,
+        )
+
+
 # =============================================================================
 # DriverQueue — the Workload Manager
 # =============================================================================
@@ -407,7 +456,7 @@ class DriverQueue:
     # Reads
     # -------------------------------------------------------------------------
 
-    def snapshot(self, cur, current_cumulative_miles=None, last_odometer_move_at=None) -> QueueSnapshot:
+    def snapshot(self, cur, *, current_cumulative_miles, last_odometer_move_at) -> QueueSnapshot:
         """Project the queue and read the bound hint in one logical operation.
 
         Two SELECTs run on the caller's cursor. In Postgres READ COMMITTED
@@ -527,7 +576,7 @@ class DriverQueue:
 
         return QueueSnapshot(offers=offers, bound_offer_id=raw_bound)
 
-    def offers(self, cur, current_cumulative_miles=None, last_odometer_move_at=None) -> tuple[Offer, ...]:
+    def offers(self, cur, *, current_cumulative_miles, last_odometer_move_at) -> tuple[Offer, ...]:
         """Just the queue projection. For non-heartbeat callers (replay,
         scenarios) that need full Offer objects but don't need the bound
         hint or the L-19 invariant. Requires a target_spec_builder.
@@ -546,7 +595,7 @@ class DriverQueue:
             last_odometer_move_at=last_odometer_move_at,
         )
 
-    def offer_ids_only(self, cur, current_cumulative_miles=None, last_odometer_move_at=None) -> tuple[str, ...]:
+    def offer_ids_only(self, cur, *, current_cumulative_miles, last_odometer_move_at) -> tuple[str, ...]:
         """Project just the queue's offer_ids — no coord building, no
         TargetSpec construction. For monitor/status/forensic callers that
         only need to know "which offers are live for this driver right
@@ -558,6 +607,7 @@ class DriverQueue:
         for source-textual identity with _project_offers (enforced by
         test_offer_ids_only_and_project_offers_share_where_clause).
         """
+        reference_time = _now()
         cur.execute(f"""
             SELECT id::text AS offer_id
             FROM app_private.offer_history oh
@@ -568,8 +618,14 @@ class DriverQueue:
             ORDER BY created_at DESC
         """, (
             self.driver_id,
-        ) + live_offer_predicate_params(current_cumulative_miles, _now(), last_odometer_move_at))
-        return tuple(r['offer_id'] for r in cur.fetchall())
+        ) + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at))
+        result = tuple(r['offer_id'] for r in cur.fetchall())
+        _log_distance_cull_if_any(
+            cur, self.driver_id, current_cumulative_miles,
+            reference_time, last_odometer_move_at,
+            method_label="offer_ids_only", live_count=len(result),
+        )
+        return result
 
     def bound_offer_id(self, cur) -> Optional[str]:
         """Just the hint. For callers (manual confirm, decisions/router)
@@ -708,6 +764,7 @@ class DriverQueue:
                 "need full Offer objects."
             )
 
+        reference_time = _now()
         cur.execute(f"""
             SELECT
                 id, pickup_address, dropoff_address,
@@ -728,10 +785,17 @@ class DriverQueue:
         """, (
             GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
             self.driver_id,                           # FK lookup
-        ) + live_offer_predicate_params(current_cumulative_miles, _now(), last_odometer_move_at))
+        ) + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at))
+
+        rows = cur.fetchall()
+        _log_distance_cull_if_any(
+            cur, self.driver_id, current_cumulative_miles,
+            reference_time, last_odometer_move_at,
+            method_label="_project_offers", live_count=len(rows),
+        )
 
         offers: list[Offer] = []
-        for o in cur.fetchall():
+        for o in rows:
             pickup_spec = self._build_target_spec(
                 o['pickup_address'], o['pickup_lat'], o['pickup_lng'])
             dropoff_spec = self._build_target_spec(

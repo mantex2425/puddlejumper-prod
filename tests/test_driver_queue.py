@@ -104,14 +104,14 @@ def test_snapshot_without_builder_raises_runtime_error():
     q = DriverQueue(DRIVER_ID)
     cur = make_cursor()
     with pytest.raises(RuntimeError, match="target_spec_builder"):
-        q.snapshot(cur)
+        q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
 
 def test_offers_without_builder_raises_runtime_error():
     q = DriverQueue(DRIVER_ID)
     cur = make_cursor()
     with pytest.raises(RuntimeError, match="target_spec_builder"):
-        q.offers(cur)
+        q.offers(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
 
 # =============================================================================
@@ -123,7 +123,7 @@ def test_offer_ids_only_empty_queue():
     cur = make_cursor()
     cur.fetchall.return_value = []
 
-    result = q.offer_ids_only(cur)
+    result = q.offer_ids_only(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert result == ()
     cur.execute.assert_called_once()
@@ -138,7 +138,7 @@ def test_offer_ids_only_single_offer():
     cur = make_cursor()
     cur.fetchall.return_value = [{"offer_id": "12345"}]
 
-    result = q.offer_ids_only(cur)
+    result = q.offer_ids_only(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert result == ("12345",)
 
@@ -153,7 +153,7 @@ def test_offer_ids_only_multiple_offers_preserves_order():
         {"offer_id": "9997"},
     ]
 
-    result = q.offer_ids_only(cur)
+    result = q.offer_ids_only(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert result == ("9999", "9998", "9997")
 
@@ -173,7 +173,7 @@ def test_offer_ids_only_query_uses_canonical_gc_constants():
     cur = make_cursor()
     cur.fetchall.return_value = []
 
-    q.offer_ids_only(cur)
+    q.offer_ids_only(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     _, params = cur.execute.call_args[0]
     # Structural shape check: production captures _now() at call
@@ -295,7 +295,7 @@ def test_snapshot_happy_path_bound_in_queue():
     cur.fetchall.return_value = [make_offer_row("7712")]
     cur.fetchone.return_value = {"current_offer_id": "7712"}
 
-    snap = q.snapshot(cur)
+    snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert isinstance(snap, QueueSnapshot)
     assert len(snap.offers) == 1
@@ -310,7 +310,7 @@ def test_snapshot_empty_queue_null_bound():
     cur.fetchall.return_value = []
     cur.fetchone.return_value = {"current_offer_id": None}
 
-    snap = q.snapshot(cur)
+    snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert snap.is_empty
     assert snap.bound_offer_id is None
@@ -344,7 +344,7 @@ def test_snapshot_l19_invariant_violation_self_heals(caplog):
     ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
-        snap = q.snapshot(cur)
+        snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     # The hint is self-healed to None; the queue itself is preserved.
     assert snap.bound_offer_id is None
@@ -379,7 +379,7 @@ def test_snapshot_l19_violation_with_empty_queue(caplog):
     ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
-        snap = q.snapshot(cur)
+        snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert snap.bound_offer_id is None
     assert snap.is_empty
@@ -409,7 +409,7 @@ def test_snapshot_l19_violation_logs_sorted_ids(caplog):
     ]
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
-        q.snapshot(cur)
+        q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert "queue_offer_ids=[1111,5555,9999]" in caplog.records[0].getMessage()
 
@@ -423,7 +423,7 @@ def test_snapshot_unbuildable_geocode_skipped(caplog):
     cur.fetchone.return_value = {"current_offer_id": None}
 
     with caplog.at_level(logging.WARNING, logger="driver_queue"):
-        snap = q.snapshot(cur)
+        snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert snap.is_empty
     # Warning fired, but it's the geocode warning, not invariant violation
@@ -441,7 +441,7 @@ def test_offers_returns_full_projection():
     cur = make_cursor()
     cur.fetchall.return_value = [make_offer_row("7712"), make_offer_row("8000")]
 
-    result = q.offers(cur)
+    result = q.offers(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
     assert len(result) == 2
     assert isinstance(result, tuple)
@@ -454,7 +454,7 @@ def test_offers_empty():
     cur = make_cursor()
     cur.fetchall.return_value = []
 
-    assert q.offers(cur) == ()
+    assert q.offers(cur, current_cumulative_miles=None, last_odometer_move_at=None) == ()
 
 
 # =============================================================================

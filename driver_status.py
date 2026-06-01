@@ -37,7 +37,8 @@ def get_driver_status():
                 dropoff_lat, dropoff_lng,
                 potential_cancellation,
                 heartbeat,
-                heartbeat_at
+                heartbeat_at,
+                last_odometer_move_at
             FROM app_private.driver_trip_state
             WHERE driver_id = %s
         """, (driver_id,))
@@ -184,8 +185,22 @@ def get_driver_status():
             # whose pickup has fired) is also surfaced as top-level
             # `offer_id`; the monitor floats that one to the top.
             # Lightweight projection — no TargetSpec building needed.
+            #
+            # Per §XIV.H: thread the heartbeat's per-tick odometer state
+            # so the predicate's distance and staleness gates evaluate
+            # against the same signals the heartbeat handler sees. Prior
+            # to 2026-06-01 this call passed nothing; both gates degraded
+            # to "always pass" and the monitor surfaced offers the
+            # heartbeat handler had correctly reaped. See
+            # docs/RECON_QUEUE_NO_REAP_2026-06-01.md.
             "planner_queue": list(
-                DriverQueue(driver_id).offer_ids_only(cur)
+                DriverQueue(driver_id).offer_ids_only(
+                    cur,
+                    current_cumulative_miles=hb.get("cumulative_miles"),
+                    last_odometer_move_at=(
+                        state_row["last_odometer_move_at"] if state_row else None
+                    ),
+                )
             ),
 
             # Latest WAI evaluation (lifted from newest pudo_decision_context row)

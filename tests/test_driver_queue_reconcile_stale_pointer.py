@@ -128,7 +128,7 @@ class TestStalePointerReconciliation:
             },
         )
 
-        snap = _make_queue().snapshot(cur)
+        snap = _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         # In-memory hint self-heals.
         assert snap.bound_offer_id is None
@@ -162,7 +162,7 @@ class TestStalePointerReconciliation:
             },
         )
 
-        snap = _make_queue().snapshot(cur)
+        snap = _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         assert snap.bound_offer_id is None
         updates = _captured_update_sql_calls(cur)
@@ -209,7 +209,7 @@ class TestStalePointerReconciliation:
             },
         )
 
-        snap = _make_queue().snapshot(cur)
+        snap = _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         # In-memory hint still self-heals (existing L-19 behavior).
         assert snap.bound_offer_id is None
@@ -239,7 +239,7 @@ class TestStalePointerReconciliation:
             dead_check_row=None,  # offer_history has no row for this id
         )
 
-        snap = _make_queue().snapshot(cur)
+        snap = _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         # Hint self-heals (still treated as L-19 violation in-memory).
         assert snap.bound_offer_id is None
@@ -272,7 +272,7 @@ class TestStalePointerReconciliation:
             },
         )
 
-        snap = _make_queue().snapshot(cur)
+        snap = _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         assert snap.bound_offer_id is None
         updates = _captured_update_sql_calls(cur)
@@ -311,7 +311,7 @@ class TestStalePointerReconciliation:
             },
         )
 
-        _make_queue().snapshot(cur)
+        _make_queue().snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
 
         updates = _captured_update_sql_calls(cur)
         assert len(updates) == 1

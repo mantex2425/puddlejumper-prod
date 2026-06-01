@@ -646,6 +646,8 @@ Bare-table FROM clauses (no alias) will fail at runtime with `AmbiguousColumn` w
 
 **Exceptions.** Out-of-band scripts (replay, backtest, harvest, drive_review) may query historical data without the predicate. Each such call site must be documented in `docs/out_of_band_offer_history_queries.md` with the reason for exception. (This file does not yet exist; the first out-of-band script to claim an exception creates it.)
 
+**Parameter threading (2026-06-01 amendment).** Callers in production hot paths MUST supply real per-tick `current_cumulative_miles` and `last_odometer_move_at` when available; NULL is reserved for replay/forensic use. Predicate gates degrade gracefully under NULL inputs (distance gate short-circuits to TRUE; staleness gate becomes permissive), which is the desired behavior for historical replay but produces silently-too-permissive live reads. Enforced at the type level: `DriverQueue.offer_ids_only`, `DriverQueue.snapshot`, and `DriverQueue.offers` require both kwargs keyword-only with no defaults — omission is a `TypeError`, explicit `None` remains legal. See `docs/RECON_QUEUE_NO_REAP_2026-06-01.md` for the monitor-path failure that motivated the amendment.
+
 ### I. Asymmetric Ambiguity Handling (Dispatch §5.3 + §5.3-mirror)
 
 Implements Rule XV (Observation Before Narrative) at the dispatch layer.
