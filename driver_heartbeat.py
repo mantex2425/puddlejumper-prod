@@ -39,7 +39,7 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import write_nailed_position
-from where_am_i import WhereAmI, classify_commit_rule
+from where_am_i import WhereAmI, _commits, classify_commit_rule
 from tad import OfferTadState
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from dispatch import (
@@ -193,7 +193,8 @@ def _bucket_to_target_spec(address_text, lat, lng):
 def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     fallback_lat=None, fallback_lng=None,
                     cumulative_miles=None,
-                    alive_unpicked_offer_ids=frozenset()):
+                    alive_unpicked_offer_ids=frozenset(),
+                    pickup_floor_clearers=frozenset()):
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
@@ -222,6 +223,17 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
     same canonical set _detect_lost_mode evaluated against, avoiding
     a parallel query. Default frozenset() preserves callers that pre-
     date the cold-start fix (and tests that don't exercise the bind).
+
+    pickup_floor_clearers is the spatial-local competing set for the
+    §XVIII bind gate (2026-06-01 sharpening, FIX_PROPOSAL_BIND_SPATIAL_
+    LOCAL). It is the set of offer_ids that (a) WAI evaluated on the
+    pickup leg at this heartbeat AND (b) cleared the canonical _commits
+    floor for their TAD verdict. Computed once in the heartbeat body
+    and threaded as a finished frozenset (Gemini §4.1) to avoid
+    coupling the FPO handler to the raw per_target_outcomes /
+    tad_verdicts structures. Default frozenset() makes the bind gate
+    fail-closed for callers that don't supply it — manual confirm
+    endpoints, tests that don't exercise the bind, etc.
 
     Returns: (executed: bool, error: Optional[str])
       executed is True when a state-changing action ran (FirePickup,
@@ -598,20 +610,49 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # this only adds the narrative bind in the unambiguous case.
             #
             # The gate uses frozenset equality (not membership) so it
-            # falsifies cleanly whenever the queue has any other
-            # alive-unpicked offer — count>=2 stays ambiguous,
-            # count==0 means this fire is a no-op redo (idempotency
-            # case) and must not bind.
+            # falsifies cleanly whenever any other offer is also
+            # competing for *this* piece of asphalt — count>=2 stays
+            # ambiguous, count==0 means this fire is a no-op redo
+            # (idempotency case) and must not bind.
+            #
+            # 2026-06-01 spatial-local sharpening (FIX_PROPOSAL_BIND_
+            # SPATIAL_LOCAL): the singleton test now runs against the
+            # *local competing set* — offers that both (a) cleared the
+            # WAI pickup-leg floor at this heartbeat via _commits AND
+            # (b) are alive-unpicked. Pre-fix the gate measured global
+            # ambiguity ("any other alive-unpicked offer anywhere on
+            # the clipboard"), withholding the bind whenever earlier-
+            # but-cross-town offers existed even though they scored
+            # well below floor (2026-06-01 morning recon, H-A: 1 of 7
+            # fires bound under the global gate). Local ambiguity is
+            # the right unit — measured here as "more than one offer
+            # cleared the pickup floor at this heartbeat and is still
+            # waiting on a pickup observation."
+            #
+            # The intersection with alive_unpicked_offer_ids retires
+            # already-picked offers: even if WAI keeps re-scoring a
+            # retired pickup leg (the 2026-06-01 §4 anomaly), an
+            # already-picked offer is excluded from local_competing
+            # and cannot block a fresh bind on a different offer.
+            #
+            # No geometric / radius / H3 test runs here — locality
+            # emerges from the WAI score, which already fuses spatial
+            # signals correctly. Introducing a distance gate would
+            # violate §XVI.D (distance-to-geocode is never a gate).
             #
             # See docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md
-            # for the full diagnosis and §11.2-§11.3 ratification.
-            if alive_unpicked_offer_ids == frozenset({str(action.offer_id)}):
+            # for the original cold-start diagnosis, docs/RECON_PICKUP_
+            # NOBIND_2026-06-01.md for the H-A ratification, and
+            # docs/FIX_PROPOSAL_BIND_SPATIAL_LOCAL_2026-06-01.md for
+            # the Gemini-ratified design (§1.1, §1.3, §4.1).
+            local_competing = pickup_floor_clearers & alive_unpicked_offer_ids
+            if local_competing == frozenset({str(action.offer_id)}):
                 queue.bind(action.offer_id, cur)
                 log.info(
-                    "[§XVIII cold-start bind] FirePickupObservation "
-                    "offer=%s narrative bound (alive-unpicked queue "
-                    "singleton matched fire)",
-                    action.offer_id,
+                    "[§XVIII spatial-local bind] FirePickupObservation "
+                    "offer=%s narrative bound (sole pickup-floor-clearer "
+                    "among alive-unpicked: %s)",
+                    action.offer_id, sorted(local_competing),
                 )
 
             # [α-fix mirror] offer_history: per-offer observation record. The
@@ -1823,6 +1864,32 @@ def post_heartbeat():
         current_odometer=cumulative_miles,
     )
 
+    # §XVIII spatial-local bind precompute (2026-06-01, FIX_PROPOSAL_
+    # BIND_SPATIAL_LOCAL §1.1 + §4.1). Compute the set of offers that
+    # cleared the WAI pickup-leg floor at THIS heartbeat — the
+    # candidate "local competing set" for the §XVIII bind gate inside
+    # the FirePickupObservation handler. Delegates to _commits (the
+    # canonical floor predicate, where_am_i.py:1790-1837) per §1.4 so
+    # any future floor or POI-lift change flows automatically.
+    #
+    # Computed ONCE here, in the heartbeat body where diagnostics +
+    # tad_verdicts both live (Gemini §4.1: compute-once-and-thread,
+    # mirroring alive_unpicked_offer_ids). The finished frozenset is
+    # passed into _execute_action as a kwarg; the handler does not
+    # see the raw per_target_outcomes / tad_verdicts structures.
+    #
+    # The intersection with alive_unpicked_offer_ids happens at the
+    # gate site (line ~620) so that an already-picked offer whose
+    # pickup leg WAI re-scores (the 2026-06-01 §4 anomaly) cannot
+    # inflate local_competing and block a fresh bind on a different
+    # offer. See proposal §1.3.
+    pickup_floor_clearers = frozenset(
+        str(offer_id)
+        for offer_id, leg, outcome in diagnostics.per_target_outcomes
+        if leg == 'pickup'
+        and _commits(outcome, diagnostics.tad_verdicts.get(offer_id))
+    )
+
     # ── MATCH (Rule XVI B-3 Active Interrogation) ────────────────────
     # Forensic Ladder. matcher_actions is None when the matcher
     # abstains (arrest < threshold OR all candidates rejected) — in
@@ -2038,6 +2105,7 @@ def post_heartbeat():
             cumulative_miles=cumulative_miles,
             fallback_lat=current_lat, fallback_lng=current_lng,
             alive_unpicked_offer_ids=alive_unpicked_offer_ids,
+            pickup_floor_clearers=pickup_floor_clearers,
         )
         if executed:
             executed_actions.append(action)

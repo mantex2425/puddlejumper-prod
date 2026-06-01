@@ -1,27 +1,45 @@
-"""Unit tests for the §XVIII cold-start bind on FirePickupObservation.
+"""Unit tests for the §XVIII spatial-local bind on FirePickupObservation.
 
-Pins the behavior introduced 2026-05-31 in
-docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md (verdict §11)
-and the implementation brief CC BRIEF — fix/lost-mode-cold-start (§5).
+Migrated 2026-06-01 from the original global-singleton gate (2026-05-31
+cold-start fix, ratified in docs/RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md)
+to the spatial-local competing-set gate (2026-06-01, docs/FIX_PROPOSAL_
+BIND_SPATIAL_LOCAL_2026-06-01.md, Gemini-ratified).
 
-The defect: lost-mode latches on any unfired live offer (recon §7),
-demoting every FirePickup to FirePickupObservation, which never binds
-current_offer_id. Circular. The fix: when an FPO fires AND the
-alive-unpicked offer set is exactly {action.offer_id}, the FPO also
-binds current_offer_id. Cache writes happen unconditionally either way
-(Rule XV: Observation is the primary output).
+The original gate evaluated:
+    if alive_unpicked_offer_ids == frozenset({action.offer_id}):
+        bind
+which measured AMBIGUITY GLOBALLY ("any other offer on the clipboard"),
+withholding the bind whenever earlier-but-cross-town offers existed even
+though they scored well below the WAI pickup floor. 2026-06-01 AM drive
+recon (RECON_PICKUP_NOBIND_2026-06-01.md, H-A) showed only 1 of 7 pickup
+fires bound under the old gate; the other six fired observation-only
+because the global gate counted offers that were never spatial candidates.
 
-Test surface mirrors tests/test_execute_action_id_fix.py — mock cursor
-+ mock queue + a fake cluster. acquire_lock is patched to a no-op so
-the test doesn't touch the transaction-lock module.
+The new gate evaluates:
+    local_competing = pickup_floor_clearers & alive_unpicked_offer_ids
+    if local_competing == frozenset({action.offer_id}):
+        bind
+which measures LOCAL AMBIGUITY (offers actually competing for *this*
+piece of asphalt — those WAI scored on the pickup leg and that cleared
+the canonical _commits floor). Equality (not membership) preserves the
+§XIV.I §5.3 shared-curb fail-closed protection; intersection with
+alive_unpicked retires already-picked offers so a WAI-rescored retired
+leg can't block a fresh bind (proposal §1.3).
 
-Five tests per the brief's §5:
-  1. test_coldstart_single_alive_offer_binds — the core happy path
-  2. test_coldstart_two_alive_offers_no_bind  — ambiguous, stays Observation-only
-  3. test_coldstart_zero_alive_offers_no_crash — edge: empty set, no bind, no crash
-  4. test_coldstart_does_not_disturb_cache_writes — caches written regardless
-  5. test_coldstart_replay_5_31_density — regression mirroring the 2026-05-31
-     density vector (alive_count=1 binds; alive_count=2 doesn't)
+Test surface continues to use a MagicMock cursor + mock queue + fake
+cluster for fast unit-level pinning of the gate's algebra. The
+real-PG, end-to-end validation lives in tests/test_spatial_local_bind.py
+(db_cur fixture, mandated by §XIV.J).
+
+Coverage:
+  - test_singleton_floor_clearer_binds                 — the H-A morning case
+  - test_shared_curb_two_floor_clearers_no_bind        — §XIV.I §5.3 preserved
+  - test_morning_case_solo_clearer_with_stranded_offers_binds — the H-A regression net
+  - test_action_in_alive_but_not_in_floor_no_bind      — fail-closed when floor empty for action
+  - test_action_in_floor_but_already_picked_no_bind    — §1.3 retirement via intersect
+  - test_empty_floor_clearers_no_bind                  — fail-closed when floor empty
+  - test_zero_alive_unpicked_no_crash                  — edge: empty alive set
+  - test_cache_writes_undisturbed_by_bind_outcome      — Rule XV invariant preserved
 """
 from __future__ import annotations
 
@@ -63,63 +81,174 @@ def _setup_cur_and_queue():
     return cur, conn, queue
 
 
-def _exec_fpo(cur, conn, queue, action, *, alive_unpicked_offer_ids):
-    """Invoke the FPO handler with acquire_lock patched out."""
+def _exec_fpo(cur, conn, queue, action, *,
+              alive_unpicked_offer_ids,
+              pickup_floor_clearers):
+    """Invoke the FPO handler with acquire_lock patched out.
+
+    Both gate-axis kwargs are required for clarity: the new gate is a
+    function of (pickup_floor_clearers, alive_unpicked_offer_ids) and
+    every test should make both explicit.
+    """
     with patch("driver_heartbeat.acquire_lock") as _lock:
         return _execute_action(
             action, cur, conn, "driver-x", queue,
             cluster=_FakeCluster(),
             cumulative_miles=145.5,
             alive_unpicked_offer_ids=alive_unpicked_offer_ids,
+            pickup_floor_clearers=pickup_floor_clearers,
         )
 
 
 # ============================================================================
-# TestColdStartBind — §XVIII cold-start narrative bind on FirePickupObservation
+# TestSpatialLocalBind — §XVIII spatial-local narrative bind on FPO
 # ============================================================================
 
 
-class TestColdStartBind:
+class TestSpatialLocalBind:
 
-    def test_coldstart_single_alive_offer_binds(self):
-        """FPO fires, alive-unpicked set is exactly {action.offer_id} → bind."""
+    def test_singleton_floor_clearer_binds(self):
+        """The simplest binding case: one offer cleared the pickup floor,
+        same offer is alive-unpicked, FPO fires on that offer.
+        local_competing = {X} & {X} = {X} == {X} → bind.
+        """
         cur, conn, queue = _setup_cur_and_queue()
         action = FirePickupObservation(offer_id="8653")
 
         executed, err = _exec_fpo(
             cur, conn, queue, action,
             alive_unpicked_offer_ids=frozenset({"8653"}),
+            pickup_floor_clearers=frozenset({"8653"}),
         )
 
         assert executed is True
         assert err is None
-        # The bind is what breaks the lost-mode trap.
         queue.bind.assert_called_once_with("8653", cur)
 
-    def test_coldstart_two_alive_offers_no_bind(self):
-        """Two alive-unpicked offers → ambiguous, no bind."""
+    def test_shared_curb_two_floor_clearers_no_bind(self):
+        """§XIV.I §5.3 preserved: two offers both clearing pickup floor at
+        one cluster → genuine shared-curb ambiguity → no bind.
+        local_competing = {X,Y} & {X,Y} = {X,Y} != {X} → withhold.
+        """
         cur, conn, queue = _setup_cur_and_queue()
         action = FirePickupObservation(offer_id="8653")
 
         executed, err = _exec_fpo(
             cur, conn, queue, action,
             alive_unpicked_offer_ids=frozenset({"8653", "8700"}),
+            pickup_floor_clearers=frozenset({"8653", "8700"}),
         )
 
         assert executed is True
         assert err is None
-        # Ambiguous queue → narrative MUST stay unbound. This is the
-        # 14:22+ vector from the 5/31 replay.
         queue.bind.assert_not_called()
 
-    def test_coldstart_zero_alive_offers_no_crash(self):
-        """Empty alive-unpicked set (idempotent redo / race) → no bind, no crash.
+    def test_morning_case_solo_clearer_with_stranded_offers_binds(self):
+        """The 2026-06-01 morning regression net (H-A):
 
-        Theoretically shouldn't happen in production: the firing offer
-        must be in the alive-unpicked set at the moment of FPO emission.
-        But under §XVI.G lock expiration + FPO re-fire after that offer's
-        actual_pickup_at already wrote, the set could be empty at the
-        bind point. The gate falsifies cleanly; no bind; no exception.
+        The driver has three offers alive-unpicked (8736, 8737, 8739)
+        but is geographically at 8739's pickup zone. WAI scores 8739's
+        pickup leg at 0.628 (clears 0.55 lost floor); 8736 and 8737 are
+        miles away and score 0.186 each (well below floor).
+
+        OLD global-singleton gate: alive_unpicked={8736,8737,8739} !=
+        {8739} → withhold. This was the bug — the bind was withheld
+        despite 8739 being the sole spatial candidate.
+
+        NEW spatial-local gate: pickup_floor_clearers={8739};
+        local_competing = {8739} & {8736,8737,8739} = {8739} == {8739}
+        → bind. The stranded earlier offers don't block the bind
+        because they were never competing for *this* piece of asphalt.
+        """
+        cur, conn, queue = _setup_cur_and_queue()
+        action = FirePickupObservation(offer_id="8739")
+
+        executed, err = _exec_fpo(
+            cur, conn, queue, action,
+            alive_unpicked_offer_ids=frozenset({"8736", "8737", "8739"}),
+            pickup_floor_clearers=frozenset({"8739"}),
+        )
+
+        assert executed is True
+        assert err is None
+        # The whole point of the fix: this case now binds.
+        queue.bind.assert_called_once_with("8739", cur)
+
+    def test_action_in_alive_but_not_in_floor_no_bind(self):
+        """Fail-closed: action.offer_id is alive-unpicked but did not
+        clear the pickup floor at this heartbeat (e.g. WAI is firing
+        an Observation under §XIV.I §5.3 loser pathway where this
+        offer's WAI score was below floor). No bind.
+        """
+        cur, conn, queue = _setup_cur_and_queue()
+        action = FirePickupObservation(offer_id="8653")
+
+        executed, err = _exec_fpo(
+            cur, conn, queue, action,
+            alive_unpicked_offer_ids=frozenset({"8653"}),
+            pickup_floor_clearers=frozenset({"8700"}),  # different offer
+        )
+
+        assert executed is True
+        assert err is None
+        queue.bind.assert_not_called()
+
+    def test_action_in_floor_but_already_picked_no_bind(self):
+        """§1.3 retirement: even when WAI keeps scoring a retired pickup
+        leg for an already-picked offer (the 2026-06-01 §4 anomaly), the
+        intersection with alive_unpicked_offer_ids excludes that offer.
+
+        Scenario: WAI re-scored 8739's pickup leg above floor at a later
+        heartbeat after 8739's actual_pickup_at was already written. A
+        DIFFERENT offer (8740) fires FPO. The retired-but-floor-clearing
+        8739 must NOT bind, and must NOT inflate local_competing in a
+        way that blocks 8740's bind if 8740 happens to be the only
+        alive-unpicked floor clearer.
+
+        Here we test the simpler form: action.offer_id IS the retired
+        one, no bind because it's not alive-unpicked.
+        """
+        cur, conn, queue = _setup_cur_and_queue()
+        action = FirePickupObservation(offer_id="8739")
+
+        executed, err = _exec_fpo(
+            cur, conn, queue, action,
+            # 8739 NOT in alive (already picked)
+            alive_unpicked_offer_ids=frozenset({"8740"}),
+            # WAI still re-scores 8739's pickup leg above floor
+            pickup_floor_clearers=frozenset({"8739"}),
+        )
+
+        assert executed is True
+        assert err is None
+        queue.bind.assert_not_called()
+
+    def test_empty_floor_clearers_no_bind(self):
+        """Edge: no offer cleared the pickup floor at this heartbeat (e.g.
+        WAI fired FPO under a code path that does not pre-validate floor
+        clearance, or a future caller forgot to compute the set). The
+        gate must fail-closed.
+
+        Default-frozenset() callers (manual confirm endpoints, legacy
+        tests) ride this path implicitly.
+        """
+        cur, conn, queue = _setup_cur_and_queue()
+        action = FirePickupObservation(offer_id="8653")
+
+        executed, err = _exec_fpo(
+            cur, conn, queue, action,
+            alive_unpicked_offer_ids=frozenset({"8653"}),
+            pickup_floor_clearers=frozenset(),
+        )
+
+        assert executed is True
+        assert err is None
+        queue.bind.assert_not_called()
+
+    def test_zero_alive_unpicked_no_crash(self):
+        """Edge: idempotent redo or race produces an empty alive-unpicked
+        set at the bind point. local_competing degenerates to empty;
+        equality test fails cleanly; no bind; no exception.
         """
         cur, conn, queue = _setup_cur_and_queue()
         action = FirePickupObservation(offer_id="8653")
@@ -127,44 +256,43 @@ class TestColdStartBind:
         executed, err = _exec_fpo(
             cur, conn, queue, action,
             alive_unpicked_offer_ids=frozenset(),
+            pickup_floor_clearers=frozenset({"8653"}),
         )
 
         assert executed is True
         assert err is None
         queue.bind.assert_not_called()
 
-    def test_coldstart_does_not_disturb_cache_writes(self):
-        """Cache writes (pms + offer_history + community_offers) happen
-        identically whether or not the cold-start bind fires.
+    def test_cache_writes_undisturbed_by_bind_outcome(self):
+        """Rule XV invariant preserved through the migration: cache
+        writes (pms + offer_history + community_offers) happen identically
+        whether or not the spatial-local bind fires. The bind is additive.
 
-        Rule XV invariant: Observation is the primary cache writer. The
-        bind is additive — it must never gate, skip, or alter the cache
-        path. We verify by running the FPO twice with identical inputs
-        EXCEPT the alive-unpicked set, then comparing the executed SQL
-        sequences. They must match modulo ordering of the bind insert.
+        Verified by running the FPO twice with identical inputs EXCEPT the
+        local-competing axis, then comparing the executed SQL sequences.
+        Cache write set must appear in BOTH runs; only queue.bind differs.
         """
         action = FirePickupObservation(offer_id="8653")
 
-        # Run A: bind fires (alive == singleton match)
+        # Run A: bind fires (singleton local competing set)
         cur_a, conn_a, queue_a = _setup_cur_and_queue()
         _exec_fpo(
             cur_a, conn_a, queue_a, action,
             alive_unpicked_offer_ids=frozenset({"8653"}),
+            pickup_floor_clearers=frozenset({"8653"}),
         )
 
-        # Run B: bind does NOT fire (ambiguous)
+        # Run B: bind does NOT fire (shared-curb ambiguity)
         cur_b, conn_b, queue_b = _setup_cur_and_queue()
         _exec_fpo(
             cur_b, conn_b, queue_b, action,
             alive_unpicked_offer_ids=frozenset({"8653", "8700"}),
+            pickup_floor_clearers=frozenset({"8653", "8700"}),
         )
 
-        # Extract SQL statements executed against cur (queue.bind goes
-        # through the queue mock, not cur — separate channel).
         sqls_a = [c.args[0] for c in cur_a.execute.call_args_list if c.args]
         sqls_b = [c.args[0] for c in cur_b.execute.call_args_list if c.args]
 
-        # Cache write set must be present in BOTH runs.
         for label, sqls in (("bind-firing", sqls_a), ("no-bind", sqls_b)):
             assert any("UPDATE app_private.pickup_market_signals" in s
                        for s in sqls), (
@@ -182,38 +310,3 @@ class TestColdStartBind:
         # Sanity: bind fired in A, not in B.
         queue_a.bind.assert_called_once_with("8653", cur_a)
         queue_b.bind.assert_not_called()
-
-    def test_coldstart_replay_5_31_density(self):
-        """Replay regression: the 2026-05-31 density vector.
-
-        Pickup at 13:14–14:10 CT: alive_unpicked = {8653} → first FPO
-        binds 8653; subsequent fires in that window would also bind
-        their respective single-alive offers. The trap breaks on the
-        first bind.
-
-        Pickup at 14:22+ CT: alive_unpicked = {8653, 8700, ...} → bind
-        gate falsifies; FPOs stay Observation-only (correct ambiguous
-        behavior under §XVIII).
-
-        This test pins the regression: if either branch flips, the
-        5/31 drive would not have been fixed (binds-when-it-shouldn't
-        or doesn't-bind-when-it-should), and a future drive would
-        repeat the trap.
-        """
-        # Window 1 (13:14–14:10): single alive offer, FPO binds.
-        cur1, conn1, queue1 = _setup_cur_and_queue()
-        action1 = FirePickupObservation(offer_id="8653")
-        _exec_fpo(
-            cur1, conn1, queue1, action1,
-            alive_unpicked_offer_ids=frozenset({"8653"}),
-        )
-        queue1.bind.assert_called_once_with("8653", cur1)
-
-        # Window 2 (14:22+): multiple alive offers, FPO does NOT bind.
-        cur2, conn2, queue2 = _setup_cur_and_queue()
-        action2 = FirePickupObservation(offer_id="8700")
-        _exec_fpo(
-            cur2, conn2, queue2, action2,
-            alive_unpicked_offer_ids=frozenset({"8700", "8712"}),
-        )
-        queue2.bind.assert_not_called()
