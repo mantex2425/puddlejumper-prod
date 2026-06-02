@@ -58,7 +58,13 @@ def _setup_cur_and_queue(existing_actual_pickup_at=None, offer_exists=True):
     # Default: every UPDATE/INSERT writes 1 row (success path).
     cur.rowcount = 1
     if offer_exists:
-        cur.fetchone.return_value = {'actual_pickup_at': existing_actual_pickup_at}
+        cur.fetchone.return_value = {
+            'actual_pickup_at': existing_actual_pickup_at,
+            'pickup_lat': None,
+            'pickup_lng': None,
+            'dropoff_lat': None,
+            'dropoff_lng': None,
+        }
     else:
         cur.fetchone.return_value = None
     conn = MagicMock()

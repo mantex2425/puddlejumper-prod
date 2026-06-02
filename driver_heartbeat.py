@@ -39,7 +39,7 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import write_nailed_position
-from where_am_i import WhereAmI, _commits, classify_commit_rule
+from where_am_i import WhereAmI, _commits, classify_commit_rule, haversine_meters
 from tad import OfferTadState
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from dispatch import (
@@ -273,8 +273,14 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # prevents. Pickup 5 of the 2026-05-30 drive corrupted
             # offer_history.actual_pickup_at + .actual_pickup_lat/lng
             # because this guard was absent.
+            # [error-metric 2026-06-02] Widened from SELECT actual_pickup_at
+            # to also fetch intended pickup_lat/lng — the normal-fire path
+            # below computes pickup_error_m from these. The catch-up branch
+            # (already_fired_at is not None) must NOT write pickup_error_m
+            # (Rule XV: preserve the prior Observation's error_m intact).
             cur.execute("""
-                SELECT actual_pickup_at FROM app_private.offer_history
+                SELECT actual_pickup_at, pickup_lat, pickup_lng
+                FROM app_private.offer_history
                 WHERE id = %s::bigint
             """, (action.offer_id,))
             existing_row = cur.fetchone()
@@ -357,6 +363,18 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # AFTER a FirePickupObservation overwrites the Observation's
             # correct cache write with whatever location the current
             # heartbeat is at, violating Rule XV.
+            #
+            # [error-metric 2026-06-02] pickup_error_m from intended pickup
+            # coords (fetched by the catch-up SELECT above, widened to
+            # include pickup_lat/lng) vs the fired nail point. None-guarded:
+            # missing intended coords → NULL written, no raise.
+            intended_lat = existing_row['pickup_lat']
+            intended_lng = existing_row['pickup_lng']
+            if intended_lat is not None and intended_lng is not None:
+                error_m = haversine_meters(intended_lat, intended_lng,
+                                           nail_lat, nail_lng)
+            else:
+                error_m = None
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_pickup_lat                   = %s,
@@ -368,12 +386,14 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     leg_start_cumulative_miles_dropoff  = %s,
                     cumulative_miles_at_pickup_fire     = %s,
                     expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
-                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval
+                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval,
+                    pickup_error_m                      = %s
                 WHERE id = %s::bigint
                   AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles, cumulative_miles, cumulative_miles,
+                error_m,
                 action.offer_id,
             ))
             if cur.rowcount == 0:
@@ -468,6 +488,22 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # [α-fix] offer_history: canonical PUDO record. action.offer_id
             # IS offer_history.id, target directly. Rowcount guard fires on
             # zero-row UPDATE.
+            #
+            # [error-metric 2026-06-02] Compute dropoff_error_m from the
+            # intended (offer-time) dropoff coords vs the fired nail point.
+            # None-guarded: missing intended coords → NULL written, no raise.
+            cur.execute("""
+                SELECT dropoff_lat, dropoff_lng FROM app_private.offer_history
+                WHERE id = %s::bigint
+            """, (action.offer_id,))
+            row = cur.fetchone()
+            intended_lat = row['dropoff_lat'] if row else None
+            intended_lng = row['dropoff_lng'] if row else None
+            if intended_lat is not None and intended_lng is not None:
+                error_m = haversine_meters(intended_lat, intended_lng,
+                                           nail_lat, nail_lng)
+            else:
+                error_m = None
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_dropoff_lat               = %s,
@@ -475,11 +511,13 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     actual_dropoff_h3                = app_private.coords_to_h3(%s, %s)::text,
                     actual_dropoff_at                = NOW(),
                     dropoff_classification           = 'auto',
-                    cumulative_miles_at_dropoff_fire = %s
+                    cumulative_miles_at_dropoff_fire = %s,
+                    dropoff_error_m                  = %s
                 WHERE id = %s::bigint
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles,
+                error_m,
                 action.offer_id,
             ))
             if cur.rowcount == 0:
@@ -658,6 +696,22 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             # [α-fix mirror] offer_history: per-offer observation record. The
             # WHERE actual_pickup_at IS NULL guard makes this idempotent — a
             # subsequent FirePickupObservation for the same offer is a no-op.
+            #
+            # [error-metric 2026-06-02] Compute pickup_error_m from the
+            # intended (offer-time) pickup coords vs the fired nail point.
+            # None-guarded: missing intended coords → NULL written, no raise.
+            cur.execute("""
+                SELECT pickup_lat, pickup_lng FROM app_private.offer_history
+                WHERE id = %s::bigint
+            """, (action.offer_id,))
+            row = cur.fetchone()
+            intended_lat = row['pickup_lat'] if row else None
+            intended_lng = row['pickup_lng'] if row else None
+            if intended_lat is not None and intended_lng is not None:
+                error_m = haversine_meters(intended_lat, intended_lng,
+                                           nail_lat, nail_lng)
+            else:
+                error_m = None
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_pickup_lat                   = %s,
@@ -669,12 +723,14 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     leg_start_cumulative_miles_dropoff  = %s,
                     cumulative_miles_at_pickup_fire     = %s,
                     expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
-                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval
+                    expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval,
+                    pickup_error_m                      = %s
                 WHERE id = %s::bigint
                   AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles, cumulative_miles, cumulative_miles,
+                error_m,
                 action.offer_id,
             ))
             # No rowcount guard: idempotent no-op is acceptable for observation.
@@ -767,6 +823,22 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
 
             # offer_history: per-offer dropoff observation. Idempotent via
             # WHERE actual_dropoff_at IS NULL.
+            #
+            # [error-metric 2026-06-02] Compute dropoff_error_m from the
+            # intended (offer-time) dropoff coords vs the fired nail point.
+            # None-guarded: missing intended coords → NULL written, no raise.
+            cur.execute("""
+                SELECT dropoff_lat, dropoff_lng FROM app_private.offer_history
+                WHERE id = %s::bigint
+            """, (action.offer_id,))
+            row = cur.fetchone()
+            intended_lat = row['dropoff_lat'] if row else None
+            intended_lng = row['dropoff_lng'] if row else None
+            if intended_lat is not None and intended_lng is not None:
+                error_m = haversine_meters(intended_lat, intended_lng,
+                                           nail_lat, nail_lng)
+            else:
+                error_m = None
             cur.execute("""
                 UPDATE app_private.offer_history
                 SET actual_dropoff_lat               = %s,
@@ -774,12 +846,14 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     actual_dropoff_h3                = app_private.coords_to_h3(%s, %s)::text,
                     actual_dropoff_at                = NOW(),
                     dropoff_classification           = 'auto_observation',
-                    cumulative_miles_at_dropoff_fire = %s
+                    cumulative_miles_at_dropoff_fire = %s,
+                    dropoff_error_m                  = %s
                 WHERE id = %s::bigint
                   AND actual_dropoff_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
                 cumulative_miles,
+                error_m,
                 action.offer_id,
             ))
 
