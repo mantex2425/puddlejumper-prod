@@ -288,7 +288,7 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     action.offer_id,
                 )
                 return False, "fire_pickup_zero_rows"
-            already_fired_at = existing_row[0]
+            already_fired_at = existing_row['actual_pickup_at']
             if already_fired_at is not None:
                 # [Rule XV catch-up] Cache write was already captured by a
                 # prior fire (typically a FirePickupObservation while
