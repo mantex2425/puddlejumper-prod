@@ -436,21 +436,23 @@ class TestForumPark7623SanityCheck:
             f"205m on 250m threshold should be ~0.18; got {signals['proximity']}"
         )
 
-        # Confidence should clear the STRONG_MATCH threshold (0.7)
-        # Theoretical with these signals (proximity=0.18, off_wire=0,
-        # adjacent_road_match=0 — Step E weights):
-        #   proximity:           0.10 * 0.18 = 0.018
-        #   breadcrumb_match:    0.30 * 1.00 = 0.300
-        #   cluster_tight:       0.15 * 1.00 = 0.150
-        #   cluster_duration:    0.10 * 1.00 = 0.100
-        #   on_target_road:      0.20 * 1.00 = 0.200
-        #   off_wire_pivot:      0.05 * 0.00 = 0.000
-        #   adjacent_road_match: 0.10 * 0.00 = 0.000
-        #   total:                              0.768
-        # Above 0.7 - WAI would report at_current_pudo with strong confidence.
-        assert confidence > 0.70, (
-            f"Forum Park 7623 confidence {confidence:.3f} should be >= 0.70 "
-            f"(STRONG_MATCH_CONFIDENCE). Signals: {signals}"
+        # Post adjacency re-weight 2026-06-03 (intersection class, ×0.888889
+        # renorm + adjacent_road_match 0.10->0.20): with adjacent_road_match=0
+        # here, weight pulled toward the adjacency signal lands on a zero, so
+        # this non-adjacent match drops below the 0.70 STRONG threshold while
+        # still clearing the 0.40 match floor comfortably.
+        #   proximity:           0.088889 * 0.18 = 0.016
+        #   breadcrumb_match:    0.266667 * 1.00 = 0.267
+        #   cluster_tight:       0.133333 * 1.00 = 0.133
+        #   cluster_duration:    0.088889 * 1.00 = 0.089
+        #   on_target_road:      0.177778 * 1.00 = 0.178
+        #   off_wire_pivot:      0.044444 * 0.00 = 0.000
+        #   adjacent_road_match: 0.200000 * 0.00 = 0.000
+        #   total:                                 0.683
+        # See docs/FINDING_residential_adjacent_pickup_below_floor_2026-06-03.md §4.4
+        assert confidence > 0.65, (
+            f"Forum Park 7623 confidence {confidence:.3f} should clear ~0.683 "
+            f"(match floor 0.40; below STRONG 0.70 post-renorm). Signals: {signals}"
         )
 
 
@@ -811,9 +813,12 @@ class TestMatchIntersection:
         assert outcome.matched is True, (
             f"Forum Park 7623 should match. Got: {outcome.reason}"
         )
-        assert outcome.confidence > STRONG_MATCH_CONFIDENCE, (
-            f"Confidence {outcome.confidence:.3f} should clear "
-            f"STRONG_MATCH ({STRONG_MATCH_CONFIDENCE}). Reason: {outcome.reason}"
+        # Post adjacency re-weight 2026-06-03: non-adjacent intersection match
+        # (adjacent_road_match=0) scaled ×0.888889 -> 0.683, below the dead STRONG
+        # 0.70 (test-only constant); still clears the 0.40 commit floor.
+        assert outcome.confidence > 0.65, (
+            f"Confidence {outcome.confidence:.3f} should clear ~0.683 "
+            f"(match floor 0.40; below STRONG 0.70 post-renorm). Reason: {outcome.reason}"
         )
         assert outcome.corrected_lat == 29.6246
         assert outcome.corrected_lng == -95.5102
@@ -1577,7 +1582,7 @@ class TestEvaluate:
         assert len(matches) == 1
         assert matches[0].offer_id == offer.offer_id
         assert matches[0].location_type == "pickup"
-        assert matches[0].confidence > STRONG_MATCH_CONFIDENCE
+        assert matches[0].confidence > 0.65  # post adjacency re-weight 2026-06-03: 0.683, below dead STRONG 0.70, above 0.40 commit floor
         # Default _FakeCursor.fetchall() returns [] -> no recent_clusters ->
         # cluster_revisit must be False on the standard "first arrival" case.
         assert diagnostics.cluster_revisit is False

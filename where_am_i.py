@@ -194,14 +194,15 @@ _PIVOT_FULL_OFF_WIRE_S = 30
 #   - apartment_complex: pivot dominates (off-wire arrival is the signal)
 
 _CONFIDENCE_WEIGHTS = {
+    # adjacency re-weight 2026-06-03: adjacent_road_match 0.10->0.20, others ×0.888889 renorm. See docs/FINDING_residential_adjacent_pickup_below_floor_2026-06-03.md §4.4
     "intersection": {
-        "proximity":            0.10,
-        "breadcrumb_match":     0.30,
-        "cluster_tightness":    0.15,
-        "cluster_duration":     0.10,
-        "on_target_road":       0.20,
-        "off_wire_pivot":       0.05,
-        "adjacent_road_match":  0.10,
+        "proximity":            0.088889,
+        "breadcrumb_match":     0.266667,
+        "cluster_tightness":    0.133333,
+        "cluster_duration":     0.088889,
+        "on_target_road":       0.177778,
+        "off_wire_pivot":       0.044444,
+        "adjacent_road_match":  0.200000,
     },
     "single_road": {
         "proximity":            0.05,

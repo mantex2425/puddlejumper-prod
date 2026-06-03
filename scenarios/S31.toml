@@ -1,5 +1,5 @@
 id = """S31"""
-description = """Driver stops at intersection-class PUDO (Settemont Rd) @ 205m. BMOAR 200m proximity gate fails. WAI reports at_current_pudo via weighted confidence: breadcrumb_match=1.0 (Settemont in trail), cluster_duration=1.0 (30s stop), proximity=0.18 (205/250m), on_target_road=1.0. Confidence >= 0.7 triggers PLAN INITIAL_NAIL."""
+description = """Driver stops at intersection-class PUDO (Settemont Rd) @ 205m. BMOAR 200m proximity gate fails. WAI reports at_current_pudo via weighted confidence: breadcrumb_match=1.0 (Settemont in trail), cluster_duration=1.0 (30s stop), proximity=0.18 (205/250m), on_target_road=1.0. Confidence >= 0.65 post adjacency re-weight 2026-06-03 (was 0.7); clears the 0.40 commit floor. See docs/FINDING_residential_adjacent_pickup_below_floor_2026-06-03.md §4.4"""
 status = """PASS"""
 notes = """Phase D north star — Forum Park 7623 forensic replay fixture"""
 
@@ -20,5 +20,5 @@ offer_status = """pending"""
 heartbeats = "tests/fixtures/7623_heartbeats.json"
 expected_status = "at_current_pudo"
 expected_pudo_type = "pickup"
-expected_confidence_min = 0.7
+expected_confidence_min = 0.65
 expected_signals_minimum = { breadcrumb_match = 1.0, on_target_road = 1.0 }
