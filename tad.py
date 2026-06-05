@@ -265,18 +265,21 @@ def compute_offer_expectations(
     if prev_offer is not None:
         if (prev_expected_dropoff_arrival_time is not None
                 and prev_expected_dropoff_distance is not None):
-            if prev_expected_dropoff_arrival_time < now:
-                delta_s = (now - prev_expected_dropoff_arrival_time).total_seconds()
-                log.warning(
-                    "[tad] offer %s: prev offer %s expected_dropoff_arrival_time "
-                    "is %.1fs in the past — treating prev as orphaned, computing "
-                    "expectations as idle case",
-                    new_offer.offer_id, prev_offer.offer_id, delta_s,
-                )
-            else:
-                use_idle_anchors = False
-                pickup_time_anchor = prev_expected_dropoff_arrival_time
-                pickup_distance_anchor = prev_expected_dropoff_distance
+            # Step 5 (§6.5, Option C, ratified): the orphan/GC decision is the
+            # SOLE responsibility of the upstream Horizon Budget GC
+            # (decisions/logger.py), which is distance-primary with a designed
+            # time fallback for the odometer-dark case, and which nulls
+            # prev_offer when the chain ages out. By the time we hold a LIVE
+            # prev_offer with present anchors here, #1 has already vetted it as
+            # KEEP — so we trust that verdict and stack UNCONDITIONALLY. No
+            # independent time re-check: it could only re-litigate #1's KEEP,
+            # and a `prev ETA < now` check mis-orphans the slow-but-within-
+            # horizon driver (#1 kept the chain on distance velocity; the clock
+            # ETA being past does not mean the chain is stale). Orphan, when it
+            # happens, arrives here as prev_offer=None (idle), logged by #1.
+            use_idle_anchors = False
+            pickup_time_anchor = prev_expected_dropoff_arrival_time
+            pickup_distance_anchor = prev_expected_dropoff_distance
 
     # Compute pickup anchors.
     expected_pickup_arrival_time = (

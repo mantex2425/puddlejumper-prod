@@ -174,39 +174,24 @@ class TestStackedCase:
 
 class TestOrphanCase:
     def test_orphan_falls_back_to_idle(self):
-        prev = _make_offer("prev-A", accepted_at=NOW - timedelta(hours=1))
-        prev_dropoff_eta = NOW - timedelta(minutes=5)
-        prev_dropoff_dist = 95.0
-
+        """Step 5 (Option C): orphan is driven by the UPSTREAM Horizon Budget GC
+        (decisions/logger.py), which nulls prev_offer when the chain ages out.
+        compute_offer_expectations no longer makes an independent orphan
+        decision — it idle-anchors iff handed prev_offer=None. This test models
+        the real production orphan path: #1 GC'd the prev, so we receive
+        prev_offer=None (and None anchors) and compute idle.
+        """
         new = _make_offer("offer-B", accepted_at=NOW,
                           pickup_miles=4.0, pickup_minutes=6)
         result = compute_offer_expectations(
-            new_offer=new, prev_offer=prev,
+            new_offer=new, prev_offer=None,
             current_odometer=100.0, now=NOW,
-            prev_expected_dropoff_arrival_time=prev_dropoff_eta,
-            prev_expected_dropoff_distance=prev_dropoff_dist,
+            prev_expected_dropoff_arrival_time=None,
+            prev_expected_dropoff_distance=None,
         )
+        # Idle anchors: pickup distance = current_odometer (100) + pickup (4).
         assert result.expected_pickup_arrival_time == NOW + timedelta(minutes=6)
         assert result.expected_pickup_distance == pytest.approx(104.0)
-
-    def test_orphan_emits_log_warning(self, caplog):
-        prev = _make_offer("prev-orphan", accepted_at=NOW - timedelta(hours=1))
-        prev_dropoff_eta = NOW - timedelta(minutes=5)
-        new = _make_offer("new-after-orphan", accepted_at=NOW)
-
-        with caplog.at_level(logging.WARNING, logger="tad"):
-            compute_offer_expectations(
-                new_offer=new, prev_offer=prev,
-                current_odometer=100.0, now=NOW,
-                prev_expected_dropoff_arrival_time=prev_dropoff_eta,
-                prev_expected_dropoff_distance=95.0,
-            )
-
-        assert any(
-            "new-after-orphan" in rec.message and "prev-orphan" in rec.message
-            for rec in caplog.records
-        )
-
 
 class TestAlreadyHalfwayThere:
     def test_short_pickup_accepted_mid_approach(self):
