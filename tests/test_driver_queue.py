@@ -29,10 +29,6 @@ from driver_queue import (
     DriverQueue,
     Offer,
     QueueSnapshot,
-    GC_MIN_MINUTES,
-    GC_MAX_MINUTES,
-    GC_NULL_PICKUP_MIN,
-    GC_NULL_TRIP_MIN,
 )
 
 
@@ -64,7 +60,6 @@ def make_offer_row(offer_id, address_prefix="123 Main St", lat=29.76, lng=-95.37
         "dropoff_lat": lat + 0.01,
         "dropoff_lng": lng + 0.01,
         "created_at": created_at or datetime.now(timezone.utc),
-        "raw_min": pickup_minutes + trip_minutes,
     }
 
 

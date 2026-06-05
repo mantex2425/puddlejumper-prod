@@ -58,8 +58,9 @@ log = logging.getLogger(__name__)
 # production-validated values despite a (now-removed) docstring claiming
 # they were lifted verbatim. After Commit 1's caller-migration step,
 # driver_heartbeat imports these from here rather than duplicating them.
-GC_NULL_PICKUP_MIN = 15   # Default pickup_minutes when offer_history.pickup_minutes IS NULL
-GC_NULL_TRIP_MIN = 30     # Default trip_minutes when offer_history.trip_minutes IS NULL
+# GC_NULL_PICKUP_MIN / GC_NULL_TRIP_MIN RETIRED 2026-06-05 (Step 6 piece ii):
+# they fed only the vestigial raw_min SELECT column (computed-but-never-consumed),
+# which was evicted when the band replaced the per-trip time window. See ERRATUM.
 
 # Distance-axis defaults — mirror the time-axis pattern. Used when
 # pickup_miles / trip_miles are NULL on offer_history rows.
@@ -79,8 +80,11 @@ GC_NULL_TRIP_MIN = 30     # Default trip_minutes when offer_history.trip_minutes
 # GC_BUFFER_MULT RETIRED 2026-06-05 (Step 6 piece i): the 25% trip-distance
 # buffer was the Houston-Tax distance ceiling, superseded by the per-leg
 # 0.15-of-leg-distance band (ODOMETER_BAND_TOLERANCE_PCT in pudo_types).
-GC_MIN_MINUTES = 15       # Floor: even a 1-minute errand stays live for this long
-GC_MAX_MINUTES = 240      # Ceiling: cap the airport-run window to 4 hours
+# GC_MIN_MINUTES / GC_MAX_MINUTES RETIRED 2026-06-05 (Step 6 piece ii): the
+# per-trip time-window clamp they bounded is gone (band replaces it). The
+# 4-hour ceiling's LIVE inheritor is GC_ABANDONMENT_CEILING_HOURS (below); the
+# provenance comments referencing GC_MAX_MINUTES=240 document that lineage and
+# are intentionally kept. See ERRATUM 2026-06-05.
 
 # §XIV.H Odometer-Staleness Gate (2026-05-19): replaces the per-trip time
 # horizon as the offer-liveness time axis. Offers are reaped when the
@@ -757,13 +761,10 @@ class DriverQueue:
         driver_heartbeat._project_queue (commit 7fe4391-era body) and
         unchanged here — recon-first, no behavior change in Commit 1.
 
-        Per-offer GC window (in minutes):
-            raw_min    = COALESCE(pickup_minutes, GC_NULL_PICKUP_MIN)
-                       + COALESCE(trip_minutes,   GC_NULL_TRIP_MIN)
-            window_min = LEAST(GREATEST(raw_min * GC_BUFFER_MULT,
-                                        GC_MIN_MINUTES),
-                               GC_MAX_MINUTES)
-            live       = (NOW() - created_at) < window_min minutes
+        Liveness filtering is delegated to LIVE_OFFER_PREDICATE_SQL (the
+        per-leg odometer band + causality + abandonment + staleness clauses).
+        The retired per-trip time-window (raw_min/window_min) was removed in
+        Step 6 piece (ii) — see ERRATUM 2026-06-05.
 
         Offers with unbuildable geocodes (builder returns None for either
         pickup or dropoff) are logged at WARNING and skipped — same
@@ -791,8 +792,7 @@ class DriverQueue:
                 pickup_miles, trip_miles,
                 pickup_minutes, trip_minutes,
                 leg_start_cumulative_miles_pickup,
-                leg_start_cumulative_miles_dropoff,
-                COALESCE(pickup_minutes, %s) + COALESCE(trip_minutes, %s) AS raw_min
+                leg_start_cumulative_miles_dropoff
             FROM app_private.offer_history oh
             WHERE decision_log_id IN (
                 SELECT id FROM app_private.decision_log WHERE driver_id = %s
@@ -800,7 +800,6 @@ class DriverQueue:
               AND {LIVE_OFFER_PREDICATE_SQL}
             ORDER BY created_at DESC
         """, (
-            GC_NULL_PICKUP_MIN, GC_NULL_TRIP_MIN,    # SELECT raw_min COALESCEs
             self.driver_id,                           # FK lookup
         ) + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at))
 
