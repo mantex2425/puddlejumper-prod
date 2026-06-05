@@ -1357,6 +1357,24 @@ def _detect_narrative_tiebreaker(executed_actions, queue_metadata):
     return None
 
 
+def _coerce_odometer(raw):
+    """Single coercion point for the hardware odometer payload.
+
+    FINDING §5.7 / Step 4 (2026-06-05). Returns a float, or None. NEVER
+    returns 0 for a missing/invalid reading — a fabricated 0 would produce a
+    garbage expected_odometer in any band consumer (Gemini NULL-not-zero
+    guard, ratified 2026-06-05). Genuine 0.0 and negative real readings pass
+    through unchanged: this is a coercion point, not a validity gate. The
+    band (Step 6) judges validity; the accessor only normalizes type.
+    """
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _log_decision_context(
     cur, driver_id, body,
     current_lat, current_lng, speed_mph, gps_accuracy_m,
@@ -1414,6 +1432,22 @@ def _log_decision_context(
         queue_metadata=queue_metadata,
         suppressed_contexts=suppressed_contexts,
     )
+
+    # Step 4 (FINDING §5.7, 2026-06-05): persist the point-in-time odometer
+    # the GC gate saw this heartbeat. `actual_odometer` is the genuinely-
+    # missing, genuinely-point-in-time scalar — no other copy exists anywhere
+    # (offer_history `expected_*` anchors are MUTATED at pickup-fire, so they
+    # cannot reconstruct the at-heartbeat odometer in general). Per-offer
+    # `expected_odometer` logging is DEFERRED to Step 6, shaped by the band
+    # consumer. schema_version=1 lets Step 6 extend this blob (per-offer
+    # expected + the §5.5 deferred/active taxonomy) without ambiguity about
+    # which rows predate the band. NULL-not-zero via _coerce_odometer.
+    _actual_odo = _coerce_odometer(body.get('cumulative_miles'))
+    _odometer_gate_result = json.dumps({
+        "schema_version": 1,
+        "actual_odometer": _actual_odo,
+        "odometer_status": "present" if _actual_odo is not None else "missing",
+    })
 
     # WAI per-offer signal-score forensic blob (2026-05-30): captures the
     # signals breakdown for every offer WAI scored, not just the winner.
@@ -1550,11 +1584,16 @@ def _log_decision_context(
             dispatch_executed,
             dispatch_error_msg,
             # Sprint A gate-layer columns (DEPRECATED 2026-05-17 — motion_gate
-            # purged per §XIV.A Naked-List Contract. Four columns retained
+            # purged per §XIV.A Naked-List Contract. Three columns retained
             # in the schema for historical rows; new rows write NULL.
             # Schema-drop follow-up queued post-vocabulary-sweep.):
+            # odometer_gate_result (slot 2) now carries the Step 4 forensic
+            # blob (FINDING §5.7, 2026-06-05): point-in-time actual_odometer
+            # + odometer_status. The other three slots remain NULL pending
+            # schema drop. Positional order matches the column list:
+            #   motion_gate_result, odometer_gate_result, gate_held_offer_ids, gate_held_legs
             None,
-            None,
+            _odometer_gate_result,
             None,
             None,
             tad_decision_context,    # [3b.R]
