@@ -10,18 +10,23 @@ After the P10/P11 patch, GC consumes expected_dropoff_distance too (in the
 post-pickup-fire branch of the CASE). This test locks the two to the same
 anchor view going forward.
 
-The contract: for any synthetic offer in post-pickup-fire state, GC's
-evaluated distance threshold MUST equal TAD's anchor + buffer math:
+The contract (Step 6, ERRATUM 2026-06-05): GC and TAD agree because both
+read the SAME per-leg odometer band, centered on the canonical anchor with
+a trip-relative tolerance. The old "+ trip_miles * 0.25" buffer was a
+PHANTOM (ERRATUM §2) — TAD never used it. TAD's real dropoff gate is the
+band, and GC's liveness predicate now uses the identical band:
 
-  GC_threshold = expected_dropoff_distance + trip_miles * 0.25
+  dropoff-leg UPPER EDGE = expected_dropoff_distance
+                           + max(0.15 * trip_miles, NOISE_FLOOR_MI)
 
-  TAD_anchor   = expected_dropoff_distance
-  TAD_buffer   = trip_miles * 0.25
-  TAD_total    = TAD_anchor + TAD_buffer
+  (the band is |odo - expected_dropoff_distance| <= max(0.15*trip_miles, 2.0);
+   liveness reaps on the UPPER edge, so an offer is live iff
+   odo <= expected_dropoff_distance + tolerance.)
 
-If a future change moves the buffer multiplier in one place but not the
-other, or changes the anchor column in one place but not the other, this
-test fails — making the divergence impossible to ship unnoticed.
+The single-owner band is pudo_types.odometer_band; this file asserts GC's
+SQL agrees with it. If a future change moves the tolerance or anchor in one
+place but not the other, this test fails — making divergence impossible to
+ship unnoticed.
 
 §XIV.J: real-PG fixture. The SQL predicate is the same one production uses;
 TAD's anchor math is asserted against the same column the SQL CASE reads.
@@ -79,9 +84,16 @@ def _seed_post_pickup_offer(cur, *,
 
 
 def _gc_threshold_for_post_pickup(*, expected_dropoff_distance, trip_miles):
-    """The formula the new CASE branch in LIVE_OFFER_PREDICATE_SQL uses
-    for post-pickup-fire offers."""
-    return expected_dropoff_distance + trip_miles * 0.25
+    """The dropoff-leg band UPPER EDGE the liveness predicate uses for
+    post-pickup-fire offers (Step 6, ERRATUM §4): the offer is live iff
+    odometer <= expected_dropoff_distance + max(0.15*trip_miles, 2.0).
+
+    Mirrors pudo_types.odometer_band's dropoff-leg tolerance. NOISE_FLOOR_MI
+    is 2.0 (ODOMETER_BAND_NOISE_FLOOR_MI)."""
+    from pudo_types import ODOMETER_BAND_NOISE_FLOOR_MI, ODOMETER_BAND_TOLERANCE_PCT
+    tolerance = max(ODOMETER_BAND_TOLERANCE_PCT * trip_miles,
+                    ODOMETER_BAND_NOISE_FLOOR_MI)
+    return expected_dropoff_distance + tolerance
 
 
 def _eval_predicate(cur, offer_id, current_cumulative_miles, reference_time,
@@ -172,18 +184,19 @@ class TestGCTADAnchorAgreement:
             trip_miles=scenario["trip_miles"],
         )
 
-        # Driver exactly AT threshold → not strict-less-than → dead
+        # New band uses an INCLUSIVE upper edge (odo <= edge -> live).
+        # Driver just OVER the edge -> overshot -> dead.
         alive = _eval_predicate(
             db_cur, offer_id,
-            current_cumulative_miles=threshold,
+            current_cumulative_miles=threshold + 0.001,
             reference_time=reference,
             last_odometer_move_at=reference,
         )
         assert alive is False, (
-            f"{scenario['label']}: predicate evaluated TRUE at exactly the "
-            f"computed threshold ({threshold} mi). The CASE branch's "
-            f"formula does not match expected_dropoff_distance + "
-            f"trip_miles * 0.25. GC and TAD have diverged."
+            f"{scenario['label']}: predicate evaluated TRUE just OVER the "
+            f"band upper edge ({threshold + 0.001} > {threshold}). The SQL "
+            f"band does not match expected_dropoff_distance + "
+            f"max(0.15*trip_miles, 2.0). GC and the primitive have diverged."
         )
 
     @pytest.mark.parametrize("scenario", POST_PICKUP_CASES)
@@ -212,40 +225,44 @@ class TestGCTADAnchorAgreement:
             trip_miles=scenario["trip_miles"],
         )
 
-        # Driver 0.001 mi under threshold → strict-less-than → alive
+        # New band INCLUSIVE upper edge: driver exactly AT the edge -> alive.
         alive = _eval_predicate(
             db_cur, offer_id,
-            current_cumulative_miles=threshold - 0.001,
+            current_cumulative_miles=threshold,
             reference_time=reference,
             last_odometer_move_at=reference,
         )
         assert alive is True, (
-            f"{scenario['label']}: predicate evaluated FALSE just below "
-            f"the threshold ({threshold - 0.001} < {threshold}). The CASE "
-            f"branch is more aggressive than the formula suggests."
+            f"{scenario['label']}: predicate evaluated FALSE at exactly the "
+            f"band upper edge ({threshold}). The band's upper edge is "
+            f"inclusive (odo <= edge -> live); the SQL is more aggressive "
+            f"than the primitive."
         )
 
-    def test_pre_pickup_branch_uses_receipt_anchor_not_reanchor(self, db_cur):
-        """When actual_pickup_at IS NULL, GC must NOT use
-        expected_dropoff_distance even if that column happens to be
-        populated. The ELSE branch governs.
+    def test_pickup_leg_band_ignores_dropoff_anchor(self, db_cur):
+        """When actual_pickup_at IS NULL, the band must center on
+        expected_pickup_distance and must NOT read expected_dropoff_distance
+        even when that column is populated.
 
-        Defends against future regression where someone removes the
-        actual_pickup_at NULL check in the CASE WHEN, accidentally
-        applying re-anchor to pre-pickup offers.
+        Defends against the regression where the pickup branch wrongly
+        consults the dropoff anchor (ERRATUM §4: the pickup branch references
+        ONLY expected_pickup_distance). Seed a pickup-leg offer with a SANE
+        expected_pickup_distance and an ABSURD expected_dropoff_distance, then
+        position the driver beyond the pickup band's upper edge. If the band
+        correctly uses the pickup anchor -> dead. If it wrongly reads the
+        absurd dropoff anchor -> the driver would be well within that huge
+        band -> wrongly alive.
         """
         created_at = datetime.datetime(2026, 5, 19, 9, 0, 0, tzinfo=timezone.utc)
         reference = datetime.datetime(2026, 5, 19, 9, 30, 0, tzinfo=timezone.utc)
 
-        # Seed with actual_pickup_at = NULL but expected_dropoff_distance
-        # populated (anomalous but legal column state)
         db_cur.execute(
             """
             INSERT INTO app_private.decision_log (driver_id, created_at)
             VALUES (%s, %s)
             RETURNING id
             """,
-            ("test_driver_pre_pickup_anchor", created_at),
+            ("test_driver_pickup_leg_anchor", created_at),
         )
         decision_log_id = db_cur.fetchone()["id"]
         db_cur.execute(
@@ -255,24 +272,25 @@ class TestGCTADAnchorAgreement:
                 pickup_minutes, trip_minutes, pickup_miles, trip_miles,
                 miles_at_offer_receipt,
                 actual_pickup_at, actual_dropoff_at,
-                expected_dropoff_distance
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                expected_pickup_distance, expected_dropoff_distance
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (decision_log_id, created_at,
              10, 30, 5.0, 25.0,
              10.0,
              None, None,
-             999.0),  # absurd expected_dropoff_distance — would let any
-                      # ride survive if the CASE branch reads it
+             50.0,     # sane pickup anchor: band upper edge = 50 + max(0.15*5, 2)
+                       #                                       = 50 + 2.0 = 52.0
+             999.0),   # absurd dropoff anchor — must be IGNORED on the pickup leg
         )
         offer_id = db_cur.fetchone()["id"]
 
-        # Pre-pickup ELSE budget: 10.0 + (5.0+25.0)*1.25 = 47.5
-        # Driver at 60 mi → over receipt-time budget → must be dead.
-        # If the CASE branch erroneously consults expected_dropoff_distance
-        # = 999.0, driver at 60 would be alive (60 < 999 + buffer). The
-        # NULL check on actual_pickup_at is what prevents that.
+        # Pickup-leg band upper edge = 50.0 + max(0.15*5.0, 2.0) = 52.0.
+        # Driver at 60 mi -> over the pickup edge -> dead.
+        # If the band wrongly read expected_dropoff_distance=999.0, the driver
+        # at 60 would be far within that band -> wrongly alive. So `dead` proves
+        # the pickup branch ignores the dropoff anchor.
         alive = _eval_predicate(
             db_cur, offer_id,
             current_cumulative_miles=60.0,
@@ -280,8 +298,8 @@ class TestGCTADAnchorAgreement:
             last_odometer_move_at=reference,
         )
         assert alive is False, (
-            "Pre-pickup offer evaluated alive when over the receipt-time "
-            "budget. The CASE may be erroneously consulting "
-            "expected_dropoff_distance without checking actual_pickup_at "
-            "first. Contract violated."
+            "Pickup-leg offer evaluated alive past its pickup-band edge "
+            "(52.0 mi). The band may be wrongly consulting "
+            "expected_dropoff_distance (999.0) instead of "
+            "expected_pickup_distance. ERRATUM §4 contract violated."
         )

@@ -317,9 +317,13 @@ class TestDetectLostMode:
         cur = _mock_cursor(fetchone_value=None)
         _detect_lost_mode(cur, "driver-x", [7771], None, _T_NOW)
         sql_text = cur.execute.call_args[0][0]
-        # Horizon predicate must be spliced in
+        # Horizon predicate must be spliced in. Marker token updated for the
+        # Step 6 band (ERRATUM §4): the retired receipt anchor
+        # `oh.miles_at_offer_receipt` was replaced by the per-leg band, whose
+        # pickup-leg center `oh.expected_pickup_distance` is the stable marker
+        # proving the band predicate is present.
         assert "oh.actual_dropoff_at IS NULL" in sql_text
-        assert "oh.miles_at_offer_receipt" in sql_text
+        assert "oh.expected_pickup_distance" in sql_text
         # §XVIII trigger bit 2: pickup must be unfired
         assert "actual_pickup_at IS NULL" in sql_text
         # Pre-§XVIII proxies must be absent

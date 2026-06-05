@@ -186,17 +186,16 @@ class TestIAHReanchorAndStaleness:
             "If this fails, the gate is too aggressive."
         )
 
-    def test_case_5_pre_pickup_fire_uses_receipt_anchor(self, db_cur):
-        """Case 5: pre-pickup-fire branch preserves receipt-time formula.
+    def test_case_5_pre_pickup_fire_uses_pickup_band(self, db_cur):
+        """Case 5 (Step 6, ERRATUM §4): pre-pickup-fire offers use the
+        PICKUP-leg band, centered on expected_pickup_distance with tolerance
+        max(0.15*pickup_miles, 2.0). The receipt-anchor + 1.25-buffer formula
+        is retired (the buffer was a phantom, ERRATUM §2).
 
-        For an offer where actual_pickup_at IS NULL (pickup hasn't fired),
-        the CASE falls to the ELSE branch and uses miles_at_offer_receipt
-        + clamped (pickup+trip)*1.25 — identical to the existing behavior.
-
-        Seed a separate fixture: actual_pickup_at = NULL.
+        IAH pickup odometer anchor = 53.02 (= 80.12 dropoff - 27.1 trip).
+        Pickup band upper edge = 53.02 + max(0.15*5.6, 2.0)
+                               = 53.02 + 2.0 = 55.02  (0.84 < 2.0 floor).
         """
-        # Use the same shape but with no actual_pickup_at.
-        # Auto-increment sequences assign IDs; capture via RETURNING.
         driver_id = "test_driver_pre_pickup_p10"
         cur = db_cur
 
@@ -217,8 +216,8 @@ class TestIAHReanchorAndStaleness:
                 pickup_minutes, trip_minutes, pickup_miles, trip_miles,
                 miles_at_offer_receipt,
                 actual_pickup_at, actual_dropoff_at,
-                expected_dropoff_distance
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                expected_pickup_distance, expected_dropoff_distance
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (decision_log_id, IAH_CREATED_AT,
@@ -226,31 +225,31 @@ class TestIAHReanchorAndStaleness:
              IAH_PICKUP_MILES, IAH_TRIP_MILES,
              IAH_MILES_AT_OFFER_RECEIPT,
              None, None,
-             None),  # expected_dropoff_distance is NULL pre-pickup
+             53.02,    # expected_pickup_distance (IAH pickup odometer anchor)
+             None),    # expected_dropoff_distance NULL pre-pickup (correct)
         )
         offer_id = cur.fetchone()["id"]
 
-        # Pre-pickup-fire budget: 40.43 + (5.6+27.1)*1.25 = 81.305
-        # Driver at 80.00 → alive (within budget)
+        # Pickup band upper edge = 55.02. Driver at 55.0 -> within band -> alive.
         alive = _eval_predicate(
             cur, offer_id,
-            current_cumulative_miles=80.00,
+            current_cumulative_miles=55.00,
             reference_time=IAH_ARREST_AT,
             last_odometer_move_at=IAH_ARREST_AT,
         )
         assert alive is True, (
-            "Pre-pickup offer within receipt-time budget must remain alive "
-            "(behavior preserved from current production)."
+            "Pre-pickup offer within the pickup band (odo 55.0 <= edge 55.02) "
+            "must remain alive."
         )
 
-        # Driver at 82.00 → over budget (> 81.305) → dead
+        # Driver at 56.0 -> over the pickup band edge (55.02) -> dead.
         alive = _eval_predicate(
             cur, offer_id,
-            current_cumulative_miles=82.00,
+            current_cumulative_miles=56.00,
             reference_time=IAH_ARREST_AT,
             last_odometer_move_at=IAH_ARREST_AT,
         )
         assert alive is False, (
-            "Pre-pickup offer over receipt-time budget must die (existing "
-            "behavior preserved)."
+            "Pre-pickup offer past the pickup band upper edge (odo 56.0 > "
+            "55.02) must die (overshot the pickup leg)."
         )

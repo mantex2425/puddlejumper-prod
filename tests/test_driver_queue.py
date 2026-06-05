@@ -29,7 +29,6 @@ from driver_queue import (
     DriverQueue,
     Offer,
     QueueSnapshot,
-    GC_BUFFER_MULT,
     GC_MIN_MINUTES,
     GC_MAX_MINUTES,
     GC_NULL_PICKUP_MIN,

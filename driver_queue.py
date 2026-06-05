@@ -49,7 +49,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from pudo_types import Offer
+from pudo_types import Offer, ODOMETER_BAND_NOISE_FLOOR_MI
 
 log = logging.getLogger(__name__)
 
@@ -63,17 +63,22 @@ GC_NULL_TRIP_MIN = 30     # Default trip_minutes when offer_history.trip_minutes
 
 # Distance-axis defaults — mirror the time-axis pattern. Used when
 # pickup_miles / trip_miles are NULL on offer_history rows.
-GC_NULL_PICKUP_MI = 4.0   # Default pickup_miles fallback (75th-percentile-ish)
-GC_NULL_TRIP_MI = 8.0     # Default trip_miles fallback
-GC_MIN_DIST_MI = 2.0      # Floor for distance horizon
-GC_MAX_DIST_MI = 50.0     # Ceiling for distance horizon
+# GC_NULL_PICKUP_MI / GC_NULL_TRIP_MI / GC_MIN_DIST_MI / GC_MAX_DIST_MI
+# RETIRED 2026-06-05 (Step 6 piece i): the distance-band CASE that consumed
+# them was replaced by the per-leg odometer band. The 2.0-mi floor is now the
+# single-owner ODOMETER_BAND_NOISE_FLOOR_MI in pudo_types (superseding
+# GC_MIN_DIST_MI). The 1.25 buffer / 50-mi cap / 4.0+8.0 miles fallbacks are
+# gone — the band has no upper cap (a 235-mi offer stays live) and NULL leg
+# distance is permissive, not fallback-to-a-guess. See ERRATUM §4.
 # Houston Tax: 25% dynamic buffer on (pickup_minutes + trip_minutes) sized
 # to keep an offer live in the queue while the driver waits out real
 # Houston-area traffic (Sienna Pkwy, McKeever Rd, the Arcola crawl).
 # Tuned from production driving data; not arbitrary. If retuning, log the
 # rationale in CANONICAL_RULES.md or the relevant phase closeout — this
 # value drives queue retention semantics, not just a magic constant.
-GC_BUFFER_MULT = 1.25
+# GC_BUFFER_MULT RETIRED 2026-06-05 (Step 6 piece i): the 25% trip-distance
+# buffer was the Houston-Tax distance ceiling, superseded by the per-leg
+# 0.15-of-leg-distance band (ODOMETER_BAND_TOLERANCE_PCT in pudo_types).
 GC_MIN_MINUTES = 15       # Floor: even a 1-minute errand stays live for this long
 GC_MAX_MINUTES = 240      # Ceiling: cap the airport-run window to 4 hours
 
@@ -209,28 +214,41 @@ LIVE_OFFER_PREDICATE_SQL = """
         AND %s::timestamptz < %s::timestamptz - INTERVAL '%s minutes'
         AND oh.created_at <= %s::timestamptz - INTERVAL '%s minutes'
     )
-    -- Distance gate with re-anchor at pickup fire (2026-05-19): post-
-    -- pickup-fire branch consults the canonical expected_dropoff_distance
-    -- column that TAD, the heartbeat handler, and decisions/logger
-    -- already write and read. Pre-pickup-fire branch preserves the
-    -- receipt-time formula (current behavior, since expected_dropoff_
-    -- distance is only populated at pickup fire).
+    -- Odometer band (Step 6, ERRATUM 2026-06-05 §4). Per-leg, UPPER-EDGE
+    -- only: this is the LIVENESS layer, so it reaps an offer that has
+    -- OVERSHOT its band but NEVER reaps a not-yet-reached offer (the driver
+    -- is still en route; the lower edge is the candidacy/wallet layer's
+    -- concern in tad.py, not liveness). The band is the single-owner
+    -- quantity defined in pudo_types.odometer_band; this SQL is hand-written
+    -- to that formula and pinned to it by the equivalence test
+    -- (test_band_clause_matches_primitive). NO bridge term (ERRATUM §2): the
+    -- center is tad.py's expected_*_distance anchor, consumed as-is.
+    --
+    --   pickup  leg (actual_pickup_at IS NULL):
+    --     center = expected_pickup_distance, width = max(0.15*pickup_miles, floor)
+    --   dropoff leg (actual_pickup_at IS NOT NULL):
+    --     center = expected_dropoff_distance, width = max(0.15*trip_miles, floor)
+    --
+    -- NULL-permissive (ERRATUM §4, ratified 2026-06-05; 0/448 NULL in 30d):
+    -- NULL odometer, NULL center, or NULL leg-distance -> the branch is TRUE
+    -- (offer stays live -> §5.5 deferred sentinel). Explicit IS NULL guards,
+    -- not 3-valued-logic reliance. Replaces the old GC_NULL_*_MI fallback.
     AND (
         %s::numeric IS NULL
-        OR oh.miles_at_offer_receipt IS NULL
-        OR %s::numeric < (
+        OR (
             CASE
-                WHEN oh.actual_pickup_at IS NOT NULL
-                     AND oh.expected_dropoff_distance IS NOT NULL THEN
-                    oh.expected_dropoff_distance + oh.trip_miles * 0.25
+                WHEN oh.actual_pickup_at IS NULL THEN
+                    -- pickup leg: permissive if no center or no leg distance
+                    oh.expected_pickup_distance IS NULL
+                    OR oh.pickup_miles IS NULL
+                    OR %s::numeric <= oh.expected_pickup_distance
+                       + GREATEST(0.15 * oh.pickup_miles, %s)
                 ELSE
-                    oh.miles_at_offer_receipt + LEAST(
-                        GREATEST(
-                            (COALESCE(oh.pickup_miles, %s) + COALESCE(oh.trip_miles, %s)) * %s,
-                            %s
-                        ),
-                        %s
-                    )
+                    -- dropoff leg: permissive if no center or no leg distance
+                    oh.expected_dropoff_distance IS NULL
+                    OR oh.trip_miles IS NULL
+                    OR %s::numeric <= oh.expected_dropoff_distance
+                       + GREATEST(0.15 * oh.trip_miles, %s)
             END
         )
     )
@@ -359,18 +377,17 @@ def live_offer_predicate_params(current_cumulative_miles, reference_time, last_o
         GC_ODOMETER_FREEZE_MINUTES,                         # age interval
         reference_time,                                     # new-offer-exemption comparison RHS
         GC_ODOMETER_FREEZE_MINUTES,                         # new-offer-exemption interval
-        # Distance axis — pass the current odometer reading TWICE
-        # (once for the NULL guard, once for the math). Postgres has
-        # no syntactic way to reference a parameter twice in the same
-        # statement; we duplicate.
-        current_cumulative_miles,
-        current_cumulative_miles,
-        # Pre-pickup-fire distance horizon math (only consumed when
-        # actual_pickup_at IS NULL or expected_dropoff_distance IS NULL)
-        GC_NULL_PICKUP_MI, GC_NULL_TRIP_MI,
-        GC_BUFFER_MULT,
-        GC_MIN_DIST_MI,
-        GC_MAX_DIST_MI,
+        # Odometer band (Step 6, ERRATUM §4). The new band clause references
+        # the odometer THREE times — the outer NULL-guard, the pickup-leg
+        # comparison, the dropoff-leg comparison — and the noise floor TWICE
+        # (one per leg branch). Postgres cannot reference a param twice, so we
+        # duplicate. ODOMETER_BAND_NOISE_FLOOR_MI is the single-owner floor
+        # (pudo_types), superseding the retired GC_MIN_DIST_MI.
+        current_cumulative_miles,   # outer NULL guard
+        current_cumulative_miles,   # pickup-leg comparison
+        ODOMETER_BAND_NOISE_FLOOR_MI,   # pickup-leg width floor
+        current_cumulative_miles,   # dropoff-leg comparison
+        ODOMETER_BAND_NOISE_FLOOR_MI,   # dropoff-leg width floor
     )
 
 
