@@ -42,6 +42,7 @@ from nail_it_core import write_nailed_position
 from where_am_i import WhereAmI, _commits, classify_commit_rule, haversine_meters
 from tad import OfferTadState
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
+from area_dsi import interpolate_area_dsi
 from dispatch import (
     dispatch,
     FirePickup, FireDropoff,
@@ -2276,7 +2277,14 @@ def post_heartbeat():
     # cadence_target_hz was computed earlier (before _log_decision_context)
     # for forensic persistence per §XVI.C cadence column (2026-05-24).
     # The variable is still in scope here.
-    response = {"ok": True, "cadence_target_hz": cadence_target_hz}
+    response = {
+        "ok": True,
+        "cadence_target_hz": cadence_target_hz,
+        # DSI v1 area readout (observational): IDW community DSI at the
+        # driver's current location, or null when no nearby data. Never
+        # affects any verdict. See area_dsi.py.
+        "current_location_dsi": interpolate_area_dsi(cur, current_lat, current_lng),
+    }
     # §IV recovery (2026-05-27): voice dedup state read from driver_trip_state
     # before _voice_for_actions, written back when voice fires. State persists
     # across container restarts per Andrew's directive (do the right thing).
