@@ -6,6 +6,7 @@ import traceback
 from pudo_types import Offer, TargetSpec
 from tad import compute_offer_expectations
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
+from dsi import compute_dsi_v1
 
 
 def _safe_numeric(val):
@@ -297,6 +298,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                     leg_start_cumulative_miles_pickup,
                     miles_at_offer_receipt,
                     lat_at_offer_receipt, lng_at_offer_receipt,
+                    dsi_v1,
                     expected_pickup_arrival_time, expected_pickup_distance,
                     expected_dropoff_arrival_time, expected_dropoff_distance
                 ) VALUES (
@@ -316,6 +318,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                     %s,
                     %s,
                     %s, %s,
+                    %s,
                     %s, %s,
                     %s, %s
                 )
@@ -338,6 +341,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                 ep.get("cumulative_miles"),                    # leg_start_cumulative_miles_pickup
                 ep.get("cumulative_miles"),                    # miles_at_offer_receipt (same source)
                 ep.get("current_lat"), ep.get("current_lng"),  # lat/lng_at_offer_receipt
+                compute_dsi_v1(_safe_numeric(result.get("hourlyRate")), _safe_numeric(result.get("dollarsPerMile"))),  # dsi_v1 (observational; NULL-strict)
                 # Phase 2c.2 Item 3b.W: TAD expected anchors
                 expected_pickup_eta, expected_pickup_dist,
                 expected_dropoff_eta, expected_dropoff_dist,

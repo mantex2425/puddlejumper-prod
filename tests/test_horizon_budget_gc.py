@@ -157,7 +157,7 @@ def _capture_oh_insert_params(cur):
 #   expected_pickup_distance — index for STACKED vs IDLE discrimination.
 # If pytest fails on these assertions with values that "look almost right
 # but in the wrong place," update this index.
-EXPECTED_PICKUP_DIST_IDX = 35
+EXPECTED_PICKUP_DIST_IDX = 36  # +1: dsi_v1 inserted before expected_pickup in offer_history INSERT (DSI v1 step 1, 2026-06-02)
 
 
 def _idle_expected_pickup_distance(ep):

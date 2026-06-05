@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from flask import Blueprint, request, jsonify
 import uuid
 from psycopg2.extras import RealDictCursor
+from dsi import compute_dsi_v1
 
 # 🟢 RESTORING ORIGINAL WORKING IMPORTS
 from db import get_db
@@ -624,7 +625,8 @@ def harvest_offer():
                 fare, trip_miles, trip_minutes,
                 pickup_miles, pickup_minutes,
                 dollars_per_mile, effective_hourly_rate,
-                is_surge, ride_type
+                is_surge, ride_type,
+                dsi_v1
             ) VALUES (
                 NOW(),
                 %s,
@@ -636,7 +638,8 @@ def harvest_offer():
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
-                %s, %s
+                %s, %s,
+                %s
             )
         """, (
             day_of_year,
@@ -646,7 +649,8 @@ def harvest_offer():
             fare, trip_miles, trip_minutes,
             pickup_miles, pickup_minutes,
             dollars_per_mile, effective_hourly_rate,
-            is_surge, ride_type
+            is_surge, ride_type,
+            compute_dsi_v1(effective_hourly_rate, dollars_per_mile)  # dsi_v1 (observational; NULL-strict)
         ))
 
         # [PHASE 1] Android coord cache writes removed — server geocode is sole cache writer
