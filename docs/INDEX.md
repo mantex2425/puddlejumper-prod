@@ -123,6 +123,41 @@ Superseded docs preserved for git history. **Do not load — they contain stale 
 
 ---
 
+## Odometer/GC
+# INDEX.md additions — odometer / GC subsystem (2026-06-05)
+
+Paste these into INDEX.md. The odometer/GC subsystem is currently UNREFERENCED in INDEX.md
+(confirmed 2026-06-05); these entries begin closing that gap.
+
+---
+
+## Add under a new or existing "Odometer / GC / Liveness" heading:
+
+- **FINDING_ODOMETER_GC_SPEC_RECONCILIATION_2026-06-05.md** — Canonical odometer/GC spec
+  (proposed, awaiting ratification). Reconciles the three-way drift between RIDE_LIFECYCLE.md
+  (stale time gate), PHASE_2C_2_DYNAMIC_ODOMETER_SNAPSHOT.md (unratified ±15% signal), and the
+  running distance-gate code (unsourced 1.25× / [2,50] clamp). Defines: expected-odometer with
+  remaining-current-trip bridge term; two-sided ±15% band; emergent reaping (no time ceiling, no
+  distance cap, 4-hour abandonment backstop only); update-only-for-offers-received-during-current-
+  ride invariant; lost-mode NULL+`deferred` sentinel with dropoff-disambiguation recompute/reap;
+  verdict-blindness; odometer encapsulation + persistence to pudo_decision_context. Origin: the
+  2026-06-04 drive review (9132 candidate-set eviction, ~63% PUDO rate).
+
+## Stale-doc reconciliation flags (action items, not new docs):
+
+- **RIDE_LIFECYCLE.md §3 step 3** — describes a TIME-based queue projection
+  (`LEAST(GREATEST((pu_min+trip_min)*1.5,15),240)` minutes) that was replaced by the distance
+  staleness gate on 2026-05-19. Marked for correction once the FINDING above is ratified. Until
+  then, RIDE_LIFECYCLE.md §3 is NOT current on GC.
+
+- **PHASE_2C_2_DYNAMIC_ODOMETER_SNAPSHOT.md** — status "not yet ratified for implementation";
+  describes the ±15% expected-odometer concept as a *matcher scoring signal* (never built). The
+  FINDING above adopts the ±15% concept as the *GC liveness band* instead. Cross-reference, do
+  not treat as current spec.
+
+
+---
+
 ## Adding new docs to the index
 
 When a new long-term decision is documented:
