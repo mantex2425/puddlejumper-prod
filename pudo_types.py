@@ -177,6 +177,14 @@ real-world matches sit at 0.404-0.409, threshold-edge sensitive).
 # deferred path (offer stays alive, resolved at dropoff-disambiguation or the
 # 4-hour abandonment ceiling) — NEVER fabricate a band, NEVER reap on absence.
 
+# SYSTEM INVARIANT (TAD-unification Option A, ratified 2026-06-05): this 2.0 is
+# a WIDTH FLOOR — the minimum band tolerance, insulating against telemetry/GPS
+# jitter so a short leg's 15% half-width is never tighter than sensor noise. It
+# is COINCIDENTALLY EQUAL to tad.SHORT_TRIP_THRESHOLD_MILES (2.0), which is a
+# different concept — a mode-switch boundary, not a width. Do NOT couple or
+# unify these two 2.0 constants; they protect independent domains (telemetry
+# insulation here vs routing mode-switch there) and would drift in different
+# directions if retuned.
 ODOMETER_BAND_NOISE_FLOOR_MI: float = 2.0
 """Canonical minimum band half-width, in miles (FINDING §6.2, ratified 2026-06-05).
 

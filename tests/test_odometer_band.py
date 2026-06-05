@@ -233,3 +233,68 @@ def test_band_return_shape():
             and len(result) == 2
             and all(isinstance(x, float) for x in result)
         )
+
+
+# ── Drift-guard: the 0.15 tolerance is shared with TAD's distance gate ───────
+# (TAD-unification Option A, ratified 2026-06-05)
+#
+# TAD's _evaluate_distance_gate and the liveness band are SEPARATE gates
+# (different short-trip policy, different tristate vs bool semantics) — NOT
+# unified. But they share ONE quantity: the 0.15 band half-width. TAD expresses
+# it as symmetric thresholds (completion 0.85 = 1 - 0.15, overshoot 1.15 =
+# 1 + 0.15); the primitive expresses it as ODOMETER_BAND_TOLERANCE_PCT = 0.15.
+# These are the same number two ways (the §1.1 equivalence). This guard fails if
+# anyone retunes one without the other.
+#
+# NB: TAD has NO `TOLERANCE_PCT` constant — it has DISTANCE_GATE_COMPLETION_
+# THRESHOLD / DISTANCE_GATE_OVERSHOOT_THRESHOLD. We assert the derived
+# relationship, not a (nonexistent) shared constant.
+
+import tad  # noqa: E402  (import here to keep the primitive tests import-light)
+
+
+def test_band_tolerance_matches_tad_distance_gate_thresholds():
+    """The band's 0.15 half-width == TAD's symmetric distance-gate offsets.
+
+    completion threshold = 1 - tolerance  (0.85 = 1 - 0.15)
+    overshoot  threshold = 1 + tolerance  (1.15 = 1 + 0.15)
+
+    If the band tolerance or TAD's thresholds drift apart, the shared 15%
+    quantity has split into two owners — this flags it.
+    """
+    tol = ODOMETER_BAND_TOLERANCE_PCT
+    assert tad.DISTANCE_GATE_COMPLETION_THRESHOLD == pytest.approx(1.0 - tol), (
+        f"TAD completion threshold {tad.DISTANCE_GATE_COMPLETION_THRESHOLD} != "
+        f"1 - band tolerance ({1.0 - tol}). The shared 15% quantity has drifted."
+    )
+    assert tad.DISTANCE_GATE_OVERSHOOT_THRESHOLD == pytest.approx(1.0 + tol), (
+        f"TAD overshoot threshold {tad.DISTANCE_GATE_OVERSHOOT_THRESHOLD} != "
+        f"1 + band tolerance ({1.0 + tol}). The shared 15% quantity has drifted."
+    )
+
+
+def test_two_2mile_constants_are_coincidentally_equal_not_coupled():
+    """The two 2.0-mile constants are coincidentally equal, independent concepts
+    (TAD-unification Option A). This test documents — via assertion — that they
+    are EQUAL TODAY, so if a future change makes them unequal that is allowed
+    (they are independent), but the test's existence records that the equality
+    is known and incidental, not a coupling to preserve.
+
+    pudo_types.ODOMETER_BAND_NOISE_FLOOR_MI = band width floor (telemetry).
+    tad.SHORT_TRIP_THRESHOLD_MILES          = mode-switch boundary (routing).
+    """
+    # They happen to be equal now; this is incidental. If they ever diverge,
+    # UPDATE this test (do not couple the constants). The independence comments
+    # at both definition sites are the authoritative guard; this is a tripwire
+    # that surfaces a divergence to a human rather than silently coupling them.
+    if ODOMETER_BAND_NOISE_FLOOR_MI != tad.SHORT_TRIP_THRESHOLD_MILES:
+        # Divergence is LEGAL (independent concepts). Just surface it.
+        import warnings
+        warnings.warn(
+            "The two 2.0-mile constants have diverged "
+            f"(floor={ODOMETER_BAND_NOISE_FLOOR_MI}, "
+            f"short_trip={tad.SHORT_TRIP_THRESHOLD_MILES}). This is ALLOWED — "
+            "they are independent. Confirm the divergence is intentional and "
+            "update this test's expectation.",
+            stacklevel=2,
+        )

@@ -91,6 +91,13 @@ DISTANCE_GATE_OVERSHOOT_THRESHOLD = 1.15
 # Below this trip length, percentage math is too noisy. Switch to absolute
 # tolerance instead. 2.0mi is the empirical noise floor — at 1.5mi a 0.2mi
 # navigation deviation is +13% / -13% but matters operationally.
+# SYSTEM INVARIANT (TAD-unification Option A, ratified 2026-06-05): this 2.0 is
+# a MODE-SWITCH BOUNDARY — below this leg distance the gate switches from
+# percentage scaling to the absolute +-0.5mi tolerance. It is COINCIDENTALLY
+# EQUAL to pudo_types.ODOMETER_BAND_NOISE_FLOOR_MI (2.0), which is a different
+# concept — a band WIDTH FLOOR, not a mode boundary. Do NOT couple or unify
+# these two 2.0 constants; they protect independent domains and would drift in
+# different directions if retuned.
 SHORT_TRIP_THRESHOLD_MILES = 2.0
 
 # Absolute tolerance for short trips. Catches 0.8mi pickup with +0.2mi
