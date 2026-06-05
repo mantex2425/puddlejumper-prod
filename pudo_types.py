@@ -137,6 +137,150 @@ real-world matches sit at 0.404-0.409, threshold-edge sensitive).
 """
 
 
+# ============================================================================
+# Odometer Band — the single-owner distance band (Step 6, ERRATUM §4)
+# ============================================================================
+#
+# The ONE definition of "is this offer's odometer position within the
+# plausible band for its leg." Both the liveness predicate (driver_queue
+# LIVE_OFFER_PREDICATE_SQL) and TAD's candidacy gate (tad._evaluate_distance_gate)
+# are intended to read from here, eliminating the multi-finger split that lost
+# offer 9132 (ERRATUM §2.3: the liveness predicate consumed the wrong column).
+#
+# The band is per-leg, centered on the absolute cumulative anchor, with width
+# scaled to that leg's journey distance (NOT to expected_odometer, which is a
+# large accumulating number — ERRATUM §4, correcting FINDING §5.2):
+#
+#   center    = expected_distance        (tad.py's expected_pickup_distance for
+#                                          the pickup leg, expected_dropoff_distance
+#                                          for the dropoff leg — consumed as-is,
+#                                          NO bridge term per ERRATUM §2)
+#   tolerance = max( 0.15 * leg_distance,  ODOMETER_BAND_NOISE_FLOOR_MI )
+#
+#   where leg_distance is the CALLER's choice:
+#     pickup  leg -> pickup_miles          (ERRATUM §1.1, proven == TAD gate)
+#     dropoff leg -> trip_miles            (ERRATUM §1.3, ratified 2026-06-05)
+#
+# Edge semantics are the CALLER's, not the primitive's:
+#   liveness  (driver_queue) enforces the UPPER edge only — an offer the driver
+#             has overshot is reaped; a not-yet-reached offer stays live.
+#   candidacy (TAD/WAI) enforces the LOWER edge — a not-yet-reached offer is
+#             withheld from spend/scoring but not reaped.
+#   The primitive returns the symmetric (center, tolerance); each caller applies
+#   the edge it owns. This keeps the band arithmetic single-source while letting
+#   the two axes treat the edges per their distinct responsibilities.
+#
+# NULL handling (ERRATUM §4, §5.5 deferred sentinel): when expected_distance or
+# leg_distance is None (e.g. lost-mode receipt with no anchor, or a dropoff leg
+# whose pickup never fired so cumulative_miles_at_pickup_fire is NULL), there is
+# NO band. The primitive returns None. Callers MUST route None to the §5.5
+# deferred path (offer stays alive, resolved at dropoff-disambiguation or the
+# 4-hour abandonment ceiling) — NEVER fabricate a band, NEVER reap on absence.
+
+ODOMETER_BAND_NOISE_FLOOR_MI: float = 2.0
+"""Canonical minimum band half-width, in miles (FINDING §6.2, ratified 2026-06-05).
+
+The band is never narrower than this regardless of leg distance. A short trip
+(e.g. a 1.6-mile fare) has a 15%% half-width of ~0.24 mi, tighter than GPS/
+odometer sensor noise; the floor insulates against false reaping/exclusion on
+such trips. Re-calibrate against real jitter data post-launch if needed.
+
+SINGLE OWNER. Supersedes driver_queue.GC_MIN_DIST_MI (also 2.0) — the Step-6
+predicate work retires that constant IN FAVOR of this one rather than keeping a
+second copy (the "two fingers on one quantity" anti-pattern this whole effort
+exists to kill). Distinct from refinement_gates.NOISE_FLOOR_MILES (0.3), which
+is a minimum-trip-length noise gate — a different quantity entirely.
+"""
+
+ODOMETER_BAND_TOLERANCE_PCT: float = 0.15
+"""Band half-width as a fraction of the leg's journey distance (ERRATUM §4).
+
+15%% of leg_distance. Proven term-for-term identical to the deployed TAD
+[0.85, 1.15] completion gate on the pickup leg (ERRATUM §1.1): TAD's
+completion_pct in [0.85, 1.15] rearranges exactly to
+|actual_odometer - expected_pickup_distance| <= 0.15 * pickup_miles.
+"""
+
+
+def odometer_band(
+    expected_distance: Optional[float],
+    leg_distance: Optional[float],
+) -> "Optional[tuple[float, float]]":
+    """Return the (center, tolerance) odometer band for one leg, or None.
+
+    The single-owner band primitive (ERRATUM §4). Pure arithmetic; no I/O,
+    no DB, no side effects. Idempotent.
+
+    Args:
+        expected_distance:
+            The leg's absolute cumulative odometer target — tad.py's
+            expected_pickup_distance (pickup leg) or expected_dropoff_distance
+            (dropoff leg), consumed as-is. NO bridge term (ERRATUM §2).
+            None means "no anchor" (lost-mode / unfired-pickup dropoff leg).
+        leg_distance:
+            The leg's journey distance — pickup_miles (pickup leg) or
+            trip_miles (dropoff leg). The CALLER selects which. None means
+            "leg distance unknown" (offer missing required fields).
+
+    Returns:
+        (center, tolerance) where:
+            center    = expected_distance
+            tolerance = max(ODOMETER_BAND_TOLERANCE_PCT * leg_distance,
+                            ODOMETER_BAND_NOISE_FLOOR_MI)
+        OR None when expected_distance or leg_distance is None — signaling
+        "no band; route to the §5.5 deferred sentinel" (NEVER fabricate a
+        band, NEVER reap on absence; ERRATUM §4 / §0.D.4 absence-is-not-death).
+
+    Note on negative/zero inputs: a genuine 0.0 or negative leg_distance is
+    coerced through the noise floor (max clamps it to the floor), so a
+    degenerate leg can never produce a zero-width band. expected_distance is
+    passed through as center unchanged (the accessor normalizes the band, not
+    the anchor's validity — consistent with _coerce_odometer's "coerce, don't
+    validate" discipline from Step 4).
+    """
+    if expected_distance is None or leg_distance is None:
+        return None
+    tolerance = max(
+        ODOMETER_BAND_TOLERANCE_PCT * float(leg_distance),
+        ODOMETER_BAND_NOISE_FLOOR_MI,
+    )
+    return (float(expected_distance), tolerance)
+
+
+def odometer_in_band(
+    actual_odometer: Optional[float],
+    expected_distance: Optional[float],
+    leg_distance: Optional[float],
+) -> "Optional[bool]":
+    """Return whether actual_odometer is within the leg's symmetric band.
+
+    The shared in-band test both the liveness predicate and TAD's gate are
+    intended to consult, so the band membership question has exactly one
+    implementation (ERRATUM §4 / Andrew's "one owner").
+
+    Returns:
+        True  — |actual_odometer - center| <= tolerance (in band).
+        False — outside the band (caller decides upper-vs-lower edge meaning).
+        None  — no band (expected_distance, leg_distance, or actual_odometer is
+                None) → route to §5.5 deferred. NEVER coerced to True/False;
+                absence forces the deferred branch and fails loud, mirroring the
+                NULL-not-zero discipline of Step 4's _coerce_odometer.
+
+    This is the SYMMETRIC test. Callers needing edge-specific behavior
+    (liveness = reap only on upper-edge breach; candidacy = withhold only on
+    lower-edge) compute the signed comparison themselves from odometer_band()'s
+    (center, tolerance); odometer_in_band is the convenience wrapper for the
+    symmetric question.
+    """
+    if actual_odometer is None:
+        return None
+    band = odometer_band(expected_distance, leg_distance)
+    if band is None:
+        return None
+    center, tolerance = band
+    return abs(float(actual_odometer) - center) <= tolerance
+
+
 @dataclass(frozen=True)
 class WAIMatch:
     """A single match returned by WhereAmI.evaluate().
