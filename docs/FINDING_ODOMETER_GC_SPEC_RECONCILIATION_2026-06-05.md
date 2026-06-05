@@ -157,6 +157,15 @@ absolute odometer targets ("NOT a delta — a target absolute reading", `tad.py:
 (§5.2) must **consume these columns** and the predicate's naive pre-pickup ceiling
 (`miles_at_offer_receipt + (pickup+trip)*1.25` clamped) must be **deleted**. The fix is
 consolidation, not new computation — see §5.7.
+
+**SCOPE REFINEMENT (L-6 inventory, 2026-06-05):** the predicate's **post-pickup** branch
+(`driver_queue.py:224–225`) ALREADY consumes the anchor (`oh.expected_dropoff_distance +
+oh.trip_miles*0.25`). Only the **pre-pickup** branch still runs the naive ceiling. So the column-
+source change is narrower than "point the band at the anchor wholesale": switch the **pre-pickup
+branch** to read `expected_pickup_distance`; do NOT touch the post-pickup branch's column choice —
+it is already correct. (The ±15% / noise-floor / no-cap band reshaping of §5.2–5.3 still applies
+to both branches; only the post-pickup branch's *column* is already right.)
+
 - **Idle receipt** (no ride in progress at receipt): the bridge term is 0; the formula reduces to
   `receipt_odo + pickup_miles`. No special case — it falls out of the general form.
 
@@ -282,6 +291,30 @@ former — a NULL+`deferred` sentinel is more honest than an idle-case anchor we
 it touches tad.py's receipt path and needs its own recon + ratification before implementation.
 This is a recon thread, not a blocker for steps 2–4 of §7.
 
+### 6.6 `_detect_lost_mode` has NO production caller — NEW, OPEN (L-6 inventory, 2026-06-05)
+The L-6 inventory found that `_detect_lost_mode` (def `driver_heartbeat.py:1119`) is called **only
+by tests** (`test_driver_heartbeat_3b_r.py`, `test_lost_mode_houston_playback_live.py`,
+`test_live_offer_predicate_imports.py`). **Production derives lost-mode directly from
+`_get_alive_unpicked_offer_ids` at `driver_heartbeat.py:1927`** — it does not call
+`_detect_lost_mode` at all. The §XVIII single-source contract test
+(`test_detect_lost_mode_delegates_to_helper`) therefore pins a **delegation path that production
+bypasses**: the test guards that `_detect_lost_mode` delegates to the helper, but production never
+runs `_detect_lost_mode`. This is a §XIV.J-class hazard (a test exercising an imaginary path) and
+means our model of "how production detects lost-mode" was one indirection off — the real path is
+the direct `:1927` call. **Implication for §6.5:** the tad.py-vs-sentinel reconciliation must be
+written against the REAL production lost-mode path (`_get_alive_unpicked_offer_ids` at :1927), not
+against `_detect_lost_mode`. **OPEN:** decide whether `_detect_lost_mode` should be (a) wired into
+production as the single entry point (making the pinned test meaningful), or (b) deleted as dead
+code with the contract test repointed at the :1927 path. Not a blocker for step 4 (encapsulation),
+but must be resolved before §6.5 / §5.5 implementation.
+
+### 6.7 Inventory was branch-tip, not deployed revision — STANDING CAVEAT
+The L-6 inventory ran against the working tree (`fix/restore-fire-error-metric-2026-06-02`, HEAD
+`9eebb45`), NOT the deployed Cloud Run revision (`00642-fg7`) that produced the 2026-06-04 data.
+For forward encapsulation work this is correct (we fix the tree forward). But §7 step 7 (re-
+diagnose 9132) MUST replay against the **deployed** revision, not the branch tip, or it will
+measure different code than the one that evicted 9132.
+
 ---
 
 ## 7. Ordered fix sequence (no step starts until the prior is done)
@@ -293,30 +326,53 @@ This is a recon thread, not a blocker for steps 2–4 of §7.
 2. **Locate the receipt-time writer** — ✅ DONE 2026-06-05 (§6.1). It is `tad.py` at receipt; not
    rogue; the gate consumes the wrong column. No "third writer" defect — the defect is the gate's
    input choice.
-3. **L-6 blast-radius grep:** inventory all sites composing `LIVE_OFFER_PREDICATE_SQL`, all
-   readers/writers of the odometer, and all readers of `expected_pickup_distance` /
-   `expected_dropoff_distance`, before any signature change. (Gemini is preparing tracking
-   metrics.) ← **NEXT ACTION.** This is the first step where Claude Code may assist (read-only
-   inventory; CC reports, does not edit).
+3. **L-6 blast-radius grep** — ✅ DONE 2026-06-05 (read-only, via Claude Code). `LIVE_OFFER_PREDICATE_SQL`
+   has **6 compose sites**: `driver_queue.py:409` (temporal-only re-count), `:617`
+   (`offer_ids_only`), `:783` (`_project_offers`); `driver_heartbeat.py:1063`
+   (`_get_last_known_anchor_id`), `:1111` (`_get_alive_unpicked_offer_ids`); `decisions/logger.py:106`
+   (prev-offer TAD-anchor read). All 6 must be touched in lockstep on encapsulation. Two odometer
+   ORIGINS confirmed (heartbeat path `driver_heartbeat.py:1711`; driver-status path
+   `driver_status.py:199`) — both `.get()` → None, never 0. Findings §6.6 and §6.7 opened from this
+   inventory.
 4. **Encapsulate + persist + log** (§5.7): single odometer accessor; write `actual_odometer` and
    `expected_odometer` (+ status) to `pudo_decision_context` every heartbeat. Smallest change that
    makes the gate **auditable** — justified on its own terms (an unauditable multi-sourced gate
-   input is a §V flight-recorder violation). **Includes Gemini's NULL-not-zero guard test:** the
-   accessor MUST coerce a missing/invalid hardware odometer payload to `NULL` (which the band
-   guards), never to `0` (which fabricates a garbage expected odometer). Write the schema-
-   validation test for this **against the encapsulated accessor here** — NOT earlier, where it
-   would test the five-fingered path we are deleting. Recon (step 3) must first report whether the
-   *current* path injects zero or NULL on a missing odometer; if it injects zero, that is an
-   additional finding to record.
-5. **Reconcile §6.5** (tad.py orphan→idle vs §5.5 deferred sentinel) — recon + ratification —
-   BEFORE implementing §5.5's sentinel, so the two do not become duplicate logic.
+   input is a §V flight-recorder violation). **NULL-not-zero guard test:** the inventory CONFIRMED
+   every current odometer path already fails closed to NULL (never injects 0) — so this test locks
+   in existing-correct behavior, it does not fix a defect. Write it against the encapsulated
+   accessor. (One adjacent nuance to capture: the pickup-fire UPDATEs use `COALESCE(trip_miles, 0)`,
+   so a NULL-`trip_miles` offer collapses `expected_dropoff_distance` to a zero-length horizon —
+   a `trip_miles` default, not an odometer-0, but a latent edge worth a guard.)
+5. **Reconcile the lost-mode recon threads** — recon + ratification — BEFORE implementing §5.5's
+   sentinel: (a) §6.5 tad.py orphan→idle vs the deferred sentinel; (b) §6.6 `_detect_lost_mode`
+   dead-vs-wire decision. Both touch the REAL production lost-mode path
+   (`_get_alive_unpicked_offer_ids` at `driver_heartbeat.py:1927`), so they reconcile together or
+   the sentinel gets built against the wrong model.
 6. **Implement the ratified band** (§5): point liveness at tad.py's `expected_pickup_distance` /
    `expected_dropoff_distance` anchors; **delete** the naive pre-pickup ceiling, the `1.25` buffer,
    the `50`-mile cap, and the per-trip time ceiling; add the two-sided ±15% band with the 2.0mi
    noise floor; wire the deferred-sentinel + dropoff-disambiguation recompute/reap.
-7. **Re-diagnose 9132 with real logged numbers.** Only after steps 4–6 can we *confirm* (rather
-   than infer) the eviction. The spec is justified independent of this confirmation; the
-   confirmation closes the forensic loop.
+7. **Replay ALL 11 true-misses with real logged numbers, cohorted by mechanism.** (Widened
+   2026-06-05 from "re-diagnose 9132 only" — 9132 is one clean liveness-predicate case, but the
+   2026-06-04 drive was almost entirely lost-mode [133 lost-mode fires vs 4 normal], so confirming
+   9132 alone verifies the band fix on one normal-mode case and says NOTHING about the lost-mode
+   majority.) Only after steps 4–6 (Step 4's logging supplies the odometer value the gate used,
+   which is NULL on every row today — without it there is no real number to replay against). The
+   replay is a parametrized test, one case per true-miss, **split into two cohorts so each miss is
+   asserted against the fix that is supposed to catch it**:
+   - **Normal-mode cohort** (offer reaped by the liveness predicate's wrong-column ceiling, e.g.
+     9132): assert the Step-6 band keeps the offer LIVE at the arrest (e.g. "9132 in the candidate
+     set at tap 455" — the thing that was false on 2026-06-04).
+   - **Lost-mode cohort** (offer with no computable anchor, the drive's majority): assert the §5.5
+     deferred-sentinel logic keeps the offer alive-and-deferred rather than 0.00-signal-excluded.
+   A miss the band fix does not catch is NOT a failure — it must be visibly attributed to the
+   lost-mode/sentinel cohort, not logged as "still broken." The replay is designed to assign each
+   miss to its mechanism. The spec is justified independent of this confirmation; the cohorted
+   replay closes the forensic loop and is the test that answers "did today's fixes catch yesterday's
+   misses." **Fixture prep (do now, while 2026-06-04 data + forensic context are fresh):** freeze
+   the 11 true-miss offers — their `expected_pickup_distance`/`expected_dropoff_distance` anchors,
+   arrest coords/timestamps, and `contest_labels` taps — into a test fixture, so the replay has its
+   ground-truth cases captured rather than needing re-excavation when Step 6 lands.
 
 ---
 
@@ -338,11 +394,17 @@ This is a recon thread, not a blocker for steps 2–4 of §7.
   absent from the gate's input — that duplication is the defect.
 
 **Inferred, NOT yet proven (requires steps 4, 6–7):**
-- That this specific input-choice defect is *the* cause of 9132's specific eviction. The mechanism
-  is concrete and consistent with all evidence (9132's `expected_pickup_distance` anchor vs. its
-  naive ceiling would straddle the driver's position differently), but the odometer value the gate
-  used at 05:23 is unlogged, so the eviction cannot yet be replayed. The encapsulation/logging work
-  (step 4) is what converts this inference into proof (step 7).
+- That the input-choice defect (wrong column) is *the* cause of the **normal-mode** true-misses'
+  evictions (9132 the canonical case). The mechanism is concrete and consistent with all evidence
+  (9132's `expected_pickup_distance` anchor vs. its naive ceiling would straddle the driver's
+  position differently), but the odometer value the gate used at 05:23 is unlogged, so the eviction
+  cannot yet be replayed.
+- That the **lost-mode** true-misses (the 2026-06-04 majority) are caused by the no-computable-
+  anchor condition the §5.5 deferred sentinel addresses — separate mechanism, separate fix,
+  separate cohort in the step-7 replay.
+- Step 4's logging converts both inferences into proof; the **cohorted step-7 replay** (normal-mode
+  → band fix; lost-mode → sentinel) is what confirms each cohort against its own fix. Confirming
+  9132 alone would verify only the normal-mode cohort.
 
 The spec reconciliation (§5) and encapsulation (§5.7) are justified **regardless** of §8's
 inferred item, because an unauditable, multi-sourced, spec-less gate is a defect on its own terms.
