@@ -6,6 +6,15 @@
 confidence problem. Cross-referencing the driver's physical button taps against the matcher's
 decisions shows **they mostly are not** — and points at a different, testable root cause.
 
+## Framing: the taps are the eval harness, not the product
+
+`contest_labels` button presses are a **debug-only ground-truth instrument**. The shipped product
+has **zero human PUDO input** — all pickup/dropoff identification is **fully automated** by the
+matcher. So the catch rate here (≈63% vs the ~95% launch gate) is **autonomous-detection accuracy**,
+and "fixes" that would rely on a human to correct a bad signal are off the table. This is why a
+km-wrong geocode is *disqualifying* (root cause below), not a tunable: at runtime nothing catches
+it. See memory `pudo-detection-is-fully-automated`.
+
 ## Method (ground truth, zero state impact)
 
 `app_private.contest_labels` = the driver's physical PUDO button presses (`label` ∈
@@ -157,13 +166,42 @@ on multi-mile transit roads; reweight proximity to dominate"* — is refuted:
   splits (window-sensitive); per-tap offer attribution (`contest_labels` has no offer id — time
   cross-ref only, so a ±90s fire for a different offer can over-credit CAUGHT).
 
+## ROOT CAUSE (2026-06-06): the geocodes are kilometers-wrong
+
+Measured distance from the driver's clustered stops to the offer geocodes: closest-ever approach
+was **1.7 km (intersection), 2.7 km, 4.7 km (single_road), 6.4 km and 13.8 km (airline-name POIs)**
+— with `proximity = 0` throughout. These are not "stopped offset from a good pin" distances
+(those are 100s of meters); at km scale **the geocodes themselves are garbage** for these address
+classes (Uber intersection "Road & Road" and POI/airline-name resolution).
+
+That is the localization failure: `proximity` and `on_target_road` are **derived from the
+geocode**, so a km-wrong pin zeros them regardless of where the driver actually stopped — garbage
+in, garbage out. 9127 caught because its geocode was usable (on_target_road/breadcrumb/adjacent
+fired); the misses had unusable geocodes. **Geocode quality is the catch/miss discriminator.**
+
+Attribution note: tap→offer binding should be **cluster/sequence-based**, not geocode-distance-
+based (tap time → heartbeat → cluster → the active offer by sequence/odometer). Do NOT attribute by
+nearest geocode — the geocodes are the broken input.
+
+## Implication: retire geocode-derived signals; identify offers by TAD + sequence
+
+The matcher over-relies on geocode-derived signals (`proximity`, `on_target_road`) that are
+unreliable for a large address-class population. The geocode-**independent** signals are sound:
+`cluster_tightness`/`cluster_duration`, `breadcrumb_match` (driven path), arrest, and especially
+**TAD / the odometer band** (distance traveled vs the offer's expected miles — the §5.5/§9.9
+machinery). Direction: **de-weight/retire proximity + on_target_road, and re-home offer
+*identification* (which offer is this cluster?) onto TAD + offer sequence/timing + breadcrumb** —
+geocode-free. (Removing geocodes outright is the strong version; the prerequisite is the TAD+
+sequence identifier, since geocodes currently do the identification job, badly.)
+
 ## Next steps (ordered)
 
-1. **Ground-truth-tolerance disposition** (product call, the real gate): for a clean arrest whose
-   cluster is offset from the offer geocode — miss / correct-observation / log-don't-bind?
-2. **Measure the offset** per address class: distance(arrest cluster centroid, offer geocode) for
-   the scored misses (intersection/airline-POI) → physics (can't-reach-pin) vs geocode bug. This
-   decides whether (1) is "widen/accept" or "fix the geocode/proximity."
+1. **Cluster/sequence tap→offer attribution** (not geocode): tap time → cluster → active offer by
+   received-order + odometer progression. Confirms exclusion vs localization per tap without the
+   broken geocode input.
+2. **Quantify geocode uselessness:** per offer the driver serviced, did `proximity`/`on_target_road`
+   ever exceed 0 (usable geocode) vs never (garbage)? Sizes the geocode-quality problem.
+3. **Ground-truth-tolerance disposition** (product call) + the TAD-based-identification redesign.
 3. **Cohort replay** of the 06-04 PUDOs against `00649` → how many EXCLUDED recover with no WAI
    change; isolates the true residual.
 4. **Multi-PUDO-at-one-stop** design (traffic-light pickup+dropoff-of-two-offers) and the 2
