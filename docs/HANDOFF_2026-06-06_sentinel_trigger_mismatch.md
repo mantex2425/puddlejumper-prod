@@ -86,16 +86,19 @@ Key facts the design inherits:
   compute_offer_expectations before proposing the wiring.
 
 ## Other open threads (lower priority, distinct workstreams)
-1. **Out-of-window deferred sweep — UNRESOLVED DESIGN QUESTION.** Andrew raised that
-   out-of-window deferred offers should be SWEPT at dropoff (proof they're not part
-   of the current ride). Current code/§9.8 LEAVES them for the GC's 4h ceiling, and
-   the live-PG test asserts they stay deferred. This is a real discrepancy between
-   intent (sweep at dropoff) and implementation (leave for GC). Open question: hard
-   sweep (makes dropoff handler a reaper — conflicts with single-killing-authority,
-   needs Gemini re-ratify) vs soft sweep (re-flag to abandoned status). NOT RESOLVED
-   — interrupted by the witness report. Note: the GC may be structurally unable to
-   reap never-picked-up deferred offers (its SELECT requires actual_pickup_at IS NOT
-   NULL) — so "leave for the GC" may mean they're never reaped at all. Verify.
+1. **Out-of-window deferred sweep — RESOLVED (§9.9, shipped `23dabb1`).** The open
+   question (hard sweep = dropoff-handler-as-reaper vs soft sweep = re-flag to a new
+   status) was resolved in favor of the SOFT sweep: out-of-window deferred offers are
+   flipped to `expected_odometer_status = 'abandoned'` at the dropoff handler, and the
+   live predicate excludes them via `expected_odometer_status IS DISTINCT FROM
+   'abandoned'` — gone immediately, no 4h linger. NOT a second killing authority: the
+   predicate stays the single liveness owner; the dropoff handler only writes a status
+   it consumes (same pattern as the pickup-fire deferred→active writer), so no Gemini
+   re-ratify of single-killing-authority was needed. The suspicion that the GC is
+   structurally unable to reap never-picked-up deferred offers (its SELECT requires
+   `actual_pickup_at IS NOT NULL`) was CONFIRMED — which is exactly why "leave for the
+   GC" was wrong. See FINDING §9.9 + `docs/SENTINEL_DESIGN_SPEC.md` INV-4; tests in
+   `tests/test_deferred_sentinel_recompute.py` + `tests/test_abandoned_excluded_from_predicate.py`.
 2. **Matcher transit-road accuracy — triply-confirmed, real, degrades live drives.**
    The matcher fires reliably only via POI (airports, conf 1.00) or residential-road
    + driven-approach (Forum Park, 0.85). NO reliable fire path on transit-class roads:
