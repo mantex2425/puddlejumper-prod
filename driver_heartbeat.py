@@ -192,11 +192,22 @@ def _bucket_to_target_spec(address_text, lat, lng):
 # =============================================================================
 
 def _resolve_deferred_at_dropoff(cur, driver_id, resolved_offer_id, dropoff_fire_odometer):
-    """§5.5 Class B (FINDING §9.2): on dropoff of offer X, recompute deferred
-    offers received DURING X's trip window. The dropoff supplies the lost-mode
-    bridge; the existing compute_offer_expectations chaining produces the
-    bridge-correct anchor. Out-of-window deferred offers are LEFT for the
-    upstream Horizon GC (§6.5 — no second reaper here).
+    """§5.5 Class B (FINDING §9.2 + §9.9.3): on dropoff of offer X, resolve the
+    driver's deferred offers by window membership against X's trip window
+    [COALESCE(X.actual_pickup_at, X.created_at), NOW()]:
+
+      - IN window  -> received DURING X's ride. The dropoff supplies the
+        lost-mode bridge; compute_offer_expectations chaining produces the
+        bridge-correct anchor -> status 'active'.
+      - OUT of window -> received before this ride began, proven part of NO
+        ride -> status 'abandoned' (§9.9.3). The §9.9.2 predicate clause then
+        excludes it from the live set immediately — no 4h linger. This replaces
+        the §9.8 "LEFT for the Horizon GC" disposition, which the GC structurally
+        cannot honor (its SELECT requires actual_pickup_at IS NOT NULL, so a
+        never-picked-up deferred offer is invisible to it).
+
+    Not a second reaper (§9.9.3): the dropoff handler writes a status the ONE
+    predicate consumes; the predicate remains the single liveness authority.
 
     Best-effort: any failure is logged and swallowed. A recompute failure MUST
     NEVER fail the dropoff fire (liveness over completeness).
@@ -218,17 +229,57 @@ def _resolve_deferred_at_dropoff(cur, driver_id, resolved_offer_id, dropoff_fire
         xrow = cur.fetchone()
         if not xrow:
             return
+        # Window lower bound: pickup_time, else receipt_time (X pickup missed).
+        # Computed up front: the §9.9.3 out-of-window abandonment sweep below
+        # keys ONLY on window membership and must run regardless of whether X
+        # carries a chaining anchor for the in-window recompute — otherwise an
+        # X with no dropoff anchor (early-return below) would leave out-of-window
+        # deferred offers lingering, defeating §9.9.6's "no 4h linger."
+        window_lo = xrow["actual_pickup_at"] or xrow["created_at"]
+
+        # §9.9.3 OUT-of-window sweep: a deferred offer received BEFORE this ride's
+        # window began is proven part of NO ride -> 'abandoned'. (If it belonged
+        # to an earlier ride, that ride's own dropoff would already have recomputed
+        # it in-window; still-deferred + predates this window => orphan.) The
+        # §9.9.2 predicate clause excludes it from the live set immediately.
+        # Set-based, no recompute: out-of-window offers have no bridge to chain.
+        # Guarded `= 'deferred'` so 'active'/'abandoned' rows are never touched;
+        # excludes X itself. Verdict-blind (§9.6).
+        cur.execute(
+            """
+            UPDATE app_private.offer_history oh
+            SET expected_odometer_status = 'abandoned'
+            FROM app_private.decision_log dl
+            WHERE dl.id = oh.decision_log_id
+              AND dl.driver_id = %s
+              AND oh.expected_odometer_status = 'deferred'
+              AND oh.id <> %s::bigint
+              AND oh.created_at < %s
+            """,
+            (driver_id, resolved_offer_id, window_lo),
+        )
+        if cur.rowcount:
+            log.info(
+                "[deferred-sentinel] abandoned %d out-of-window deferred offer(s) "
+                "on dropoff of X=%s (window_lo=%s)",
+                cur.rowcount, resolved_offer_id, window_lo,
+            )
+
         x_prev_dist = xrow["expected_dropoff_distance"]
         x_prev_eta = xrow["expected_dropoff_arrival_time"]
-        # No chaining anchor available -> cannot supply the bridge; leave deferred.
+        # No chaining anchor -> cannot supply the bridge for the IN-window
+        # recompute; leave those deferred. (The out-of-window abandonment above
+        # has already run — it needs no anchor.)
         if x_prev_dist is None or x_prev_eta is None:
             return
         if x_prev_eta.tzinfo is None:
             x_prev_eta = x_prev_eta.replace(tzinfo=_dt.timezone.utc)
-        # Window lower bound: pickup_time, else receipt_time (X pickup missed).
-        window_lo = xrow["actual_pickup_at"] or xrow["created_at"]
 
         # In-window deferred offers (exclude X). Join decision_log for driver scope.
+        # §9.9.4 GUARD: this filter MUST stay `= 'deferred'` (explicit equality),
+        # never loosened to `!= 'active'`. Loosening would pull 'abandoned' rows
+        # back into recompute — the explicit equality is what excludes abandoned
+        # offers from the live lifecycle by construction.
         cur.execute(
             """
             SELECT oh.id, oh.pickup_miles, oh.pickup_minutes,
@@ -282,6 +333,10 @@ def _resolve_deferred_at_dropoff(cur, driver_id, resolved_offer_id, dropoff_fire
                         expected_dropoff_arrival_time = %s
                     WHERE id = %s::bigint
                       AND expected_odometer_status = 'deferred'
+                      -- §9.9.4 GUARD: keep `= 'deferred'`, never `!= 'active'`.
+                      -- A CAS on the deferred state: only a still-deferred offer
+                      -- is resurrected to 'active'; an offer already flipped to
+                      -- 'abandoned' (out-of-window sweep) is never revived here.
                     """,
                     (
                         exp.expected_pickup_distance,        # expected_odometer == pickup-leg band center

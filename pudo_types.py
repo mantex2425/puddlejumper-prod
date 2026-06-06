@@ -210,15 +210,27 @@ completion_pct in [0.85, 1.15] rearranges exactly to
 """
 
 
-# §5.5 deferred-sentinel status vocabulary (FINDING §9). Single owner here,
-# beside the band primitive whose None-return routes an offer to 'deferred'.
-# 'active'   — band computed; expected_odometer holds the leg's center.
-# 'deferred' — no band (band primitive returned None); expected_odometer is NULL;
-#              offer alive but inert on the odometer axis until dropoff-disambiguation
-#              recompute or the 4h abandonment sweep (FINDING §9.2). NEVER a magic
-#              number — NULL forces consumers to branch or fail loud (§9.1).
+# §5.5 deferred-sentinel status vocabulary (FINDING §9 + §9.9 addendum). Single
+# owner here, beside the band primitive whose None-return routes an offer to
+# 'deferred'. The field carries a three-state lifecycle:
+#
+#     deferred ──(dropoff proves it belongs to the just-closed ride)──> active
+#     deferred ──(dropoff proves it belongs to NO ride: out of window)──> abandoned
+#
+# 'active'    — band computed; expected_odometer holds the leg's center.
+# 'deferred'  — no band (band primitive returned None); expected_odometer is NULL;
+#               offer alive but inert on the odometer axis until the dropoff-handler
+#               sweep (FINDING §9.2/§9.9.3) recomputes it (in-window -> active) or
+#               abandons it (out-of-window -> abandoned). NEVER a magic number —
+#               NULL forces consumers to branch or fail loud (§9.1).
+# 'abandoned' — a dropoff proved this deferred offer belongs to no ride (received
+#               outside the closed ride's window, §9.9.3). EXCLUDED from the live
+#               set by LIVE_OFFER_PREDICATE_SQL's `IS DISTINCT FROM 'abandoned'`
+#               clause (§9.9.2) — gone immediately, no 4h linger. Terminal: a new
+#               offer is never born abandoned (logger INSERT is 2-way, §9.9.4).
 ODOMETER_STATUS_ACTIVE: str = "active"
 ODOMETER_STATUS_DEFERRED: str = "deferred"
+ODOMETER_STATUS_ABANDONED: str = "abandoned"
 
 
 def odometer_band(

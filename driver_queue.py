@@ -256,6 +256,13 @@ LIVE_OFFER_PREDICATE_SQL = """
             END
         )
     )
+    -- Abandoned exclusion (FINDING §9.9.2, 2026-06-05). A deferred offer the
+    -- dropoff handler proved belongs to no ride (received outside the closed
+    -- ride's window, §9.9.3) is flipped to 'abandoned' and must drop from the
+    -- live set IMMEDIATELY — no 4h linger. IS DISTINCT FROM (not <> 'abandoned')
+    -- so a NULL status stays live; only an EXPLICITLY abandoned offer is reaped.
+    -- Literal comparison: NO bind param — the params tuple is UNCHANGED.
+    AND oh.expected_odometer_status IS DISTINCT FROM 'abandoned'
 """
 
 
