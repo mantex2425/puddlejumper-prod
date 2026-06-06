@@ -408,3 +408,142 @@ measure different code than the one that evicted 9132.
 
 The spec reconciliation (§5) and encapsulation (§5.7) are justified **regardless** of §8's
 inferred item, because an unauditable, multi-sourced, spec-less gate is a defect on its own terms.
+
+---
+
+## 9. ADDENDUM — §5.5 sentinel implementation design (2026-06-05 PM)
+
+**Status:** design refinement of §5.5 / §6.5 / §6.6, captured before implementation.
+Append to the FINDING above. References existing section numbers; renumbers nothing.
+Origin: the 2026-06-05 PM session that merged DSI (rev 00645→00647), recovered the
+band fix from a parallel-deploy regression (00646 dropped it; 00647 restored it), and
+specified the §5.5 sentinel for implementation.
+
+---
+
+### 9.1 The bridge term has TWO senses — one struck, one real
+
+The erratum (`2064ea6`) struck "the bridge term." This caused real confusion in the
+PM session (two reviewers reached opposite conclusions). Resolution: there are two
+distinct quantities both called "bridge term," and the erratum struck only one.
+
+- **Normal-mode bridge (STRUCK — phantom).** The notion that the receipt-time anchor
+  needed an explicit additive "remaining current trip" term. It was phantom: the
+  deployed gate never used one, and the real 9132 mechanism was the liveness
+  predicate's wrong-column bug (consumed `miles_at_offer_receipt` instead of
+  `expected_pickup_distance`). `compute_offer_expectations` already handles the
+  mid-trip case correctly by CHAINING — the stacked-case anchor is
+  `prev.expected_dropoff_distance + pickup_miles` (tad.py ~150/168/174). The bridge
+  is folded into the chain; a separate additive term would double-count. Struck,
+  correctly, and stays struck.
+
+- **Lost-mode bridge (REAL — never struck).** When the driver is in lost-mode
+  (`current_offer_id IS NULL` AND unpicked offers — §XVIII), the system cannot see
+  the trip it is on, so the chaining anchor (`prev.expected_dropoff_distance`) does
+  not exist. The offset from "where the unobserved current trip will end" to "this
+  new offer's pickup" is genuinely UNKNOWABLE at receipt. This is the lost-mode
+  bridge. It is NOT computed and NOT fabricated — it is DEFERRED (NULL sentinel)
+  until a dropoff supplies it.
+
+**The discipline:** never fabricate the lost-mode bridge. NULL, never a magic number
+(`-1` in a miles column silently corrupts: `actual - (-1) = actual + 1` reads as a
+valid comparison; NULL forces every consumer to branch or fail loud). No number means
+no band; no band means the offer cannot be reaped or matched on the odometer axis —
+it is parked, alive, inert, until ground truth arrives.
+
+### 9.2 The dropoff supplies the lost-mode bridge — WINDOW-SCOPED recompute
+
+When a dropoff fires for offer X, the just-ended trip is identified. Its window is
+`[X.pickup_time, X.dropoff_time]`. That window is the key. It is the lost-mode bridge,
+finally known.
+
+The recompute is **window-scoped — this is the load-bearing guardrail, not a detail:**
+
+- For each deferred offer D where `D.created_at ∈ [X.pickup_time, X.dropoff_time]`:
+  D was received DURING the now-identified trip, so X is D's true prior anchor.
+  Re-invoke the EXISTING `compute_offer_expectations(D, prev_offer=X,
+  current_odometer=<X's dropoff-fire odometer>, ...)`. Its stacked-case chaining
+  produces the bridge-correct anchor — the same number it would have produced at
+  receipt had the segment been known then. Write result to `expected_odometer`,
+  flip `expected_odometer_status` to `'active'`. NO new formula, NO additive bridge
+  term — the existing chaining IS the bridge.
+
+- For each deferred offer D OUTSIDE X's window: D belongs to an earlier, unresolved
+  segment and is abandoned-in-fact. Flag for the upstream Horizon Budget GC (§6.5).
+  Do NOT recompute against X — recomputing an offer against a trip it did not belong
+  to is the "confident-and-wrong" failure the sentinel exists to prevent (a new
+  9132-class bug by a different door).
+
+- Backstop: deferred offers that never see a dropoff are swept by the 4-hour
+  abandonment ceiling (`GC_ABANDONMENT_CEILING_HOURS`, never hardcoded).
+
+**Why the window matters:** without it, a deferred offer would be recomputed against
+whatever dropoff fired next — possibly the wrong trip — producing a confident garbage
+anchor. The window confines recompute to the trip the offer actually belonged to.
+This is the single most important correctness property of the Class-B path.
+
+### 9.3 §6.5 / §6.6 resolutions (from PM recon)
+
+- **§6.6 (RESOLVED):** `_detect_lost_mode` is NOT dead code. It delegates to
+  `_get_alive_unpicked_offer_ids` (driver_heartbeat.py), which has a live production
+  caller in the heartbeat path, and the delegation is pinned by
+  `test_live_offer_predicate_imports.py`. The original "no production caller" note
+  was stale (pre-2026-05-31-refactor). Build the sentinel's lost-mode detection
+  against `_get_alive_unpicked_offer_ids` — the single canonical bit-2 predicate.
+
+- **§6.5 (RESOLVED):** the sentinel's reap defers to the upstream Horizon Budget GC
+  (decisions/logger.py), NOT a second reaper in the dropoff handler. The dropoff
+  handler declares the window closed (flags out-of-window deferred offers); the
+  upstream GC sweeps them on its own authority + 4h ceiling. tad.py's orphan→idle
+  was already subordinated upstream by Step 5 Option C (`2418401`). No competing
+  garbage collectors in one thread space.
+
+### 9.4 Deferred taxonomy (two classes, two resolution points)
+
+- **Class A — dropoff-leg deferred:** pickup fired late or in lost-mode;
+  `cumulative_miles_at_pickup_fire` was NULL at receipt, so the dropoff leg could not
+  be banded. Resolves at the PICKUP-fire handler (FirePickup/FirePickupObservation),
+  which already sets `cumulative_miles_at_pickup_fire` and writes
+  `expected_dropoff_distance`. Extend that EXISTING UPDATE to also set
+  `expected_odometer` and flip status `'active'`. No new writer (encapsulation
+  discipline). The anchor here is the REAL post-pickup odometer — no bridge needed,
+  because the pickup actually fired.
+
+- **Class B — receipt-deferred (pure lost-mode arrival):** no prior segment context
+  at receipt. Resolves at the DROPOFF-fire handler via §9.2's window-scoped recompute.
+
+### 9.5 Build state (verified PM 2026-06-05)
+
+- Band primitive (`odometer_band`, `odometer_in_band`) and the None-routing
+  ("no band → never reap on absence") are LIVE in rev 00647-ckx.
+- The columns `expected_odometer` / `expected_odometer_status` are NOT in the DB.
+- The status constants are NOT in pudo_types.py.
+- Nothing persists the deferred state or runs the dropoff-disambiguation sweep.
+
+Therefore the PROTECTIVE behavior (don't reap a lost-mode offer) is already live; the
+PERSISTENCE (auditable deferred state) and the LIFECYCLE (recompute-or-reap at
+dropoff) are the increment the implementation package builds. Implementation package
+pieces: (1) migration; (2) status constants; (3) persist-on-None at log_decision's
+offer_history INSERT — re-touches the INSERT, requires positional re-verify +
+`EXPECTED_PICKUP_DIST_IDX` shift; (4) Class A pickup-handler extension + Class B
+window-scoped dropoff recompute/flag; (5) tests incl. a §XIV.J live-PG test for the
+cross-heartbeat liveness mutation.
+
+### 9.6 Verdict-blindness invariant (restated)
+
+The deferred/recompute/reap logic MUST NOT consult `app_verdict` anywhere. Per §0.B
+and §XV, the car's physical position is the sole sensor of driver intent; deferral and
+recompute key on receipt-time, dropoff-window membership, and the live-offer predicate
+only. This is the rule most likely to be "helpfully" violated during implementation —
+stated here so it is not.
+
+### 9.7 What this design does NOT prove
+
+It does not prove 9132 is caught. The persist/recompute tests cover the sentinel's own
+behavior; none replays 9132 through the deployed predicate. The premise is sound
+(9132's bridge-correct dropoff anchor was 867.86; arrest odometer was ~868.08 — the
+right column lands within ~0.2 mi of the actual stop), but whether the BAND keeps 9132
+live at that arrest is the predicate-level replay still owed (FINDING step 7,
+cohorted). That replay is separate from this package and gated on replay-against-the-
+deployed-revision (FINDING §7 step 7 / the "MUST replay against deployed, not branch
+tip" constraint).
