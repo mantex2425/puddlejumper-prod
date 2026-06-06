@@ -41,7 +41,12 @@ from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import write_nailed_position
 from where_am_i import WhereAmI, _commits, classify_commit_rule, haversine_meters
 from tad import OfferTadState, compute_offer_expectations
-from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
+from driver_queue import (
+    LIVE_OFFER_PREDICATE_SQL,
+    live_offer_predicate_params,
+    _get_alive_unpicked_offer_ids,
+    compute_effective_last_move,
+)
 from area_dsi import interpolate_area_dsi
 from dispatch import (
     dispatch,
@@ -1251,50 +1256,12 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, referenc
     return str(row["id"]) if row else None
 
 
-def _get_alive_unpicked_offer_ids(cur, driver_id, current_cumulative_miles,
-                                  reference_time, last_odometer_move_at=None):
-    """Return the set of offer_history.id values that are predicate-alive
-    AND have no pickup observation recorded yet.
-
-    Single canonical definition of the §XVIII bit-2 predicate, factored
-    out 2026-05-31 so the cold-start bind in the FirePickupObservation
-    handler can read the same set that _detect_lost_mode evaluates
-    against (recon: RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md §2.1
-    no-hand-rolled-predicate constraint). _detect_lost_mode delegates
-    to this helper, so the predicate has exactly one body.
-
-    The set composition mirrors _detect_lost_mode's prior query:
-    LIVE_OFFER_PREDICATE_SQL (the canonical horizon predicate from
-    driver_queue.py) + `AND oh.actual_pickup_at IS NULL`. No new
-    filters, no divergent definition of "alive."
-
-    Args:
-        cur: psycopg2 cursor.
-        driver_id: Firebase UID.
-        current_cumulative_miles: float or None. When None, the distance
-            axis of LIVE_OFFER_PREDICATE_SQL short-circuits to TRUE
-            (time-only fallback). Production heartbeat path always supplies.
-        reference_time: UTC datetime; the heartbeat's reference point for
-            horizon evaluation.
-        last_odometer_move_at: UTC datetime or None; the staleness-gate
-            anchor. Permissive on NULL.
-
-    Returns frozenset[str] of offer_history.id values (string-typed
-    to match action.offer_id at call sites that compare them).
-    """
-    cur.execute(
-        f"""
-        SELECT oh.id
-        FROM app_private.offer_history oh
-        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
-        WHERE dl.driver_id = %s
-          AND oh.actual_pickup_at IS NULL
-          AND {LIVE_OFFER_PREDICATE_SQL}
-        """,
-        (driver_id,)
-        + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
-    )
-    return frozenset(str(row["id"]) for row in cur.fetchall())
+# _get_alive_unpicked_offer_ids was relocated 2026-06-06 to driver_queue.py
+# (the shared leaf beside LIVE_OFFER_PREDICATE_SQL) so decisions/logger.py's
+# §5.5 receipt-path trigger can import the same single predicate body without
+# the driver_heartbeat -> decisions.transaction_lock import cycle. It is
+# imported at the top of this module; _detect_lost_mode and the heartbeat
+# body call it unchanged. One body, three consumers — see its docstring.
 
 
 def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time, last_odometer_move_at=None):
@@ -1963,33 +1930,18 @@ def post_heartbeat():
     # (the in-memory hint always self-heals). FirePickup/FireDropoff
     # naturally overwrite the DB pointer when they fire in the future.
     queue = DriverQueue(driver_id, target_spec_builder=_bucket_to_target_spec)
-    # §XIV.H Odometer-Staleness Gate (2026-05-19): pre-fetch the prior
-    # cumulative_miles and last_odometer_move_at from the row that's about
-    # to be UPDATEd. Computes effective_last_move for THIS tick — if the
-    # odometer just moved, treat the offer-liveness staleness as alive
-    # now (not the prior stale timestamp), preventing the "killed on the
-    # revive tick" race. The SQL UPDATE at line 1192 commits the same
-    # logic atomically via CASE; the two are equivalent by construction.
+    # §XIV.H Odometer-Staleness Gate (2026-05-19): compute effective_last_move
+    # for THIS tick — if the odometer just moved, treat offer-liveness staleness
+    # as alive now (not the prior stale timestamp), preventing the "killed on the
+    # revive tick" race. The SQL UPDATE below commits the same logic atomically
+    # via CASE; the two are equivalent by construction. The computation was
+    # extracted 2026-06-06 to driver_queue.compute_effective_last_move so the
+    # §5.5 receipt-path trigger feeds the SAME staleness anchor (R3 identical-set
+    # parity) — one body, no hand-rolled duplicate of the race-fix.
     _heartbeat_now = datetime.datetime.now(datetime.timezone.utc)
-    cur.execute("""
-        SELECT last_odometer_move_at,
-               (heartbeat->>'cumulative_miles')::numeric AS prior_cum
-        FROM app_private.driver_trip_state
-        WHERE driver_id = %s
-    """, (driver_id,))
-    _pre = cur.fetchone()
-    if _pre is not None:
-        _prior_cum = float(_pre['prior_cum']) if _pre['prior_cum'] is not None else None
-        _prior_last_move = _pre['last_odometer_move_at']
-    else:
-        _prior_cum = None
-        _prior_last_move = None
-
-    if (cumulative_miles is not None and _prior_cum is not None
-            and cumulative_miles != _prior_cum):
-        effective_last_move = _heartbeat_now
-    else:
-        effective_last_move = _prior_last_move
+    effective_last_move = compute_effective_last_move(
+        cur, driver_id, cumulative_miles, _heartbeat_now,
+    )
 
     snap = queue.snapshot(cur, current_cumulative_miles=cumulative_miles, last_odometer_move_at=effective_last_move)
     current_offer_id = snap.bound_offer_id

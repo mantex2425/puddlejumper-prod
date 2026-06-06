@@ -402,6 +402,111 @@ def live_offer_predicate_params(current_cumulative_miles, reference_time, last_o
     )
 
 
+def _get_alive_unpicked_offer_ids(cur, driver_id, current_cumulative_miles,
+                                  reference_time, last_odometer_move_at=None):
+    """Return the set of offer_history.id values that are predicate-alive
+    AND have no pickup observation recorded yet.
+
+    Single canonical definition of the §XVIII bit-2 predicate, factored
+    out 2026-05-31 so the cold-start bind in the FirePickupObservation
+    handler can read the same set that _detect_lost_mode evaluates
+    against (recon: RECON_LOST_MODE_COLD_START_TRAP_2026-05-31.md §2.1
+    no-hand-rolled-predicate constraint). _detect_lost_mode delegates
+    to this helper, so the predicate has exactly one body.
+
+    Relocated 2026-06-06 from driver_heartbeat.py to driver_queue.py
+    (the shared leaf next to LIVE_OFFER_PREDICATE_SQL) so the §5.5
+    receipt-path deferral trigger (decisions/logger.py) can consume the
+    SAME set — driver_heartbeat.py cannot be imported by logger.py
+    (cycle via decisions.transaction_lock), but driver_queue.py already
+    is. One body now serves THREE consumers: _detect_lost_mode, the
+    FirePickupObservation cold-start bind, and the receipt-path trigger.
+    Strengthens the single-definition contract (no parallel predicate),
+    does not bypass it.
+
+    The set composition mirrors _detect_lost_mode's prior query:
+    LIVE_OFFER_PREDICATE_SQL (the canonical horizon predicate) + `AND
+    oh.actual_pickup_at IS NULL`. No new filters, no divergent
+    definition of "alive."
+
+    Args:
+        cur: psycopg2 cursor.
+        driver_id: Firebase UID.
+        current_cumulative_miles: float or None. When None, the distance
+            axis of LIVE_OFFER_PREDICATE_SQL short-circuits to TRUE
+            (time-only fallback). Production heartbeat path always supplies.
+        reference_time: UTC datetime; the heartbeat's reference point for
+            horizon evaluation.
+        last_odometer_move_at: UTC datetime or None; the staleness-gate
+            anchor. Permissive on NULL.
+
+    Returns frozenset[str] of offer_history.id values (string-typed
+    to match action.offer_id at call sites that compare them).
+    """
+    cur.execute(
+        f"""
+        SELECT oh.id
+        FROM app_private.offer_history oh
+        JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+        WHERE dl.driver_id = %s
+          AND oh.actual_pickup_at IS NULL
+          AND {LIVE_OFFER_PREDICATE_SQL}
+        """,
+        (driver_id,)
+        + live_offer_predicate_params(current_cumulative_miles, reference_time, last_odometer_move_at),
+    )
+    return frozenset(str(row["id"]) for row in cur.fetchall())
+
+
+def compute_effective_last_move(cur, driver_id, current_cumulative_miles, reference_time):
+    """Compute the §XIV.H staleness-gate anchor ("effective last odometer
+    move") for THIS tick: return reference_time when the odometer advanced
+    since the prior driver_trip_state reading (the "killed on the revive tick"
+    race fix), else the stored last_odometer_move_at.
+
+    Single definition of the race-fix computation, factored out 2026-06-06 so
+    the §5.5 receipt-path deferral trigger (decisions/logger.py) feeds the
+    SAME staleness anchor the heartbeat lost-mode detector uses. Identical-set
+    parity (R3) requires matching the detector's INPUT — effective_last_move —
+    NOT the raw last_odometer_move_at, which diverges (a strict subset) whenever
+    the odometer is moving, i.e. the lost-mode case the trigger exists to catch.
+    Mirrors the SQL CASE in the driver_trip_state heartbeat UPDATE; the two are
+    equivalent by construction. Same single-definition discipline as
+    _get_alive_unpicked_offer_ids: no hand-rolled duplicate of this logic.
+
+    Reads the prior driver_trip_state row BEFORE any UPDATE this tick — at
+    receipt time logger.py likewise sees the last heartbeat's stored state.
+
+    Args:
+        cur: psycopg2 cursor.
+        driver_id: Firebase UID.
+        current_cumulative_miles: float or None — this event's odometer.
+        reference_time: UTC datetime — "now" for this tick (the value returned
+            when the odometer advanced this tick).
+
+    Returns a UTC datetime, or None (None stays permissive in the staleness
+    gate — no driver_trip_state row, or never-set last_odometer_move_at).
+    """
+    cur.execute("""
+        SELECT last_odometer_move_at,
+               (heartbeat->>'cumulative_miles')::numeric AS prior_cum
+        FROM app_private.driver_trip_state
+        WHERE driver_id = %s
+    """, (driver_id,))
+    pre = cur.fetchone()
+    if pre is not None:
+        prior_cum = float(pre['prior_cum']) if pre['prior_cum'] is not None else None
+        prior_last_move = pre['last_odometer_move_at']
+    else:
+        prior_cum = None
+        prior_last_move = None
+
+    if (current_cumulative_miles is not None and prior_cum is not None
+            and current_cumulative_miles != prior_cum):
+        return reference_time
+    return prior_last_move
+
+
 def _log_distance_cull_if_any(cur, driver_id, current_cumulative_miles,
                               reference_time, last_odometer_move_at,
                               method_label, live_count):

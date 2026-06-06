@@ -3,9 +3,16 @@ import logging
 import json
 import traceback
 
+import psycopg2
+
 from pudo_types import (Offer, TargetSpec, ODOMETER_STATUS_ACTIVE, ODOMETER_STATUS_DEFERRED)
 from tad import compute_offer_expectations
-from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
+from driver_queue import (
+    LIVE_OFFER_PREDICATE_SQL,
+    live_offer_predicate_params,
+    _get_alive_unpicked_offer_ids,
+    compute_effective_last_move,
+)
 from dsi import compute_dsi_v1
 
 
@@ -247,7 +254,110 @@ def log_decision(cur, conn, uid, params, ep, result):
                         prev_offer_obj = None
                         prev_dropoff_eta = None
                         prev_dropoff_dist = None
-            if cumulative_miles_value is not None:
+            # ── §5.5 lost-mode deferral trigger (FINDING §5.5; R1/R3/R4) ──
+            # Defer at receipt when the driver is in §XVIII lost-mode: there is
+            # NO chaining anchor (prev_offer_obj is None, post-Horizon-GC) AND a
+            # pre-existing alive-unpicked peer offer exists. In that state the
+            # idle anchor (current_odometer + pickup_miles) is a confident guess
+            # at an unknowable bridge term (§XVIII.B) — defer rather than
+            # fabricate. Leaving the anchors NULL lands the row 'deferred' (the
+            # :348 status ternary); the next dropoff resurrects it (§9.2) or it
+            # is abandoned out-of-window (§9.9.3).
+            #
+            # Union with the odometer-absent safety net (R4), NOT a replacement:
+            # odometer-absent defers via the outer `cumulative_miles is not None`
+            # skip below; lost-mode defers via THIS branch. Two distinct failure
+            # classes (anchor uncomputable vs. anchor confidently-wrong), both
+            # warranting defer.
+            #
+            # bit-1 = (prev_offer_obj is None): the chaining-availability signal,
+            #   chosen over §XVIII's literal `current_offer_id IS NULL` (R1) — it
+            #   keys on whether a real anchor exists and is immune to the L-19
+            #   stale-pointer problem; the two diverge only when current_offer_id
+            #   is a stale non-NULL pointer, exactly the case where it is wrong.
+            # bit-2 = a pre-existing alive-unpicked peer exists, evaluated against
+            #   the SAME set the heartbeat lost-mode detector sees — identical-set
+            #   parity (R3) via the shared compute_effective_last_move (the
+            #   staleness anchor the detector uses, NOT raw last_odometer_move_at,
+            #   which under-defers while the driver is moving) + the one canonical
+            #   bit-2 body _get_alive_unpicked_offer_ids.
+            #
+            # D's own offer_history row is NOT yet inserted here (the INSERT is
+            # the last step below) — so the alive-unpicked query naturally
+            # EXCLUDES D; no self-count, no exclusion logic. KEEP the INSERT last:
+            # a future receipt-path reorder that moved it above this point would
+            # silently reintroduce self-counting.
+            lost_mode_defer = False
+            if cumulative_miles_value is not None and prev_offer_obj is None:
+                try:
+                    _eff_last_move = compute_effective_last_move(
+                        cur, uid, cumulative_miles_value, now_utc,
+                    )
+                    _alive_unpicked = _get_alive_unpicked_offer_ids(
+                        cur, uid, cumulative_miles_value, now_utc, _eff_last_move,
+                    )
+                    if _alive_unpicked:
+                        lost_mode_defer = True
+                        logging.info(
+                            f"[§5.5 lost-mode defer] driver={uid} "
+                            f"offer={decision_log_id} deferred: no chaining anchor "
+                            f"+ {len(_alive_unpicked)} alive-unpicked peer(s) "
+                            f"{sorted(_alive_unpicked)} (idle anchor would be a guess)"
+                        )
+                except (psycopg2.Error, psycopg2.DataError) as lm_err:
+                    # Policy A — FAIL-CLOSED. A detection failure leaves the
+                    # lost-mode condition UNDETERMINED. We MUST NOT fabricate the
+                    # idle anchor: falling through to the compute below would land
+                    # the row 'active' on a guessed anchor — the exact §5.5 failure
+                    # this fix exists to kill, re-entering via the error path. So we
+                    # set lost_mode_defer = True, which HARD-SKIPS the idle/stacked
+                    # compute (the `and not lost_mode_defer` guard below) and SUPPRESSES
+                    # the anchor.
+                    #
+                    # Two outcomes, stated honestly (do not over-claim "deferred"):
+                    #   - Recoverable detection error on a HEALTHY connection
+                    #     (DataError from a bad ::numeric cast; a transient that did
+                    #     NOT drop the connection): rollback clears the tx and the
+                    #     unconditional offer_history INSERT below PERSISTS the row
+                    #     'deferred' — the honest "anchor unknowable" state,
+                    #     recoverable (dropoff-resurrect §9.2 / abandon §9.9.3). This
+                    #     is the path the monkeypatch error-path test pins.
+                    #   - Connection-loss: the rollback (swallowed) and/or the INSERT
+                    #     below fail; the OUTER offer_history handler logs
+                    #     "[ERROR] ... insert failed" with a traceback and writes NO
+                    #     row. Fabrication-free and loud — covered by propagation,
+                    #     NOT by a deferred write.
+                    # Either way: never a fabricated 'active' anchor.
+                    #
+                    # NARROW catch: only the recon-confirmed expected failures —
+                    # psycopg2 infra errors + DataError from a bad `::numeric` cast
+                    # of cumulative_miles / heartbeat. Any OTHER exception class is
+                    # a programming defect and propagates to the outer offer_history
+                    # handler (no row written — loud, never a silent defer-on-bug).
+                    #
+                    # §V forensics: carry the error type + driver so a spike in
+                    # error-deferrals is investigable, not an unexplained anomaly.
+                    lost_mode_defer = True
+                    logging.warning(
+                        f"[§5.5] lost-mode detection FAILED for driver={uid} "
+                        f"offer={decision_log_id} — fail-closed: suppressing the idle "
+                        f"anchor (never fabricate). Lands 'deferred' on a healthy "
+                        f"connection; on connection-loss the INSERT below fails and "
+                        f"the outer handler logs no-row at ERROR. "
+                        f"err={type(lm_err).__name__}: {lm_err}"
+                    )
+                    # Clear a possibly-aborted tx so the deferred INSERT can run on a
+                    # clean tx (decision_log already committed at :78 — rollback
+                    # touches only the failed detection reads, nothing collateral).
+                    # If rollback ITSELF fails (dead conn) it is swallowed here, but
+                    # the connection-loss is re-surfaced loudly by the INSERT below
+                    # failing into the outer handler — nothing is hidden.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+
+            if cumulative_miles_value is not None and not lost_mode_defer:
                 try:
                     new_offer_obj = Offer(
                         offer_id=str(decision_log_id),

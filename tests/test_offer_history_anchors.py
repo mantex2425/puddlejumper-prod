@@ -74,9 +74,22 @@ def _result_stub():
     }
 
 
+# §5.5 lost-mode trigger (fix #2, 2026-06-06): on the idle receipt path
+# (prev_offer None + odometer present) log_decision now issues two extra reads
+# before the offer_history INSERT — compute_effective_last_move's driver_trip_state
+# SELECT (fetchone) and _get_alive_unpicked_offer_ids' SELECT (fetchall). These
+# mocks are taught those returns so the idle path runs cleanly to "not lost-mode →
+# idle compute" (these tests verify param-binding logic, not the predicate boundary
+# — the boundary is covered by the live-PG tests in test_lost_mode_deferral_trigger).
+# A NULL-ish driver_trip_state row + empty alive-set = "idle, no peer".
+_DTS_ROW = {"last_odometer_move_at": None, "prior_cum": None}
+
+
 def _mock_cursor_returning(decision_log_id=42):
     cur = MagicMock()
-    cur.fetchone.return_value = {"id": decision_log_id}
+    # fetchone order: decision_log id, prev_offer (None=idle), driver_trip_state row.
+    cur.fetchone.side_effect = [{"id": decision_log_id}, None, _DTS_ROW]
+    cur.fetchall.return_value = []   # no alive-unpicked peer → not lost-mode
     return cur
 
 
@@ -197,13 +210,16 @@ def _find_offer_history_insert(cur):
 
 def _mock_cursor_with_prev(decision_log_id=42, prev_row=None):
     """Cursor mock that returns decision_log_id on first fetchone(),
-    prev_row on second.
+    prev_row on second, and a NULL-ish driver_trip_state row on the third
+    (the §5.5 idle-path read; unused on the stacked path where prev is non-None
+    and the trigger is skipped).
 
     Use prev_row=None for idle case (no prior offer in DB).
     Use prev_row={...} for stacked case.
     """
     cur = MagicMock()
-    cur.fetchone.side_effect = [{"id": decision_log_id}, prev_row]
+    cur.fetchone.side_effect = [{"id": decision_log_id}, prev_row, _DTS_ROW]
+    cur.fetchall.return_value = []   # §5.5: no alive-unpicked peer → not lost-mode
     return cur
 
 
@@ -424,13 +440,19 @@ class TestExpectedAnchorBindings:
         select_called = [False]
 
         def _execute_side_effect(sql, *args, **kwargs):
-            if "FROM app_private.offer_history oh" in sql:
+            # Raise on the PREV_OFFER chaining query only (its distinctive clause),
+            # NOT the §5.5 alive-unpicked query (which also reads offer_history oh
+            # but lacks this clause) — so this test isolates prev-fetch failure.
+            if "expected_dropoff_arrival_time IS NOT NULL" in sql:
                 select_called[0] = True
                 raise RuntimeError("simulated SELECT failure")
             return None
 
         cur.execute.side_effect = _execute_side_effect
-        cur.fetchone.return_value = {"id": 42}
+        # fetchone order: decision_log id, then the §5.5 driver_trip_state read
+        # (prev fetchone is never reached — its execute raised above).
+        cur.fetchone.side_effect = [{"id": 42}, _DTS_ROW]
+        cur.fetchall.return_value = []   # §5.5 alive-unpicked → empty → not lost-mode
 
         conn = MagicMock()
         ep = _ep_with_anchors(

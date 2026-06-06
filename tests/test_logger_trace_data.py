@@ -75,7 +75,11 @@ def _capture_trace_data(cur_mock):
 def test_trace_payload_includes_cumulative_miles():
     """Item 8 (2026-05-09): cumulative_miles must round-trip into trace_data."""
     cur = MagicMock()
-    cur.fetchone.return_value = {"id": 12345}  # decision_log_id
+    # fetchone order: decision_log id, prev_offer (None=idle), driver_trip_state
+    # row (§5.5 fix #2 idle-path read); fetchall=[] → no alive-unpicked peer.
+    cur.fetchone.side_effect = [
+        {"id": 12345}, None, {"last_odometer_move_at": None, "prior_cum": None}]
+    cur.fetchall.return_value = []
     conn = MagicMock()
 
     ep = _build_minimal_ep(cumulative_miles=42.5)
@@ -96,7 +100,9 @@ def test_trace_payload_includes_gps_age_sec_regression():
     was missed pre-Item-8.
     """
     cur = MagicMock()
-    cur.fetchone.return_value = {"id": 12345}
+    cur.fetchone.side_effect = [
+        {"id": 12345}, None, {"last_odometer_move_at": None, "prior_cum": None}]
+    cur.fetchall.return_value = []
     conn = MagicMock()
 
     ep = _build_minimal_ep(gps_age_sec=1.2)
@@ -110,7 +116,9 @@ def test_trace_payload_includes_gps_age_sec_regression():
 def test_trace_payload_handles_none_values():
     """Defensive: None should round-trip cleanly (JSON null) for both aliases."""
     cur = MagicMock()
-    cur.fetchone.return_value = {"id": 12345}
+    cur.fetchone.side_effect = [
+        {"id": 12345}, None, {"last_odometer_move_at": None, "prior_cum": None}]
+    cur.fetchall.return_value = []
     conn = MagicMock()
 
     ep = _build_minimal_ep(cumulative_miles=None, gps_age_sec=None)

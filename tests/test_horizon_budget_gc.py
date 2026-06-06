@@ -136,10 +136,19 @@ def _make_cursor(prev_row_dict, decision_log_id=42):
     Call order in log_decision:
       1. INSERT INTO decision_log RETURNING id   -> {"id": decision_log_id}
       2. SELECT FROM offer_history (prev_row)    -> prev_row_dict or None
-      3. INSERT INTO offer_history (no fetch)
+      3. (§5.5, fix #2) when the Horizon GC nulls prev -> idle path: a
+         driver_trip_state SELECT (fetchone) + alive-unpicked SELECT (fetchall).
+         Taught here so the GC→idle cases run cleanly to "not lost-mode" rather
+         than passing on a swallowed StopIteration. Unused when prev is kept.
+      4. INSERT INTO offer_history (no fetch)
     """
     cur = MagicMock()
-    cur.fetchone.side_effect = [{"id": decision_log_id}, prev_row_dict]
+    cur.fetchone.side_effect = [
+        {"id": decision_log_id},
+        prev_row_dict,
+        {"last_odometer_move_at": None, "prior_cum": None},  # §5.5 idle-path read
+    ]
+    cur.fetchall.return_value = []   # §5.5: no alive-unpicked peer → not lost-mode
     return cur
 
 

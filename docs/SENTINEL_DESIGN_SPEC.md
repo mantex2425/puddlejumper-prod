@@ -9,6 +9,19 @@ do and why. If this doc and the FINDING ever disagree, the FINDING wins.
 Deployed in rev `puddlejumper-api-00648-lwx`, branch
 `fix/restore-fire-error-metric-2026-06-02` @ HEAD `681eccb`.
 
+**2026-06-06 update (fix #2 + §9.9, this branch).** Two changes land the design's
+actual intent, correcting two places where the deployed code diverged from it:
+
+1. **Trigger wired to the §XVIII lost-mode condition (fix #2).** The deployed
+   trigger fired only on a *missing odometer* — which the current client never
+   sends, so it fired 0% in production (`RECON_DEFERRED_SENTINEL_TRIGGER_MISMATCH`).
+   Fix #2 makes the receipt path defer on the real lost-mode condition (INV-1
+   below), keeping the odometer-absent case as a union safety net.
+2. **Out-of-window disposition changed deferred→`abandoned` (§9.9).** INV-4 below
+   was rewritten: out-of-window deferred offers are no longer "left for the GC"
+   (the GC is structurally blind to them); the dropoff handler marks them
+   `abandoned` and the live predicate excludes them immediately.
+
 ---
 
 ## 1. The problem the sentinel solves (intent)
@@ -43,12 +56,53 @@ missing anchor. Never guess.**
 
 ## 2. Required behavior (the invariants — a test MUST verify these)
 
-### INV-1 — Deferral on lost-mode receipt
-When an offer is received in lost mode (no computable anchor), the system MUST set
-`expected_odometer = NULL` and `expected_odometer_status = 'deferred'`. NULL is the
-sentinel — never a magic number. (A number in a miles column silently corrupts any
-consumer that forgets to guard it; NULL forces every consumer to branch or fail
-loud.)
+### INV-1 — Deferral trigger (lost-mode ∪ odometer-absent)
+At receipt the system MUST set `expected_odometer = NULL` and
+`expected_odometer_status = 'deferred'` when EITHER condition holds (union, not
+replacement — two distinct failure classes, both warranting defer):
+
+- **Lost-mode (fix #2, the class that fires in the wild).** There is no chaining
+  anchor — `prev_offer is None` after the Horizon GC — AND a pre-existing
+  alive-unpicked peer offer exists (the §XVIII condition). The idle anchor
+  (`current_odometer + pickup_miles`) would be a *confident guess* at an unknowable
+  bridge term (§XVIII.B); defer rather than fabricate.
+- **Odometer-absent (the original safety net).** `cumulative_miles` is absent, so no
+  anchor is computable at all.
+
+NULL is the sentinel — never a magic number. (A number in a miles column silently
+corrupts any consumer that forgets to guard it; NULL forces every consumer to branch
+or fail loud.)
+
+Ratified signal choices (fix #2):
+- **bit-1 = `prev_offer is None`**, NOT the literal `current_offer_id IS NULL` (R1).
+  It keys on whether a real chaining anchor exists and is immune to the L-19
+  stale-pointer problem; the two diverge only when `current_offer_id` is a stale
+  non-NULL pointer — exactly the case where it is the wrong signal.
+- **bit-2** is evaluated against the SAME alive-unpicked set the heartbeat lost-mode
+  detector sees (R3 identical-set parity): the canonical bit-2 body
+  `_get_alive_unpicked_offer_ids` fed `compute_effective_last_move` (the staleness
+  anchor the detector uses — NOT raw `last_odometer_move_at`, which under-defers
+  while the driver is moving, i.e. the lost-mode case). Both predicate bodies live
+  in `driver_queue.py` (single definition, three consumers).
+- **R2 (deferral volume) is resolved on philosophy, not a measured rate.** When a
+  live unpicked peer exists the idle anchor is a guess, so defer-don't-fabricate is
+  the honest call regardless of how often it fires. The single-driver / weeks-old
+  dataset is too young to generalize; a band-aware historical replay would sharpen a
+  non-generalizable number (false precision). The true rate is measured at the
+  post-deploy lost-mode drive — no replay is built.
+
+**Detection-error policy (fail-closed, honest about both branches).** The bit-2
+detection is two DB reads. On a recon-confirmed expected failure
+(`psycopg2.Error`/`DataError` — infra or a bad `::numeric` cast) the trigger NEVER
+fabricates the idle anchor; it suppresses the anchor. Two outcomes:
+- *recoverable error, healthy connection* → the offer_history INSERT persists the
+  row `'deferred'` (the honest "unknowable" state). Pinned by the error-path test.
+- *connection-loss* → the INSERT fails into the outer handler: a loud
+  `[ERROR] … insert failed` with NO row written (fabrication-free; covered by
+  propagation, not by a deferred write).
+
+Any non-psycopg2 exception is a programming defect and propagates to the outer
+handler (no row, loud) rather than silently deferring.
 
 ### INV-2 — Deferred offers are alive but inert on the odometer axis
 A deferred offer MUST NOT be reaped by the band (no anchor → no band → cannot be
@@ -65,12 +119,20 @@ The recompute re-invokes the EXISTING expectation function with X's dropoff anch
 — the chaining IS the bridge; no new formula. D's full anchor set is backfilled so
 a resurrected offer is indistinguishable from one active at receipt.
 
-### INV-4 — Out-of-window deferred offers are LEFT for the GC (no second reaper)
-Deferred offers OUTSIDE X's window belong to an earlier, unresolved segment. The
-dropoff handler MUST NOT reap or recompute them. They are left for the upstream
-Horizon Budget GC to sweep on its own authority + 4h abandonment ceiling. There is
-exactly ONE killing authority (the GC). The sentinel only ever WRITES anchors
-(receipt, pickup-fire, dropoff-recompute); it never sets liveness false.
+### INV-4 — Out-of-window deferred offers are marked `abandoned` (§9.9)
+Deferred offers OUTSIDE X's window belong to no resolved ride. The dropoff handler
+MUST NOT recompute them (no bridge), and MUST NOT leave them lingering `deferred`:
+it sets `expected_odometer_status = 'abandoned'`, and the live predicate's
+`expected_odometer_status IS DISTINCT FROM 'abandoned'` clause (§9.9.2) excludes
+them from the live set immediately — no 4h linger.
+
+This replaces the original "LEFT for the Horizon GC" disposition, which the GC
+structurally cannot honor: its SELECT requires `actual_pickup_at IS NOT NULL`, so a
+never-picked-up deferred offer is invisible to it. This is NOT a second killing
+authority: the predicate remains the single liveness authority; the dropoff handler
+only WRITES a status the predicate consumes (the same pattern as the pickup-fire
+deferred→active writer). The abandonment runs even when X carries no chaining anchor
+(§9.9.6) — it keys only on window membership. See FINDING §9.9.
 
 ### INV-5 — Window-scoping is the load-bearing guardrail
 Recomputing a deferred offer against a trip it did NOT belong to would produce a
@@ -134,9 +196,42 @@ a genuine lost-mode receipt through the real API.
 
 ## 6. Current proof status (honest)
 
-- Unit-proven: live-PG test `tests/test_deferred_sentinel_recompute.py` (3/3) +
-  guard-test `tests/test_chaining_ignores_prev_offer_attrs.py` (2/2). Floor 770/1/0.
-- Deployed: rev 00648-lwx serving.
-- NOT yet production-witnessed: `deferred_count=0` since deploy; the deferred path
-  has never fired in the wild. Witnessing it (driving a genuine lost-mode receipt
-  through the live API) is the open task.
+- Unit-proven (resurrection + abandonment, §9.2/§9.9):
+  `tests/test_deferred_sentinel_recompute.py` (in-window→active, out-of-window→
+  abandoned, no-anchor-still-abandons) + `tests/test_abandoned_excluded_from_
+  predicate.py` (predicate excludes abandoned, incl. NULL-band independence) +
+  guard-test `tests/test_chaining_ignores_prev_offer_attrs.py`. §9.9 floor at
+  `23dabb1`: 773/1/0.
+- Unit-proven (trigger, fix #2): `tests/test_lost_mode_deferral_trigger.py` — the
+  four-way decision tree (lost-mode→deferred, idle→active, stacked→active,
+  odometer-absent→deferred), the set-identity regression against the heartbeat
+  detector in the MOVING case (the assertion that distinguishes effective_last_move
+  parity from the raw-timestamp subset bug), the INV-A genuine-idle guard, and the
+  fail-closed error-path test (detection error → 'deferred', never a fabricated
+  'active' anchor).
+- Deployed: rev 00648-lwx serving the PRE-fix trigger (missing-odometer only).
+- Why `deferred_count = 0` in the wild pre-fix: the deployed trigger keyed on a
+  missing odometer, which the current Android client never sends — so it never fired
+  on the lost-mode condition it was designed for (the trigger mismatch fix #2
+  corrects). Post-fix it fires on real lost-mode.
+- STILL NOT production-witnessed: a genuine lost-mode receipt landing `deferred`
+  through the live API (and a real lost-mode drive) remains the open empirical task —
+  the fix→test→**drive** step. No replay substitutes for it (R2).
+
+---
+
+## 7. Deferred follow-ups
+
+- **SQL/Python effective_last_move agreement test — DEFERRED from fix #2.** The
+  Python helper `driver_queue.compute_effective_last_move` and the SQL `CASE` that
+  persists `last_odometer_move_at` (inline in the heartbeat's `driver_trip_state`
+  UPDATE, `driver_heartbeat.py`) encode the same "now-if-moved-else-stored" rule —
+  "equivalent by construction," but currently *unenforced* by any test. A true
+  runtime cross-check (run both on identical inputs, assert equal) requires
+  extracting that UPDATE's SQL to a module constant so a test can execute the real
+  CASE — a heartbeat-UPDATE refactor out of scope for the trigger commit. Deferred
+  deliberately: fix #2 did NOT touch the CASE and *consolidated* the Python side
+  into one helper (replacing the prior inline copy), so it lowered drift risk rather
+  than raising it. A source-text-only pin was considered and rejected (weak proof;
+  would need rework when the real test lands). Pick this up as: extract
+  `DRIVER_TRIP_STATE_HEARTBEAT_UPDATE_SQL` + a live-PG agreement test.

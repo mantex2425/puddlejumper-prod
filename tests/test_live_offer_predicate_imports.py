@@ -72,8 +72,15 @@ class TestPredicateStructuralContract:
         this helper. Single source of truth — the body must live exactly
         here. test_detect_lost_mode_delegates_to_helper enforces the
         delegation; this test enforces the body's content.
+
+        Updated 2026-06-06 (§5.5 receipt-path trigger): the helper was
+        RELOCATED from driver_heartbeat.py to driver_queue.py (the shared
+        leaf beside LIVE_OFFER_PREDICATE_SQL) so decisions/logger.py can
+        import it without the driver_heartbeat import cycle. The body now
+        lives in driver_queue.py; this test reads it there. One body, three
+        consumers (detector, cold-start bind, receipt trigger).
         """
-        text = _module_text("driver_heartbeat.py")
+        text = _module_text("driver_queue.py")
         m = re.search(
             r"def _get_alive_unpicked_offer_ids\(.*?(?=\n(?:def |class ))",
             text,
