@@ -47,7 +47,34 @@ appears even on *caught* taps and on taps with size-31 clusters. On a 97%-lost-m
 per-heartbeat reasons flicker, so counting them does **not** attribute a tap to a cause. There is
 **no** "no-cluster dominates" conclusion to draw here.
 
-## Leading mechanism: the horny-mode bootstrap deadlock
+## ⚠️ Validation update (2026-06-06): horny-mode hypothesis REFUTED
+
+The "arrest-gated horny" hypothesis below was tested against the 16 missed taps and **does not
+hold.** Decomposition of the misses:
+- **A cluster formed at all 16** (cluster_size 3–19, duration 11–58s) — the misses are **not**
+  sample-starved, so 1 Hz cannot "form a cluster that wasn't there."
+- **11 of the 13 scored misses had localizing-signal-sum = 0.00** (proximity + on_target_road +
+  breadcrumb + adjacent). They were capped by **localization**, not cluster density — and more
+  samples add no spatial signal.
+- 3 taps weren't scored at all (queue-empty / exclusion); 2 (14:58, 15:03) had strong
+  localization (sum 2.0) yet didn't fire — a dispatch/arbitration gap.
+
+So the caught/missed cadence gap (4.87s vs 3.19s) was **real but non-causal**; clusters formed
+regardless. **Arrest-gated horny would not recover these misses.** The cadence section below is
+retained for the record but is superseded by this validation.
+
+**What the validation re-confirms — the original Fix #3 question.** The dominant failure is a
+cluster that forms *right where the driver arrested*, but `proximity=0` and `on_target_road=0` —
+i.e. the **actual stop is beyond the proximity radius from the offer's geocode and on a different
+road than the geocode's road** (proximity *does* compute when near — 9127's pickup hit 0.48 — so
+0.00 means genuinely offset, not a dead signal). That is exactly *"arrested near-but-not-at a
+pickup you can't physically stop at."* The real levers are therefore: **(a) the ground-truth
+tolerance disposition** (miss / correct-observation / log-don't-bind — the product call), **(b)
+geocode/road localization for offset address classes** (intersections, airline-name POIs), **(c)**
+the 3 queue-exclusions (cohort replay), **(d)** the 2 dispatch-gap anomalies. **Not cadence, not
+cluster-formation, not WAI-weight reweighting.**
+
+## Leading mechanism (SUPERSEDED — see validation update above): the horny-mode bootstrap deadlock
 
 Intended design: normal cadence is **0.2 Hz (one sample / 5s)**; when WAI confidence rises the
 matcher goes **"horny" → 1 Hz** to catch quick car entry/exit (`where_am_i.py`; heartbeat
@@ -95,18 +122,27 @@ on multi-mile transit roads; reweight proximity to dominate"* — is refuted:
   adjacent). No over-confident signal to downweight; usually no signal to amplify.
 - The suite **works** when the driver arrests at the target (offer 9127 dropoff: 0.897 via
   on_target_road/breadcrumb/adjacent = 1.0, fired and completed).
-- Most misses are upstream of WAI scoring entirely (cadence/sampling, queue exclusion, multi-PUDO).
+- Most misses are upstream of WAI *reweighting* — they have a formed cluster but the localizing
+  signals read 0 (the stop is offset from the geocode), or they aren't scored at all (exclusion).
 
-## Implications for the fix backlog
+## Implications for the fix backlog (post-validation)
 
-- **De-scope "Fix #3 = WAI confidence tuning."** It addresses ~5 of the misses at most, and even
-  those are localization (intersection dual-road snap; airline-name POI cache miss), not
-  transit-road reweighting. Do **not** reweight `_CONFIDENCE_WEIGHTS` to "recover the 11."
-- **Promote the cadence-trigger fix** (arrest-gated horny) as the highest-leverage candidate — it
-  attacks the bootstrap deadlock that under-samples quick PUDOs.
-- **Multi-PUDO-at-one-cluster** design (the traffic-light case) — owed, distinct.
-- **Re-measure EXCLUDED via cohort replay** against rev `00649` (sentinel+reaping+band) before any
-  new work — those may already be fixed.
+- **Cadence/horny is NOT the lever** (validated-refuted): clusters formed at all 16 misses; 1 Hz
+  adds samples, not localization. Do not pursue arrest-gated horny as the miss fix.
+- **The dominant lever is the ground-truth-tolerance disposition** (the original Fix #3 product
+  question): what should the system do when a clean arrest forms a cluster that is **offset from
+  the offer's geocode** (proximity=0, on_target_road=0) — *miss / correct-observation /
+  log-don't-bind*? 11 of 13 scored misses are this case.
+- **Localization for offset address classes** is the engineering half: intersection ("Road & Road")
+  geocode/road snap and airline-name POI resolution — why the offer's geocode lands beyond the
+  reachable stop. (Verify offset distance per class before designing.)
+- **De-scope "Fix #3 = WAI confidence reweighting."** There is no over-confident signal to
+  downweight and (at the misses) no signal to amplify — reweighting `_CONFIDENCE_WEIGHTS` cannot
+  recover an offset-cluster miss.
+- **Re-measure EXCLUDED (3) via cohort replay** against rev `00649` (sentinel+reaping+band) — may
+  already be fixed.
+- **Investigate the 2 dispatch-gap anomalies** (14:58, 15:03): strong localization (signal sum
+  2.0) yet no fire within 90s — a dispatch/arbitration issue distinct from all the above.
 
 ## Confirmed vs inferred
 
@@ -114,16 +150,22 @@ on multi-mile transit roads; reweight proximity to dominate"* — is refuted:
   ~4/38 (missed taps ~4.9s cadence vs caught ~3.2s); WAI-scored misses have all spatial signals 0
   (confidence = stop-physics only); 9127 success (0.897, fired); the ~5 WAI residual span
   intersection/single_road/POI.
-- **Inferred / owed:** that arrest-gated horny recovers the misses (validate — modest caught/missed
-  cadence gap); that EXCLUDED taps recover under the shipped fixes (cohort replay); exact integer
+- **Validated-refuted:** arrest-gated horny does NOT recover the misses — a cluster formed at all
+  16; 11/13 scored misses had localizing-signal-sum = 0 (localization-capped, not sample-capped).
+- **Inferred / owed:** that the offset is physics vs geocode-bug per class (measure stop-vs-geocode
+  distance); that EXCLUDED taps recover under the shipped fixes (cohort replay); exact integer
   splits (window-sensitive); per-tap offer attribution (`contest_labels` has no offer id — time
   cross-ref only, so a ±90s fire for a different offer can over-credit CAUGHT).
 
 ## Next steps (ordered)
 
-1. **Validate the cadence-trigger hypothesis:** would arrest-gated horny (1 Hz on stillness) have
-   densified the 16 missed taps' clusters? Replay/simulate, or A/B on a drive.
-2. **Cohort replay** of the 06-04 PUDOs against `00649` → recovery with no WAI change; isolates the
-   true post-fix residual.
-3. **Multi-PUDO-at-one-stop** design (traffic-light pickup+dropoff-of-two-offers).
-4. Only then the WAI localization residual (intersection / airline-POI), if any survives.
+1. **Ground-truth-tolerance disposition** (product call, the real gate): for a clean arrest whose
+   cluster is offset from the offer geocode — miss / correct-observation / log-don't-bind?
+2. **Measure the offset** per address class: distance(arrest cluster centroid, offer geocode) for
+   the scored misses (intersection/airline-POI) → physics (can't-reach-pin) vs geocode bug. This
+   decides whether (1) is "widen/accept" or "fix the geocode/proximity."
+3. **Cohort replay** of the 06-04 PUDOs against `00649` → how many EXCLUDED recover with no WAI
+   change; isolates the true residual.
+4. **Multi-PUDO-at-one-stop** design (traffic-light pickup+dropoff-of-two-offers) and the 2
+   dispatch-gap anomalies (14:58, 15:03).
+5. (No cadence/horny work; no `_CONFIDENCE_WEIGHTS` reweighting — both ruled out.)
