@@ -625,3 +625,139 @@ a Bruno scenario through the real endpoints (interpretation B: reproduce the rea
 receipt path, no test-only shortcut, no faked status). Until that witness is
 green, the correct confidence statement is: "unit-tested, deployed, not yet
 production-witnessed." This is the §5.5 analogue of §9.7's scope honesty.
+---
+
+## 9.9 ADDENDUM — out-of-window deferred offers: the `'abandoned'` status (2026-06-05 PM)
+
+**Status:** RATIFIED design (Andrew), pending Gemini ratification before code.
+Resolves the open hard-vs-soft / GC-vs-handler / new-flag questions left ambiguous
+in §9.2/§9.8. Append to the FINDING; renumbers nothing.
+
+**Origin:** §9.8 left out-of-window deferred offers "LEFT for the upstream GC's 4h
+ceiling." That is wrong on two counts Andrew rejected explicitly: (1) a 4-hour
+queue of inert-but-present deferred offers is a forensic false-positive minefield
+(they *look* live in queries for hours); (2) the GC structurally cannot reap them
+anyway (its SELECT requires `actual_pickup_at IS NOT NULL`, logger.py:106 — a
+never-picked-up deferred offer is invisible to it). This addendum specifies the
+resolved design.
+
+### 9.9.1 The mechanism — a third value in the EXISTING status field
+
+`expected_odometer_status` already holds `'active'` / `'deferred'`. Add a third
+VALUE — `'abandoned'` — to that same field. This is NOT a new column or a new
+flag; it completes the lifecycle of the field that already exists:
+
+    deferred ──(dropoff proves it belongs to the just-closed ride)──> active
+    deferred ──(dropoff proves it belongs to NO ride — out of window)──> abandoned
+
+`ODOMETER_STATUS_ABANDONED = "abandoned"` is defined beside the other two in
+pudo_types.py (single owner, §9 vocabulary block ~line 221).
+
+### 9.9.2 The keystone — the live predicate must EXCLUDE abandoned (new clause)
+
+**Verified (recon 2026-06-05 PM):** `LIVE_OFFER_PREDICATE_SQL` (driver_queue.py)
+does NOT currently reference `expected_odometer_status`. Its clauses are
+`actual_dropoff_at IS NULL`, the causality guard, the 4h abandonment ceiling, the
+odometer-staleness gate, and the band (upper-edge, NULL-permissive). The status
+column today is descriptive + a recompute-target marker, NOT a liveness gate.
+
+Therefore flipping an offer to `'abandoned'` does NOTHING on its own. For
+"abandoned = gone immediately" (Andrew's constraint: no 4h linger), the predicate
+MUST gain an exclusion clause:
+
+    AND oh.expected_odometer_status IS DISTINCT FROM 'abandoned'
+
+`IS DISTINCT FROM` (not `<> 'abandoned'`) so a NULL status stays live — only an
+EXPLICITLY abandoned offer drops. This is a change to the canonical hot-path
+predicate (the same SQL rewritten in Step 6 piece (i)). It carries the full
+discipline: arity re-verify on the param tuple (the new clause adds no `%s` — it is
+a literal-comparison clause, so the bind tuple is UNCHANGED; verify this holds), and
+re-run `test_band_clause_matches_primitive` to confirm the band matching is
+unperturbed. A NEW predicate test asserts an `'abandoned'`-status offer fails
+`LIVE_OFFER_PREDICATE_SQL`.
+
+### 9.9.3 The sweep lives at the DROPOFF HANDLER, not the GC
+
+The GC cannot see never-picked-up deferred offers (`actual_pickup_at IS NOT NULL`
+filter). The dropoff handler (driver_heartbeat.py ~513/848, the `actual_dropoff_at
+= NOW()` fire sites) CAN — and it holds the disambiguating window in hand. So the
+window-scoped pass runs there, at the moment of proof:
+
+On dropoff fire for offer X (window `[COALESCE(X.actual_pickup_at, X.created_at),
+NOW()]`), for each deferred offer D of this driver:
+- **D.created_at IN window** → received during the now-identified ride → recompute
+  via the existing `compute_offer_expectations` (Class B, §9.2) → status `'active'`.
+- **D.created_at OUT of window** → proven not part of this (or any current) ride →
+  status `'abandoned'`. Excluded from the live set immediately by §9.9.2's clause.
+
+This is NOT a second reaper in the §6.5 sense. Reaping in this codebase is emergent
+from `LIVE_OFFER_PREDICATE_SQL` (the predicate excludes; nothing writes a "dead"
+flag — the Horizon GC merely nulls in-memory handles, it does not touch the DB).
+The dropoff handler does not kill rows; it sets a status that the ONE predicate then
+excludes. The predicate remains the single liveness authority. The dropoff handler
+is a status-writer feeding that authority, exactly as the pickup-fire handler is a
+status-writer (deferred→active) today.
+
+### 9.9.4 Consumer safety (recon-verified blast radius)
+
+Readers of `expected_odometer_status` and the effect of adding `'abandoned'`:
+- **logger.py:348** (INSERT) — sets `DEFERRED if expected_pickup_dist is None else
+  ACTIVE`. Two-way ternary; a new offer is NEVER born abandoned. No change. ✓
+- **driver_heartbeat.py:239 / :284** — the Class A resolution filters select
+  `expected_odometer_status = 'deferred'` EXPLICITLY (not `!= 'active'`). An
+  abandoned offer is excluded from recompute by construction — you never recompute
+  an abandoned offer. No change, but the explicit `= 'deferred'` is what makes this
+  safe; if anyone later loosens it to `!= 'active'`, abandoned offers would wrongly
+  enter recompute. Guard comment warranted. ✓
+- **driver_heartbeat.py:507 / :849** — pickup/dropoff handlers set status `'active'`
+  on fire. Unaffected. ✓
+- **The predicate** — §9.9.2, the one place that needs the new clause.
+
+No `else`-branch consumer was found that would misroute a third value. The status
+is read by explicit-equality filters and written by explicit assignment — adding a
+value is safe across the current readers.
+
+### 9.9.5 Test changes
+
+- INVERT `test_out_of_window_deferred_stays_deferred` → it asserted the WRONG
+  behavior (offers linger deferred). New: `test_out_of_window_deferred_is_abandoned`
+  — asserts the dropoff sweep flips out-of-window deferred → `'abandoned'`.
+- NEW `test_abandoned_offer_excluded_from_live_predicate` — a row with
+  `expected_odometer_status = 'abandoned'` must fail `LIVE_OFFER_PREDICATE_SQL`
+  (proves §9.9.2). Live-PG, §XIV.J class.
+- KEEP the in-window recompute tests (the `'active'` path is unchanged).
+
+### 9.9.6 Why this satisfies both constraints
+
+- **No 4h linger:** the offer is `'abandoned'` and predicate-excluded at the instant
+  the dropoff proves abandonment. It does not sit in the live set for hours.
+- **No new flag:** `'abandoned'` is a third VALUE in the existing
+  `expected_odometer_status` field, completing its lifecycle — not a separate column.
+- **Single liveness authority preserved:** the predicate still owns liveness; the
+  dropoff handler writes a status the predicate consumes (same pattern as the
+  pickup-fire deferred→active writer). No second reaper; no GC scope change (the GC
+  remains blind to deferred offers, which is fine — it never needed to see them).
+- **Verdict-blind (§9.6):** the sweep keys on window membership + `'deferred'` status
+  only, never `app_verdict`.
+
+### 9.9.7 Implementation package (for the fresh thread)
+
+1. `ODOMETER_STATUS_ABANDONED = "abandoned"` in pudo_types.py (+ extend the §9
+   vocabulary comment to document the third state and the lifecycle).
+2. `LIVE_OFFER_PREDICATE_SQL` exclusion clause (§9.9.2) — canonical hot-path SQL;
+   arity re-verify (expected: no new `%s`), re-run `test_band_clause_matches_primitive`.
+3. Dropoff-handler window-scoped sweep (§9.9.3) — out-of-window deferred → abandoned.
+   (In-window recompute may already exist from the §9.8 build — verify, don't
+   duplicate.)
+4. Consumer guard comment at driver_heartbeat.py:239/284 (§9.9.4 — keep the explicit
+   `= 'deferred'`, don't loosen to `!= 'active'`).
+5. Tests (§9.9.5): invert the stays-deferred test, add the predicate-exclusion test.
+6. Full floor + the equivalence gate green before commit.
+
+### 9.9.8 What this does NOT change
+
+- The band, the NULL-permissive deferred handling, Step 5 Option C, the TAD
+  separation — all unchanged. This adds one status value, one predicate clause, one
+  dropoff-handler sweep branch.
+- Does not prove 9132 is caught (FINDING §7 step 7, replay-against-deployed — still
+  separate, still owed).
