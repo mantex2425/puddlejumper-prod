@@ -210,6 +210,17 @@ completion_pct in [0.85, 1.15] rearranges exactly to
 """
 
 
+# §5.5 deferred-sentinel status vocabulary (FINDING §9). Single owner here,
+# beside the band primitive whose None-return routes an offer to 'deferred'.
+# 'active'   — band computed; expected_odometer holds the leg's center.
+# 'deferred' — no band (band primitive returned None); expected_odometer is NULL;
+#              offer alive but inert on the odometer axis until dropoff-disambiguation
+#              recompute or the 4h abandonment sweep (FINDING §9.2). NEVER a magic
+#              number — NULL forces consumers to branch or fail loud (§9.1).
+ODOMETER_STATUS_ACTIVE: str = "active"
+ODOMETER_STATUS_DEFERRED: str = "deferred"
+
+
 def odometer_band(
     expected_distance: Optional[float],
     leg_distance: Optional[float],

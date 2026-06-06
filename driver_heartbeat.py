@@ -40,7 +40,7 @@ from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 from nail_it_core import write_nailed_position
 from where_am_i import WhereAmI, _commits, classify_commit_rule, haversine_meters
-from tad import OfferTadState
+from tad import OfferTadState, compute_offer_expectations
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from area_dsi import interpolate_area_dsi
 from dispatch import (
@@ -190,6 +190,122 @@ def _bucket_to_target_spec(address_text, lat, lng):
 # =============================================================================
 # EXECUTE: map a dispatch Action to its DB side effect
 # =============================================================================
+
+def _resolve_deferred_at_dropoff(cur, driver_id, resolved_offer_id, dropoff_fire_odometer):
+    """§5.5 Class B (FINDING §9.2): on dropoff of offer X, recompute deferred
+    offers received DURING X's trip window. The dropoff supplies the lost-mode
+    bridge; the existing compute_offer_expectations chaining produces the
+    bridge-correct anchor. Out-of-window deferred offers are LEFT for the
+    upstream Horizon GC (§6.5 — no second reaper here).
+
+    Best-effort: any failure is logged and swallowed. A recompute failure MUST
+    NEVER fail the dropoff fire (liveness over completeness).
+
+    Verdict-blind (§9.6): keys on window membership + deferred status only.
+    """
+    import datetime as _dt
+    try:
+        # X's window bounds + prev anchors for chaining.
+        cur.execute(
+            """
+            SELECT actual_pickup_at, created_at,
+                   expected_dropoff_distance, expected_dropoff_arrival_time
+            FROM app_private.offer_history
+            WHERE id = %s::bigint
+            """,
+            (resolved_offer_id,),
+        )
+        xrow = cur.fetchone()
+        if not xrow:
+            return
+        x_prev_dist = xrow["expected_dropoff_distance"]
+        x_prev_eta = xrow["expected_dropoff_arrival_time"]
+        # No chaining anchor available -> cannot supply the bridge; leave deferred.
+        if x_prev_dist is None or x_prev_eta is None:
+            return
+        if x_prev_eta.tzinfo is None:
+            x_prev_eta = x_prev_eta.replace(tzinfo=_dt.timezone.utc)
+        # Window lower bound: pickup_time, else receipt_time (X pickup missed).
+        window_lo = xrow["actual_pickup_at"] or xrow["created_at"]
+
+        # In-window deferred offers (exclude X). Join decision_log for driver scope.
+        cur.execute(
+            """
+            SELECT oh.id, oh.pickup_miles, oh.pickup_minutes,
+                   oh.trip_miles, oh.trip_minutes
+            FROM app_private.offer_history oh
+            JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
+            WHERE dl.driver_id = %s
+              AND oh.expected_odometer_status = 'deferred'
+              AND oh.id <> %s::bigint
+              AND oh.created_at >= %s
+              AND oh.created_at <= (NOW() AT TIME ZONE 'UTC')
+            """,
+            (driver_id, resolved_offer_id, window_lo),
+        )
+        deferred = cur.fetchall()
+        if not deferred:
+            return
+
+        now_utc = _dt.datetime.now(_dt.timezone.utc)
+        for d in deferred:
+            try:
+                d_offer = Offer(
+                    offer_id=str(d["id"]),
+                    accepted_at=now_utc,  # unused by compute_offer_expectations math
+                    pickup=TargetSpec(lat=0.0, lng=0.0, address_class="poi", named_roads=()),
+                    dropoff=TargetSpec(lat=0.0, lng=0.0, address_class="poi", named_roads=()),
+                    pickup_miles=(float(d["pickup_miles"]) if d["pickup_miles"] is not None else None),
+                    trip_miles=(float(d["trip_miles"]) if d["trip_miles"] is not None else None),
+                    pickup_minutes=(int(d["pickup_minutes"]) if d["pickup_minutes"] is not None else None),
+                    trip_minutes=(int(d["trip_minutes"]) if d["trip_minutes"] is not None else None),
+                )
+                exp = compute_offer_expectations(
+                    d_offer,
+                    prev_offer=d_offer,  # non-None triggers the chaining branch; math uses prev_expected_* kwargs
+                    current_odometer=float(dropoff_fire_odometer) if dropoff_fire_odometer is not None else 0.0,
+                    now=now_utc,
+                    prev_expected_dropoff_arrival_time=x_prev_eta,
+                    prev_expected_dropoff_distance=float(x_prev_dist),
+                )
+                if exp is None:
+                    continue  # missing fields; leave deferred for the GC
+                # Full backfill: expected_odometer + all four anchors + active.
+                cur.execute(
+                    """
+                    UPDATE app_private.offer_history
+                    SET expected_odometer             = %s,
+                        expected_odometer_status      = 'active',
+                        expected_pickup_distance      = %s,
+                        expected_pickup_arrival_time  = %s,
+                        expected_dropoff_distance     = %s,
+                        expected_dropoff_arrival_time = %s
+                    WHERE id = %s::bigint
+                      AND expected_odometer_status = 'deferred'
+                    """,
+                    (
+                        exp.expected_pickup_distance,        # expected_odometer == pickup-leg band center
+                        exp.expected_pickup_distance,
+                        exp.expected_pickup_arrival_time,
+                        exp.expected_dropoff_distance,
+                        exp.expected_dropoff_arrival_time,
+                        d["id"],
+                    ),
+                )
+                log.info(
+                    "[deferred-sentinel] recomputed offer=%s in window of X=%s "
+                    "(expected_odometer=%.3f)",
+                    d["id"], resolved_offer_id, exp.expected_pickup_distance,
+                )
+            except Exception as _de:
+                log.warning(
+                    "[deferred-sentinel] recompute failed for offer=%s (left deferred): %s",
+                    d["id"], _de,
+                )
+                continue
+    except Exception as _e:
+        log.warning("[deferred-sentinel] resolve-at-dropoff failed (non-fatal): %s", _e)
+
 
 def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     fallback_lat=None, fallback_lng=None,
@@ -387,13 +503,15 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     leg_start_cumulative_miles_dropoff  = %s,
                     cumulative_miles_at_pickup_fire     = %s,
                     expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
+                    expected_odometer            = %s + COALESCE(trip_miles, 0),
+                    expected_odometer_status     = 'active',
                     expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval,
                     pickup_error_m                      = %s
                 WHERE id = %s::bigint
                   AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
-                cumulative_miles, cumulative_miles, cumulative_miles,
+                cumulative_miles, cumulative_miles, cumulative_miles, cumulative_miles,
                 error_m,
                 action.offer_id,
             ))
@@ -529,6 +647,9 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                 )
                 return False, "fire_dropoff_zero_rows"
 
+
+            # §5.5 Class B (FINDING §9.2): recompute in-window deferred offers.
+            _resolve_deferred_at_dropoff(cur, driver_id, action.offer_id, cumulative_miles)
 
             # [α-fix] community_offers failsafe. action.offer_id is
             # offer_history.id; translate via subquery.
@@ -724,13 +845,15 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     leg_start_cumulative_miles_dropoff  = %s,
                     cumulative_miles_at_pickup_fire     = %s,
                     expected_dropoff_distance           = %s + COALESCE(trip_miles, 0),
+                    expected_odometer            = %s + COALESCE(trip_miles, 0),
+                    expected_odometer_status     = 'active',
                     expected_dropoff_arrival_time       = NOW() + (COALESCE(trip_minutes, 0)::text || ' minutes')::interval,
                     pickup_error_m                      = %s
                 WHERE id = %s::bigint
                   AND actual_pickup_at IS NULL
             """, (
                 nail_lat, nail_lng, nail_lat, nail_lng,
-                cumulative_miles, cumulative_miles, cumulative_miles,
+                cumulative_miles, cumulative_miles, cumulative_miles, cumulative_miles,
                 error_m,
                 action.offer_id,
             ))
@@ -874,6 +997,8 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             )
             release_lock(cur, driver_id, action.offer_id, 'pickup')
             release_lock(cur, driver_id, action.offer_id, 'dropoff')
+            # §5.5 Class B (FINDING §9.2): recompute in-window deferred offers.
+            _resolve_deferred_at_dropoff(cur, driver_id, action.offer_id, cumulative_miles)
             log.info("[heartbeat] FireDropoffObservation offer=%s", action.offer_id)
             return True, None
 

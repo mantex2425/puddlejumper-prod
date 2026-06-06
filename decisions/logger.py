@@ -3,7 +3,7 @@ import logging
 import json
 import traceback
 
-from pudo_types import Offer, TargetSpec
+from pudo_types import (Offer, TargetSpec, ODOMETER_STATUS_ACTIVE, ODOMETER_STATUS_DEFERRED)
 from tad import compute_offer_expectations
 from driver_queue import LIVE_OFFER_PREDICATE_SQL, live_offer_predicate_params
 from dsi import compute_dsi_v1
@@ -299,6 +299,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                     miles_at_offer_receipt,
                     lat_at_offer_receipt, lng_at_offer_receipt,
                     dsi_v1,
+                    expected_odometer, expected_odometer_status,
                     expected_pickup_arrival_time, expected_pickup_distance,
                     expected_dropoff_arrival_time, expected_dropoff_distance
                 ) VALUES (
@@ -319,6 +320,7 @@ def log_decision(cur, conn, uid, params, ep, result):
                     %s,
                     %s, %s,
                     %s,
+                    %s, %s,
                     %s, %s,
                     %s, %s
                 )
@@ -342,6 +344,8 @@ def log_decision(cur, conn, uid, params, ep, result):
                 ep.get("cumulative_miles"),                    # miles_at_offer_receipt (same source)
                 ep.get("current_lat"), ep.get("current_lng"),  # lat/lng_at_offer_receipt
                 compute_dsi_v1(_safe_numeric(result.get("hourlyRate")), _safe_numeric(result.get("dollarsPerMile"))),  # dsi_v1 (observational; NULL-strict)
+                expected_pickup_dist,  # expected_odometer (band center == expected_pickup_distance, or NULL)
+                (ODOMETER_STATUS_DEFERRED if expected_pickup_dist is None else ODOMETER_STATUS_ACTIVE),  # §9 deferred-sentinel status
                 # Phase 2c.2 Item 3b.W: TAD expected anchors
                 expected_pickup_eta, expected_pickup_dist,
                 expected_dropoff_eta, expected_dropoff_dist,
