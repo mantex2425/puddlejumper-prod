@@ -547,3 +547,81 @@ live at that arrest is the predicate-level replay still owed (FINDING step 7,
 cohorted). That replay is separate from this package and gated on replay-against-the-
 deployed-revision (FINDING §7 step 7 / the "MUST replay against deployed, not branch
 tip" constraint).
+
+### 9.8 Class A / Class B resolution-location ratification (Gemini 00648, 2026-06-06)
+
+§9.4 named the deferred taxonomy (Class A resolves at pickup, Class B at dropoff).
+This section records the *location* decision — WHERE each resolution executes and
+WHY — and the Gemini ratification that cleared rev 00648 to deploy. Finalized late
+in the 2026-06-05 PM session; recorded here so it lives in the spec, not only in
+chat + the Gemini exchange.
+
+**Class A — dropoff-leg deferred → resolves at the pickup-fire UPDATEs.**
+The two existing pickup-fire UPDATEs (driver_heartbeat.py FirePickup ~:388,
+FirePickupObservation ~:725) already compute `expected_dropoff_distance = <post-
+pickup odometer> + COALESCE(trip_miles,0)`. Class A extends *those same UPDATEs*
+to also set `expected_odometer = <same expression>` and flip
+`expected_odometer_status='active'`. No new writer, no new authority — the anchor
+is the real post-pickup odometer, written on a path that already fires. Clean
+first increment.
+
+**Class B — receipt-deferred → recompute AT the dropoff handler; reap STAYS at
+the GC (the B2 split).** When a dropoff fires for offer X (driver_heartbeat.py
+FireDropoff ~:652, FireDropoffObservation ~:1001), the deployed handler calls
+`_resolve_deferred_at_dropoff(cur, driver_id, X_id, dropoff_fire_odometer)`. That
+helper recomputes (window-scoped per §9.2) every deferred offer received inside
+X's window, flipping it active with a chained anchor. Out-of-window deferred
+offers are LEFT untouched — the upstream Horizon Budget GC reaps them on its
+existing authority + 4h ceiling. The recompute lives at the handler; the reap
+lives at the GC. Two responsibilities, two owners.
+
+**Why the split (B2), not GC-owns-everything (B1) — the structural argument.**
+B1 (let the GC own both recompute and reap for Class B) was REJECTED. The GC's
+prev_offer SELECT (decisions/logger.py ~:106) requires `actual_pickup_at IS NOT
+NULL` and is shaped LIMIT-1-one-picked-up-prev. A pure receipt-deferred offer has
+NO pickup, so the GC's SELECT *structurally cannot fetch it*. To make the GC own
+Class B recompute, its SELECT contract would have to widen to also pull
+unpicked-deferred offers — distorting the single authority into something it is
+not, on the same grounds Step 5 Option B was rejected. The recompute therefore
+must live where the disambiguating event (the dropoff) and its window bounds and
+fire-odometer are in scope: the dropoff handler. The reap stays with the GC
+because the GC is the single killing authority (no second reaper, §6.5). The
+split is not a compromise — it is the only placement consistent with both the
+GC's structural shape and the single-owner-for-evictions discipline.
+
+**Recompute mechanism (the chaining IS the bridge, §9.1).** The helper re-invokes
+the EXISTING `compute_offer_expectations` with X's dropoff anchors supplied via the
+`prev_expected_dropoff_*` kwargs. No new formula, no additive bridge term — the
+stacked-chaining branch produces the bridge-correct anchor. The deferred offer's
+`expected_odometer` is set to the recomputed `expected_pickup_distance`, and a
+FULL backfill writes all four `expected_*` anchors so a recomputed offer is
+indistinguishable from one that was active at receipt (no half-resolved state).
+
+**Gemini 00648 ratification (recorded).** Two judgment calls were put to Gemini
+explicitly (not rubber-stamped):
+- **Call A — the `prev_offer=d_offer` self-proxy** used to force entry into the
+  chaining branch (the branch reads only the kwargs, never `prev_offer.<attr>`).
+  ACCEPTED. Protection chosen: a GUARD-TEST
+  (`tests/test_chaining_ignores_prev_offer_attrs.py`) that pins the invariant
+  executably — a decoy prev_offer with wrong attributes must still yield the
+  kwarg-derived anchor — stronger than a comment, and the Option-C guard in tad.py
+  was NOT re-touched (it is today's shipped, ratified, floor-green code).
+- **Call B — full backfill** (write all four anchors, not just expected_odometer).
+  ACCEPTED. Consumer audit cleared it: the time-signal path is asymmetric-soft and
+  never penalizes a past `expected_pickup_arrival_time`; no consumer gates liveness
+  on future-ness; the hard liveness decisions are odometer-only (§5.3 retired the
+  time ceiling). A historical pickup-ETA on an active offer yields at worst a zero
+  time-boost — never a break, never a reap.
+
+Floor at ratification: 770 passed / 1 skipped / 0 failed (index guard at 38).
+Deployed: rev `puddlejumper-api-00648-lwx`, serving, from branch
+`fix/restore-fire-error-metric-2026-06-02` @ `f88b8c7`.
+
+**Production-witness status (honest, as of 2026-06-06 AM).** The deferred path is
+unit-proven (live-PG 3/3) and deployed, but has NOT fired in production
+(`deferred_count=0` since deploy; no `[deferred-sentinel]` log lines). Witnessing
+it requires driving a genuine lost-mode receipt through the live API — pursued via
+a Bruno scenario through the real endpoints (interpretation B: reproduce the real
+receipt path, no test-only shortcut, no faked status). Until that witness is
+green, the correct confidence statement is: "unit-tested, deployed, not yet
+production-witnessed." This is the §5.5 analogue of §9.7's scope honesty.
