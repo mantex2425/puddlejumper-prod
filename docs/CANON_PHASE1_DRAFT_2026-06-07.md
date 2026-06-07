@@ -198,8 +198,7 @@ surfaced the product caches and locks.**
 | `heartbeat_log` | I1 | **Passive** — telemetry |
 | `contest_labels` | I1 | **Passive** — debug ground-truth taps |
 | `crash_reports` | I1 | **Passive** — crash telemetry |
-| `intelligence_conversations` | I1 | **Passive** — LLM conversation log |
-| `driver_settings_new` / `driver_active_market` / `monitor_last_report` / `deletion_requests` | I3 / I3 / U1 / I1 | **Other subsystem** — not the PUDO decision pipeline (settings, market, monitor, GDPR) |
+| `driver_settings_new` / `driver_active_market` / `monitor_last_report` / `deletion_requests` / `intelligence_conversations` | I3 / I3 / U1 / I1 / I1 | **Other subsystem** — not the PUDO decision pipeline (settings, market, monitor, GDPR, LLM-assistant read-back state) |
 
 ## Review asks for Gemini
 

@@ -515,6 +515,15 @@ may read from.
   queue/matcher snapshot for the emergent-reap and inflection diff) lives on `driver_trip_state`
   (the Authoritative lane the heartbeat already reads each tick), NOT on the ledger.
 
+**Out of scope — non-PUDO subsystems (named for inventory completeness, NOT lane-classified):**
+`driver_settings_new`, `driver_active_market`, `monitor_last_report`, `deletion_requests`
+(settings / market / monitor / GDPR), and `intelligence_conversations` — non-PUDO LLM-assistant
+subsystem; read-back conversation state (`market_intelligence.py` reads `role`/`content` for the
+next turn), so it is neither Authoritative nor Passive. These are listed so the write-inventory
+stays **exhaustive**: every `app_private` write target is visibly classified — even if the
+classification is "out of scope, here's why" — so a future audit never re-discovers an unclassified
+writer.
+
 ### Violation patterns (stop and redesign)
 
 - A state mutation in the Passive lane, or an observability write in the Authoritative lane.
