@@ -232,14 +232,68 @@ Every event row carries:
 - `event_type`
 - `offer_id` (nullable)
 - `cluster_id` / `arrest_id` (nullable)
-- `lat` / `lng` + `cumulative_miles` at the event
-- `correlation_id` (groups a ride's events)
+- **`lat` / `lng` (RAW, un-snapped device coords) + `gps_accuracy` + `cumulative_miles`**
+  at the event — the un-derived sensor truth (see §6.1).
 - `queue_snapshot` (the §2.3 compact structure: per-event for keyframes, delta for
   change events) + bound `current_offer_id`
-- `payload` jsonb (heterogeneous per type — signals/scores/reason)
+- `matcher_snapshot` (`{top_candidate_offer_id, confidence_tier}`) — the persisted prior
+  matcher state for inflection detection (see §6.2).
+- `payload` jsonb (heterogeneous per type — signals/scores/reason; raw+snapped position
+  on matcher events where a snap exists).
 - `summary` text (human-readable, so support reads a timeline, not raw JSON)
 
-Indexes: `(driver_id, event_time)`, `offer_id`, `event_type`.
+Indexes: **`(driver_id, event_time DESC)`** (the lookback index — §6.2), `offer_id`,
+`event_type`.
+
+### 6.1 No `correlation_id` — driver+time is the spine (Gemini 2026-06-07, ratified)
+
+The §6 draft had a `correlation_id` "to group a ride's events." **Dropped** — it's the
+same trap as the whole §5.5 saga: a derived identifier sourced from the active offer is
+NULL/wrong exactly in lost-mode, split-chains, resurrections, and out-of-order cancels —
+precisely the anomalous moments the ledger exists to capture. The tracking spine is
+`(driver_id, event_time)` + `offer_id` per event; "a ride's events" is an **analytical
+fold** over the offer-lifecycle events at debug time, not a fabricated chain. (For the
+traffic-light multi-PUDO case there is no single "ride" anyway — driver+time is the only
+honest spine.) Only attach an *explicit* token (`active_contract_id`/`session_token`) if
+it's read straight from a state table — never fabricated.
+
+### 6.2 The stateless lookback read (Gemini 2026-06-07, ratified)
+
+Cloud Run is stateless-per-invocation, so the queue-diff (§3b) AND matcher-inflection
+detection (§5) both need the *prior* persisted perception. One read at the top of the
+heartbeat gets both:
+```sql
+SELECT queue_snapshot, matcher_snapshot
+FROM app_private.event_ledger
+WHERE driver_id = %s
+ORDER BY event_time DESC
+LIMIT 1;
+```
+The composite index `(driver_id, event_time DESC)` makes finding that row instant; the
+two jsonb columns are a single heap fetch (NOT index-only — large jsonb is never in the
+index — but trivial for one row). At 1Hz "horny" cadence this is one indexed single-row
+read per heartbeat per driver — bounded and fine with the index.
+- **queue_snapshot** → diff vs current predicate output → emergent-reap events (§3b).
+- **matcher_snapshot** `{top_candidate_offer_id, confidence_tier}` → diff vs current →
+  inflection events (§5). Tier boundaries **must include the 0.40 floor**, so "crossed the
+  floor" is a tier-change (and you don't log on sub-threshold wiggle).
+- *Alternative considered:* piggyback the prior snapshot onto the `driver_trip_state` row
+  the heartbeat already reads (the `effective_last_move` prefetch) → zero extra query, at
+  the cost of a mutable column on `driver_trip_state`. Keep the clean ledger-read (ledger
+  stays self-contained) unless profiling demands otherwise.
+
+### 6.3 Raw GPS on the event — yes; geocode-degradation framing — rejected
+
+Carry **raw, un-snapped device coords + accuracy** on every event (§6 `lat`/`lng`/
+`gps_accuracy`). Rationale is NOT "geocode-degradation analysis" — that conclusion was
+**withdrawn** (the km-offset finding was scoring-based mis-attribution; the established
+root cause is offer *availability*, not geocode). The rationale is general: raw coords are
+the un-derived sensor truth, consistent with the perception-ledger philosophy, and let
+*any* localization question be answered without re-derivation. Where the matcher computes
+a snapped/derived position, store **both raw + snapped** in that event's `payload` so the
+snap delta is visible. Do NOT duplicate the full GPS stream into the ledger —
+`heartbeat_log` owns continuous telemetry (§3 boundary); the ledger carries position
+*at the event* only.
 
 ---
 
