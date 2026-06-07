@@ -1,0 +1,116 @@
+# Canon rewrite plan — purge the dead state machine, consolidate to one source
+
+**Status:** PROPOSAL for Gemini review (Rule I: Claude proposes → Gemini reviews → consensus →
+execute). The line-by-line rewrite executes **after** this plan is ratified. **Authorized by
+Andrew (2026-06-07):** "the state engine IS dead — rewrite now as its own loop."
+
+**Premise (recon-confirmed):** the state machine is demolished. `driver_trip_state_log`
+state-transition writes ceased **2026-05-04**; the **2026-04-30 DEPRECATION NOTICE** (CANONICAL_RULES
+§ line 319) already flagged §§III, VIII, IX, X, XI, XII as state-machine-dead "to be rewritten
+cleanly after Cut B3 lands." **Cut B3 landed; the cleanup never ran.** This loop runs it.
+
+---
+
+## A. FOUNDATION FIRST — coord + time (Andrew's emphasis: make-or-break for the event-ledger)
+
+These are the rules every logging attempt inherits; get them wrong and the ledger is corrupt from
+row one. Currently **split across §I, §II, and §XIV.G** — merge into ONE "Foundation" section.
+
+- **Temporal (§II, current):** UTC always. `(NOW() AT TIME ZONE 'UTC')`, or `NOW()` on a
+  `timestamptz` column. Engine is timezone-agnostic; "Texas Time" localization happens only at the
+  UI edge, never in logic. → **Ledger binding:** `event_time timestamptz` written via `NOW()`; never
+  naive. The `(driver_id, event_time DESC)` lookback (§6.2) and the delta/keyframe fold depend on
+  correct UTC ordering — a naive or local timestamp silently breaks "latest row" and reconstruction.
+- **Coordinate (§I, current):** canonical functions only — `coords_to_h3(lat,lng)`,
+  `h3_to_lat/lng`, `coords_to_point(lat,lng)`, `coords_to_geography(lat,lng)`, `distance_miles(...)`.
+  **Blacklist** raw `ST_MakePoint` (it's `(lng,lat)` — the swap trap), `h3_latlng_to_cell`,
+  `h3_cell_to_latlng`. Ordering is **always `(lat, lng)`**. → **Ledger binding:** store `(lat,lng)`;
+  derive any H3/geometry through the canonical funcs in `(lat,lng)` order; `queue_snapshot`/`payload`
+  coords follow `(lat,lng)`; the writer never constructs raw geometry.
+- **§XIV.G** today only cross-refs §I/§II ("when in doubt route through `coords_to_*` and
+  `(NOW() AT TIME ZONE 'UTC')`; direct `ST_MakePoint`/local-time SQL is a review blocker"). Fold its
+  enforcement teeth into the merged Foundation section; drop the duplication.
+
+---
+
+## B. Section disposition (cut / rewrite-keep-principle / keep)
+
+**KEEP as current (deprecation notice confirms these are fully current):** §0, I, II, IV, V, VI,
+VII, XIII (principle), XIV (+ subsections A–J), XV, XVI, XVII, XVIII.
+
+**CUT entirely (pure dead state-machine, no surviving principle not already elsewhere):**
+- **§IX Enforcement Layers** — `valid_state_transitions`, `enforce_state_transition_trigger`,
+  `sm_transition`, `SET LOCAL app.state_trigger`: all dead.
+- **§XI State Levels** — UNCOMMITTED/ENROUTE/IN_TRIP/STACKED: collapsed to the 1-bit
+  `current_offer_id` already documented in **§VI** (its replacement already exists).
+- **§XII Abort Guard** — ABORT verdict, `nailed_pickup_lat`, S-codes: gone; Case D + §8
+  triangulation handle the equivalents (per the notice).
+
+**REWRITE, preserving the surviving principle:**
+- **§III Logic Rules** — DROP "use the `check_convergence` state machine"; KEEP **"Distance over
+  Geocode"** (physical distance is the primary constraint, geocode is a suggestion — aligns with §0
+  and Rule XV, and the v2.1 "Truth Ordering" GPS > Cluster > WAI > Memory).
+- **§VIII 4-Box Controller** — DROP the dead file assignments (`sm_transition`, `PudoPlanner`,
+  `DriverStateMachine.transition`, `check_convergence` as the controller); KEEP the
+  **Monitor/Diagnose/Plan/Execute separation-of-concerns frame** (the notice says the frame
+  survives). Open: redefine "EXECUTE / the only write path" post-demolition (no `sm_transition`
+  now — the write paths are the predicate-composed queries + `_log_decision_context`). Needs
+  Gemini/Andrew confirmation of the new EXECUTE definition.
+- **§X Implicit Cancellation** — DROP S04/S11/S12/ABORT/STACKED vocabulary; KEEP **"GPS is always
+  the truth"** (already echoed in the v2.1 Truth Ordering and §4 Case D).
+- **§XIII What Stays in Python** — fix dead names (`check_convergence()`, `PudoPlanner dispatch`);
+  KEEP the principle (decision math / triangulation / YOLO / Discord / Firebase stay in Python).
+
+---
+
+## C. Accept/decline blindness (Andrew's "Rule XVI" ask) — elevate, don't duplicate
+
+The principle is **already canon** — §XIV.I:671 ("the PUDO matching layer treats all queued offers
+as equally valid observation candidates; branching on accept/decline conflates observation with
+narrative, violating Rule XV") + Rule XV. And the **live engine already complies** (no `app_verdict`
+read in `driver_heartbeat`/`driver_queue`/`where_am_i`/the matcher). So this is an *elevation*, not a
+new behavior:
+- State it as a clearly-named top-level rule: **all offers enter the queue; accept/decline is advice
+  to the driver, with ZERO bearing on PUDO behavior or measurement.** `app_verdict` is legitimate
+  only where it *is* the advice (decision engine produces it; analytics/forensic display it).
+- **Placement:** fold into **Rule XV** (Observation Before Narrative) as a sub-clause, OR a new
+  **§XIX** — **NOT "XVI"** (taken by Arrest-Defined Truth). Andrew/Gemini to pick.
+- **Lock it:** add a test asserting the predicate/matcher never read `app_verdict` (blindness can't
+  silently regress).
+
+## D. Single source of truth (the deeper consolidation)
+
+Three overlapping docs today: **`CANONICAL_RULES.md`** (1979 lines) + **`SIMPLIFIED_ARCHITECTURE.md`**
+(named "authoritative on conflict" by the deprecation notice) + the **"v2.1 Standards"** (divergent
+numbering — its I = Paired-Programming vs the file's I = Coordinate; *same numbers, different rules*).
+Collapse to **ONE** canonical doc; demote the others to pointers or an archive. Resolve numbering to
+a single scheme as part of the rewrite (the v2.1 renumbering and the file's numbering cannot both
+stand).
+
+## E. Out-of-band / measurement note (ties to Rule XVI + the cohort replay)
+
+§XIV.H exempts replay/backtest/harvest/drive_review from `LIVE_OFFER_PREDICATE_SQL` (documented in
+`docs/out_of_band_offer_history_queries.md`). That exemption is where the **verdict-gated** logic
+lives — `scripts/harvest_ride.py:539` (`expected_pickup = app_verdict=='ACCEPT' …`). Rule XVI must
+extend to **measurement**: out-of-band tooling may skip the predicate, but must NOT gate
+expectations on `app_verdict` where it biases results (it would corrupt the planned 00649 cohort
+replay). Fix before that replay runs.
+
+## F. Process & sequencing
+
+- This is a **Propose → Gemini → execute** loop; ratify THIS plan (cut/fold map, numbering,
+  accept/decline placement, single-source decision) before the line-by-line rewrite.
+- Shares surface with the **event-ledger** build (both purge state-machine residue and both rest on
+  the Foundation section). Sequence deliberately — the ledger should cite the rewritten Foundation
+  for its time/coord invariants.
+
+## G. Open decisions for Andrew / Gemini
+
+1. **Numbering scheme** — keep the file's I–XVIII (+§0, §XIV.A–J) and renumber nothing else, or adopt
+   a fresh scheme? (Recommend: keep existing numbers, only cut/rewrite in place — minimizes churn and
+   broken `§` cross-references throughout the codebase comments.)
+2. **Accept/decline rule placement** — Rule XV sub-clause vs new §XIX.
+3. **`SIMPLIFIED_ARCHITECTURE.md`** — merge wholesale into the canon, or keep as a detail doc the
+   canon points to?
+4. **Merge §I+§II+§XIV.G** into one Foundation section, or leave §XIV.G as a Sprint-A pointer?
+5. **New EXECUTE definition** for the rewritten §VIII (post-`sm_transition` write paths).
