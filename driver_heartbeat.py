@@ -54,6 +54,7 @@ from dispatch import (
     FirePickupObservation, FireDropoffObservation, ClearNarrative,
     LogNoMatch, LogPickupRematch, LogAmbiguousMatch,
 )
+import event_ledger
 from decisions.transaction_lock import (
     acquire_lock, is_locked, release_lock, LockContext,
 )
@@ -1946,6 +1947,10 @@ def post_heartbeat():
     snap = queue.snapshot(cur, current_cumulative_miles=cumulative_miles, last_odometer_move_at=effective_last_move)
     current_offer_id = snap.bound_offer_id
     queue_offer_ids = set(snap.offer_ids)
+    # event-ledger: prior diff-seed (§VIII Passive lane). DEDICATED PK read — NOT folded
+    # into compute_effective_last_move, which the /decisions caller shares and must never
+    # see ledger_state. Read here at LOAD; ledger_state is WRITTEN only in the batch below.
+    _ledger_prior_seed = event_ledger.read_ledger_seed(cur, driver_id)
     # Phase 2 (§XIV.I): OfferMeta.created_at reads from offer.accepted_at
     # because the Offer dataclass field is misnamed — it actually carries
     # offer_history.created_at (no accepted_at column exists on the table;
@@ -2402,6 +2407,45 @@ def post_heartbeat():
         # LOG failure must not break the heartbeat — the API contract is
         # liveness, not forensic completeness. Surface to logs.
         log.exception("[heartbeat] pudo_decision_context INSERT failed: %s", e)
+
+    # ── EMIT (event-ledger; §VIII Passive lane; C4) ───────────────────────────────
+    # Whole block savepoint-guarded so NO ledger fault (probe READ / gather / emit) can
+    # poison the parent heartbeat txn or its authoritative writes (§VIII). emit_batch runs
+    # INSIDE ledger_block (its own nested savepoint); RELEASE happens AFTER it, so the
+    # except's ROLLBACK TO ledger_block is always valid (Fault-1 / Option B).
+    #
+    # C4 SEPARATION: emit_batch's advance_ledger_seed is the SOLE ledger_state write —
+    # snapshot from CURRENT (queue_offer_ids) + keyframe_count + last_keyframe_at, one
+    # UPDATE inside its savepoint — SEPARATE from the :1979 authoritative UPDATE
+    # (heartbeat/arrest) in the parent. Two distinct UPDATEs to the same row.
+    try:
+        cur.execute("SAVEPOINT ledger_block")
+        _, _ledger_left = event_ledger.compute_diff(
+            (_ledger_prior_seed or {}).get("last_queue_snapshot_ids"), queue_offer_ids)
+        _ledger_reap_rows = event_ledger.probe_reaped_offers(cur, driver_id, _ledger_left)
+        _ledger_post_offer_id = _derive_post_offer_id(executed_actions, current_offer_id)
+        _ledger_current_status = {
+            oid: {"picked_up": (oid == _ledger_post_offer_id)} for oid in queue_offer_ids
+        }
+        _ledger_events, _ledger_new_seed = event_ledger.gather_ledger_events(
+            prior_seed=_ledger_prior_seed, current_ids=queue_offer_ids,
+            current_status=_ledger_current_status, reap_rows=_ledger_reap_rows,
+            reference_time=_heartbeat_now, cumulative_miles=cumulative_miles,
+            effective_last_move=effective_last_move, matches=matches,
+            executed_actions=executed_actions, arrest_started_at=arrest_started_at_post,
+            arrest_counter_s=arrest_counter_s_post, cluster=cluster,
+            cadence_target_hz=cadence_target_hz, now=_heartbeat_now)
+        event_ledger.emit_batch(
+            cur, driver_id, _ledger_events, _ledger_new_seed,
+            ctx={"lat": current_lat, "lng": current_lng,
+                 "gps_accuracy_m": gps_accuracy_m, "cumulative_miles": cumulative_miles})
+        cur.execute("RELEASE SAVEPOINT ledger_block")
+    except Exception as e:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT ledger_block")
+        except Exception:
+            pass
+        log.warning("[heartbeat] event-ledger emit skipped (swallowed): %s", e)
 
     conn.commit()
 
