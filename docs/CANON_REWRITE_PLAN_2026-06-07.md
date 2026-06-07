@@ -23,12 +23,16 @@ canon rewrite is STOOD DOWN; only two prerequisite sections execute now (see Seq
    cut sections (e.g. "§XI — retired, see §VI") rather than deleting numbers; renumber the v2.1
    doc to adapt.** `Rule XVI` (17 refs) is load-bearing (Arrest-Defined Truth) — accept/decline goes
    to Rule XV sub-clause or §XIX, never XVI.
-2. **§XII RECLASSIFIED: cut → rewrite-keep-principle, titled "Post-Pickup Motion Firewall."** The
-   ABORT verdict/S-codes are dead, but the principle is live: *physical pickup confirmation
-   permanently blinds the distance engine to outward divergence until a dropoff clears the
-   narrative.* Live analog: post-pickup, distance-to-*pickup* is irrelevant (relevant distance is
-   toward dropoff) — the band/TAD must honor it. Cutting the section would leave a vacuum a future
-   dev could refill with an auto-cancellation/tracking-reset loop. Keep the firewall explicit.
+2. **§XII — VERIFIED DEAD by grep (Andrew, 2026-06-07); CUT the machinery, fold the prohibition
+   into §X.** Re-checked: zero code refs to §XII; zero live abort/divergence/cancellation mechanism
+   (every `abort` hit is transaction-abort; every `diverg` hit is unrelated predicate/replay text);
+   `nailed_pickup_*` survives only as a pickup-ANCHOR for dropoff refinement (`refinement_gates`,
+   `nail_it_core`), NOT an abort guard. **Both Gemini's "keep it live" AND Claude's "live analog in
+   band/TAD" were unverified — the grep overturns both.** Disposition: cut the §XII machinery
+   (tombstone the section); fold the single forward-prohibition — *"once a pickup is physically
+   confirmed, outward divergence is normal driving; never auto-abort or cancel tracking on it"* —
+   into §X's "GPS is always the truth" as a one-line clause. Preserves the institutional-memory
+   guard without implying a live firewall (Gemini's underlying concern honored, in the right place).
 3. **§VIII EXECUTE = hard blocker; define the dual-lane NOW (before the ledger schema):**
    - **Authoritative / Gated lane:** inline, predicate-composed SQL state mutations that alter queue
      visibility, matching eligibility, or contract lifecycle. (Replaces the dead "all writes via
@@ -43,6 +47,15 @@ canon rewrite is STOOD DOWN; only two prerequisite sections execute now (see Seq
      internal self-reads (the diff seed) allowed,"* or **(b)** honor the strict rule and move the
      lookback to `driver_trip_state` (Authoritative lane, already read each heartbeat). The dual-lane
      discipline argues for (b). **This fork must be decided as part of the §VIII rewrite.**
+   - **RESOLVED (Andrew, 2026-06-07): Option 1 / (b).** The diff lookback reads `driver_trip_state`
+     (Authoritative lane); the ledger stays a pure write-sink, **never read by runtime**. Verified
+     feasible: `driver_trip_state` is PK-per-driver (one row), already read + `UPDATE…RETURNING`'d
+     each heartbeat (arrest counter, `effective_last_move`), and already carries jsonb (`heartbeat`,
+     `peak_sample`). Home the prior snapshot here — add `last_queue_snapshot`/`last_matcher_snapshot`
+     jsonb (or fold into the existing `heartbeat` blob); likely **zero extra queries** (piggyback the
+     read that already happens). Option 2 (ledger self-reads) **REJECTED** — it couples best-effort
+     observability into the live decision path, the exact §VII violation the dual-lane exists to
+     prevent.
 4. **SEQUENCING GATE (decoupled phases):**
    - **Phase 1 — Prerequisite Gate (execute now):** rewrite ONLY the merged **§I Foundations
      (Space & Time)** and the **§VIII EXECUTE boundary** (dual-lane). These are the event-ledger's
