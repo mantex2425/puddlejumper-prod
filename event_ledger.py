@@ -251,27 +251,29 @@ def _pudo_events(executed_actions):
     return out
 
 
-def emit_event(cur, driver_id, ev, *, lat=None, lng=None, gps_accuracy_m=None,
-               cumulative_miles=None, cluster_id=None, arrest_id=None):
-    """The SOLE ledger writer: one append-only INSERT. Does NOT swallow — the batch
-    wrapper in post_heartbeat owns the savepoint + batch-level swallow (C4)."""
-    cur.execute(
-        """
-        INSERT INTO app_private.event_ledger
-            (driver_id, event_type, offer_id, cluster_id, arrest_id,
-             lat, lng, gps_accuracy_m, cumulative_miles,
-             queue_snapshot, queue_delta, matcher_snapshot, payload, summary)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (
-            driver_id, ev["event_type"], ev.get("offer_id"), cluster_id, arrest_id,
+def emit_event(cur, driver_id, ev, *, event_time=None, lat=None, lng=None,
+               gps_accuracy_m=None, cumulative_miles=None, cluster_id=None, arrest_id=None):
+    """The SOLE ledger writer: one append-only INSERT. Does NOT swallow — callers own the
+    savepoint + swallow (emit_batch for the heartbeat batch; the /contest/label endpoint
+    for ground_truth_tap). `event_time` defaults to the column's now() (system events);
+    pass it explicitly (the device tap-time) for a ground_truth_tap so the row sits at the
+    moment the human marked the PUDO, consistent with how tap-vs-detection has been analyzed."""
+    def _j(v):
+        return json.dumps(v) if v is not None else None
+    cols = ["driver_id", "event_type", "offer_id", "cluster_id", "arrest_id",
+            "lat", "lng", "gps_accuracy_m", "cumulative_miles",
+            "queue_snapshot", "queue_delta", "matcher_snapshot", "payload", "summary"]
+    vals = [driver_id, ev["event_type"], ev.get("offer_id"), cluster_id, arrest_id,
             lat, lng, gps_accuracy_m, cumulative_miles,
-            json.dumps(ev["queue_snapshot"]) if ev.get("queue_snapshot") is not None else None,
-            json.dumps(ev["queue_delta"]) if ev.get("queue_delta") is not None else None,
-            json.dumps(ev["matcher_snapshot"]) if ev.get("matcher_snapshot") is not None else None,
-            json.dumps(ev["payload"]) if ev.get("payload") is not None else None,
-            ev.get("summary"),
-        ),
+            _j(ev.get("queue_snapshot")), _j(ev.get("queue_delta")),
+            _j(ev.get("matcher_snapshot")), _j(ev.get("payload")), ev.get("summary")]
+    if event_time is not None:        # else the column DEFAULT now() (§II) applies
+        cols.append("event_time")
+        vals.append(event_time)
+    cur.execute(
+        f"INSERT INTO app_private.event_ledger ({', '.join(cols)}) "
+        f"VALUES ({', '.join(['%s'] * len(vals))})",
+        vals,
     )
 
 

@@ -257,6 +257,7 @@ def contest_label():
     from utils import verify_and_get_user_id
     import logging
     from datetime import datetime, timezone
+    import event_ledger
 
     get_firebase_app()
 
@@ -286,6 +287,36 @@ def contest_label():
                 RETURNING label_id
             """, (uid, label, label_dt))
             row = cur.fetchone()
+            # event-ledger dual-write: a ground_truth_tap event carrying the at-tap
+            # context contest_labels structurally lacks (the live queue + bound offer) —
+            # §VIII Passive lane, DISTINCT event_type (human truth, NOT a system detection).
+            # Savepoint-guarded + best-effort: a ledger failure must NEVER lose the tap
+            # (the contest_labels INSERT precedes the savepoint). event_time = the DEVICE
+            # tap-time so the row lands on the timeline where the human marked the PUDO.
+            try:
+                cur.execute("SAVEPOINT tap_ledger")
+                _seed = event_ledger.read_ledger_seed(cur, uid)
+                cur.execute(
+                    "SELECT current_offer_id FROM app_private.driver_trip_state WHERE driver_id = %s",
+                    (uid,),
+                )
+                _dts = cur.fetchone()
+                event_ledger.emit_event(
+                    cur, uid,
+                    {"event_type": "ground_truth_tap",
+                     "offer_id": (_dts or {}).get("current_offer_id"),
+                     "queue_snapshot": {"ids": (_seed or {}).get("last_queue_snapshot_ids", [])},
+                     "payload": {"label": label, "label_time_ms": label_time_ms,
+                                 "label_id": row["label_id"]}},
+                    event_time=label_dt,
+                )
+                cur.execute("RELEASE SAVEPOINT tap_ledger")
+            except Exception as _le:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT tap_ledger")
+                except Exception:
+                    pass
+                logging.warning(f"[CONTEST/LABEL] ledger emit skipped (swallowed): {_le}")
             conn.commit()
             logging.info(f"[CONTEST/LABEL] {uid[:8]}... {label} @ {label_dt}")
             return jsonify({"label_id": row["label_id"], "status": "ok"}), 200

@@ -235,6 +235,29 @@ def test_keystone_runtime_true_atjb_insert_ok_update_denied(db_cur, test_driver_
     db_cur.execute("ROLLBACK TO SAVEPOINT ks2")
 
 
+def test_ground_truth_tap_event_time_override_and_context(db_cur, test_driver_id):
+    """The /contest/label dual-write: a ground_truth_tap carries the device tap-time
+    (event_time override, NOT now()) + the at-tap context (queue + bound offer + label)."""
+    tap_time = datetime.datetime(2026, 6, 7, 14, 9, 18, tzinfo=timezone.utc)
+    EL.emit_event(
+        db_cur, test_driver_id,
+        {"event_type": "ground_truth_tap", "offer_id": "9001",
+         "queue_snapshot": {"ids": ["9001", "9002"]},
+         "payload": {"label": "pickup", "label_time_ms": 1, "label_id": 42}},
+        event_time=tap_time,
+    )
+    db_cur.execute(
+        "SELECT event_time, event_type, offer_id, queue_snapshot, payload "
+        "FROM app_private.event_ledger WHERE driver_id=%s AND event_type='ground_truth_tap'",
+        (test_driver_id,),
+    )
+    r = db_cur.fetchone()
+    assert r["event_time"] == tap_time          # device tap-time, not server now()
+    assert r["offer_id"] == "9001"
+    assert r["queue_snapshot"]["ids"] == ["9001", "9002"]
+    assert r["payload"]["label"] == "pickup"
+
+
 # =============================================================================
 # LIVE-PG: C4 batch atomicity / silent-loss (exercises emit_batch directly)
 # =============================================================================
