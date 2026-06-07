@@ -152,12 +152,24 @@ Design it as a persisted-state-read, not an in-process diff.
 
 ---
 
-## 4. OPEN FORK — keyframe trigger (Andrew's call)
+## 4. DECIDED — keyframe trigger: hybrid `50 events OR 15 min`, both load-bearing
 
-A hybrid (event-count OR time-elapsed, whichever first) is the right shape. The
-question is **which trigger is load-bearing (primary)**.
+**Resolved (Andrew + Gemini, 2026-06-07): keyframe on `50 events` OR `15 minutes of
+active drive`, whichever fires first. Both triggers are load-bearing — they defend
+against different failure modes:**
+- **Count (N = 50):** bounds the corruption window during churn. In a rush-hour surge
+  the queue mutates every few heartbeats; a time-only gate would let the delta chain
+  grow long, so an early dropped write leaks a big block of history. 50 events caps it.
+- **Time (M = 15 min):** catches the dead-zone case. On a long silent highway haul the
+  event stream goes quiet; a time keyframe drops an anchor confirming "nothing changed"
+  is an *empirical observation*, not an unlogged outage.
 
-**Recommendation: EVENT-COUNT primary, TIME secondary.** Reasoning: keyframes defend
+`N`/`M` are starting values — tune `N` from real event-density recon (loose enough that
+keyframes aren't constant, tight enough a burst can't run long unanchored); `M` just
+needs to catch long-quiet stretches.
+
+(Original recommendation reasoning, retained — it's why the count trigger is the
+integrity-load-bearing one:) keyframes defend
 against delta-drop, and drops correlate with **event density** (peak churn, lock
 contention), not elapsed time. The corruption window should be bounded in the unit
 that *causes* corruption (events), not in minutes (uncorrelated with drop-risk during
@@ -258,29 +270,70 @@ emit-helper at every event site, the queue-diff engine (§3b), the keyframe sche
 NOT "stand it up quick before fix #3." The sequencing (ledger before fix #3) is right;
 just don't let "before fix #3" compress it into something smaller than it is.
 
-**Phasing fork (Andrew's call — see §9):** greenfield-first (new ledger table + new
-event types + queue snapshots fast, defer the consolidation migration to phase 2) vs.
-migrate-from-the-start (unify the schema with the existing logs up front). Greenfield-
-first gets the missing event types and queue-snapshots in hand sooner with lower
-cutover risk; migrate-from-start avoids running a parallel stream temporarily.
+**Phasing — DECIDED (Andrew + Gemini, 2026-06-07): greenfield-first + immediate shadow
+validation, then cut over.** A big-bang consolidation on line one risks breaking the
+hot-path heartbeat writers while wiring a complex new layout — too high. Instead:
+1. Stand up the ledger as an **entirely additive greenfield** structure. Legacy
+   `pudo_decision_context` / `driver_trip_state_log` keep writing exactly as today.
+2. Wire the new event handlers (the queue-diff engine §3b, the sentinel/keyframe logic
+   §4) into the greenfield ledger. **Run the next drive.**
+3. Only once the drive logs prove the change-only engine catches every emergent reap
+   (the shadow-period assertion in §7 passes) → **cut over**: retire the old writers,
+   repoint internal code into the ledger, and deploy a Postgres **VIEW under the old
+   table names** so legacy forensic scripts keep working.
+
+So the consolidation (§7) is **phase 2**, gated on the shadow assertion — not line one.
 
 ---
 
-## 9. Open threads / decisions still owed before build
+## 8.5 DECIDED — retention: 14-day daily-partition drop (NOT `DELETE` of old rows)
 
-- **Keyframe interval `N` (events) and `M` (minutes)** — §4. Recommendation is
-  event-count-primary; Andrew to pick the numbers (or defer to recon on event density).
-- **Phasing:** greenfield-first vs migrate-from-start — §8.
-- **Recon owed before design:** read the existing log writers (`_log_decision_context`,
-  the `driver_trip_state_log` inserts, `heartbeat_log`) to inventory exactly what each
-  captures, so the unified schema is a superset and the shadow-period assertion has a
-  checklist. (L-6: read before authoring.)
-- **Retention / volume:** per-driver append-only grows unbounded. Significant-events-
-  only + a TTL/rollup mitigates. Decide the retention policy before the table grows.
-- This does NOT replace the Fix #3 product call (ground-truth tolerance: arrest
-  near-but-not-at a pickup you can't physically stop at — miss / correct-observation /
-  log-don't-bind). The ledger makes Fix #3 *investigable*; it doesn't make the
-  tolerance decision.
+**Resolved (Andrew + Gemini, 2026-06-07): partition the ledger by day; retain 14 days;
+drop the oldest partition. Interval is 2 weeks (Andrew's call — debug + onboarding never
+need older; anything analytical older than that belongs in a cold warehouse, not the hot
+transactional ledger).**
+
+**Mechanism rationale — why partition-drop, not `DELETE WHERE created_at < now()-14d`
+(record this so it isn't re-litigated):** `DELETE` is the intuitive choice and the wrong
+tool for a high-volume append-only table — it's the version that quietly melts the SSD
+anyway. In Postgres, `DELETE` does **not** return disk to the OS: it marks rows dead
+(MVCC), autovacuum reclaims them only *for reuse within the same table*, so the file
+stays at high-water mark. Shrinking it needs `VACUUM FULL` (exclusive lock, full rewrite)
+or `pg_repack`. So a daily delete-old-rows cron gives the worst of both: the file never
+shrinks **and** you pay constant vacuum + WAL + index-bloat churn competing with the live
+heartbeat writes. By contrast, **`DROP` of the oldest partition is O(1)** — a metadata op
+that instantly frees the whole chunk to the OS, no vacuum, no bloat, no lock fight.
+
+**"Drop the partition" ≠ "drop the ledger."** The ledger is one logical table backed by
+per-day child partitions; you drop only the oldest 14-day-old child while the parent and
+all recent partitions keep serving. It's the oldest slice falling off the back.
+
+Daily (not weekly) partitions give an exact 2-week cutoff (keep 14, drop day-15); weekly
+would be coarser (14–21 days effective). The one real cost: partition *lifecycle*
+automation — pre-create tomorrow's partition, drop the old one — via `pg_partman` or a
+tiny scheduled job. No custom Python rollup/aggregation crons (bug surface, wasted
+compute) — partitions only.
+
+## 9. Decision status
+
+**RESOLVED (2026-06-07):**
+- **Keyframe trigger** — §4: hybrid `50 events OR 15 min`, both load-bearing.
+- **Phasing** — §8: greenfield-first + shadow-validate, then cut over (consolidation is phase 2).
+- **Retention** — §8.5: 14-day daily-partition drop (not `DELETE`); partition lifecycle via
+  pg_partman or a scheduled job; no rollup crons.
+
+**STILL OPEN / owed before build:**
+- **Recon owed before design (the next concrete step, L-6):** read the existing log writers
+  (`_log_decision_context`, the `driver_trip_state_log` inserts, `heartbeat_log`) and inventory
+  exactly what each captures, so the unified schema is a provable superset and the shadow-period
+  assertion (§7) has a checklist.
+- **Tune `N` (and confirm `M`)** from real event-density recon — §4 gives starting values (50/15).
+- **Partition-lifecycle tooling:** `pg_partman` vs a tiny scheduled job — pick at design time.
+
+**Out of scope (named so it isn't conflated):** this does NOT make the Fix #3 product call
+(ground-truth tolerance: arrest near-but-not-at a pickup you can't physically stop at — miss /
+correct-observation / log-don't-bind). The ledger makes Fix #3 *investigable*; it doesn't make the
+tolerance decision.
 
 ---
 
