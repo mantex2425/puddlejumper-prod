@@ -15,9 +15,9 @@
 -- Five traps honored (see the delta): composite PK (partition key in the PK),
 -- GRANT-default-deny keystone, parent-level indexes only (PG16 propagates to
 -- children), full-forward-window rebuild in the maintenance fn (self-heals outages),
--- NO default partition. format(): %s for the constructed name fragment, %L for the
--- range-bound literals, %I for the discovered relname on drop — the %s/%L mix is
--- intentional, do not "normalize" it.
+-- NO default partition. format(): %I for partition names (create AND drop —
+-- correct-by-construction; the generated name is a legal bare identifier so %s would
+-- also work, but %I is the rule), %L for the range-bound literals.
 --
 -- Blocks 1–5 run inside one BEGIN/COMMIT. Block 6 (verification) runs AFTER commit.
 -- ============================================================================
@@ -100,7 +100,7 @@ BEGIN
                 vfrom := (to_char(d,     'YYYY-MM-DD') || ' 00:00:00+00')::timestamptz;
                 vto   := (to_char(d + 1, 'YYYY-MM-DD') || ' 00:00:00+00')::timestamptz;
                 EXECUTE format(
-                    'CREATE TABLE app_private.%s PARTITION OF app_private.event_ledger '
+                    'CREATE TABLE app_private.%I PARTITION OF app_private.event_ledger '
                     || 'FOR VALUES FROM (%L) TO (%L)', pname, vfrom, vto);
                 action := 'created'; partition_name := pname; RETURN NEXT;
             END IF;
@@ -182,9 +182,15 @@ $verify$;
 
 -- Optional dry-run smoke-test of the maintenance fn (returns rows, changes nothing):
 --   SELECT * FROM app_private.event_ledger_maintain_partitions(16, 14, true);
--- Insert smoke-test (confirms identity generation needs no separate sequence grant):
---   SET ROLE atjb;  INSERT INTO app_private.event_ledger (driver_id, event_type)
---     VALUES ('SMOKE', 'keyframe');  RESET ROLE;  -- then DELETE as postgres to clean up
+--
+-- RUNTIME-TRUE keystone check (Block 6 proves only catalog-true). INSERT must succeed
+-- (identity needs no separate sequence grant in PG16; a rolled-back insert still proves
+-- it — no stray SMOKE row), UPDATE must raise permission denied:
+--   SET ROLE atjb; BEGIN;
+--     INSERT INTO app_private.event_ledger (driver_id, event_type) VALUES ('SMOKE','keyframe');
+--     SAVEPOINT s; UPDATE app_private.event_ledger SET summary='x' WHERE driver_id='SMOKE'; ROLLBACK TO s;
+--   ROLLBACK; RESET ROLE;
+--   -- INSERT ok + UPDATE 'permission denied' = keystone holds. UPDATE ok = keystone broken, STOP.
 
 -- ───────────────────────────────────────────────────────────────────────────
 -- CRONTAB (Andrew applies on the VM as user `andrew`; house idiom, same shape as
