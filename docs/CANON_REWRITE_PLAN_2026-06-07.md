@@ -101,8 +101,12 @@ VII, XIII (principle), XIV (+ subsections A–J), XV, XVI, XVII, XVIII.
   `sm_transition`, `SET LOCAL app.state_trigger`: all dead.
 - **§XI State Levels** — UNCOMMITTED/ENROUTE/IN_TRIP/STACKED: collapsed to the 1-bit
   `current_offer_id` already documented in **§VI** (its replacement already exists).
-- **§XII Abort Guard** — ABORT verdict, `nailed_pickup_lat`, S-codes: gone; Case D + §8
-  triangulation handle the equivalents (per the notice).
+- **§XII Abort Guard** — **SETTLED-BY-GREP as dead machinery** (not a live firewall; see review
+  outcome #2). Zero `§XII` code refs; zero live abort/divergence/cancellation path. **Phase 2: CUT
+  the §XII section entirely, and fold ONLY the forward-prohibition** — *"once a pickup is physically
+  confirmed, outward divergence is normal; never auto-abort/cancel tracking on it"* — **into §X's
+  GPS-is-truth as a one-line clause.** Phase 2 must NOT inherit the "Post-Pickup Motion Firewall /
+  keep-it-live" framing (that was Gemini's unverified reclassification; the grep overturned it).
 
 **REWRITE, preserving the surviving principle:**
 - **§III Logic Rules** — DROP "use the `check_convergence` state machine"; KEEP **"Distance over

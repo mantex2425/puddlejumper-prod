@@ -101,16 +101,25 @@ assignments and `sm_transition()` do not. Every code path belongs to exactly one
 
     EXECUTE:  The write path. Two strictly separated lanes (below).
 
+**Box assignment is per code-PATH, not per file.** A module spans boxes: `driver_heartbeat.py` is
+MONITOR at heartbeat receipt AND Authoritative EXECUTE when it orchestrates the dispatch writes —
+listing it under MONITOR does NOT make the file write-free. Classify each write/read path, not the
+file it lives in.
+
 ### The EXECUTE two-lane rule (post-`sm_transition`)
 
 "All writes go through one stored proc" died with `sm_transition()`. EXECUTE is now two lanes that
 must never blur:
 
-- **Authoritative / Gated lane** — writes that ALTER system state: offer-history lifecycle stamps
-  (`actual_pickup_at`/`actual_dropoff_at` via fired dispatch actions), `driver_trip_state`
-  mutations (`current_offer_id` swap, arrest counters, leg odometer), and anything that changes
-  queue visibility or matching eligibility. These compose `LIVE_OFFER_PREDICATE_SQL` (§XIV.H). This
-  is the ONLY lane a runtime decision may read from.
+- **Authoritative / Gated lane** — writes that ALTER system state OR record the §0 product output.
+  Per the write-inventory grep (below), this lane is: `offer_history` (offer lifecycle / queue
+  source), `driver_trip_state` (`current_offer_id`, arrest, leg odometer), `driver_trip_locks`
+  (concurrency), `decision_log` (the offer/verdict record `offer_history` hangs off), and —
+  **critically, the §0/§XV product output** — the pricing cache (`pickup_market_signals`) and the
+  geographic caches (`poi_cache`, `geocode_cache`, `road_membership_cache`, `street_network*`),
+  written when a PUDO is observed. State writes compose `LIVE_OFFER_PREDICATE_SQL` (§XIV.H). This is
+  the ONLY lane a runtime decision may read from. Note: unlike the Passive lane, the product-cache
+  writes are **mandatory-on-observation, not droppable** (§0.D.4 / §XV — observation is the product).
 - **Passive / Open lane** — best-effort, non-blocking, **append-only observability** writes:
   `pudo_decision_context`, `heartbeat_log`, and the event ledger. This lane:
   - MUST NOT alter application state.
@@ -135,12 +144,40 @@ must never blur:
 
 ---
 
+## State-write inventory (review ask #2 — verifiable, not opinable)
+
+`grep -rhoE "INSERT INTO app_private\.[a-z_]+|UPDATE app_private\.[a-z_]+" --include="*.py" .`
+(non-test), by table. This is the authoritative list to ratify the §VIII lanes against — **the
+original draft enumeration (offer_history + driver_trip_state only) was incomplete; the grep
+surfaced the product caches and locks.**
+
+| Table | writes | Proposed lane |
+|---|---|---|
+| `offer_history` | U14 / I9 | **Authoritative** — offer lifecycle / queue source |
+| `driver_trip_state` | U12 / I7 | **Authoritative** — current_offer_id, arrest, odometer |
+| `driver_trip_locks` | I5 | **Authoritative** — concurrency/lock state |
+| `decision_log` | I7 / U2 | **Authoritative** — offer/verdict record (offer_history parent) |
+| `pickup_market_signals` | U8 / I1 | **Authoritative** — PRICING cache (§0 product output) |
+| `poi_cache` | I8 / U4 | **Authoritative** — geographic/POI cache (§0) |
+| `geocode_cache` | I1 / U1 | **Authoritative** — geographic cache (§0, Google-Tax displacement) |
+| `road_membership_cache` | I2 / U1 | **Authoritative** — geo/topology cache |
+| `street_network` / `street_network_tiles` | I2 / I1 | **Authoritative** — geo/topology cache |
+| `pudo_decision_context` | I1 | **Passive** — matcher forensic log |
+| `heartbeat_log` | I1 | **Passive** — telemetry |
+| `contest_labels` | I1 | **Passive** — debug ground-truth taps |
+| `crash_reports` | I1 | **Passive** — crash telemetry |
+| `intelligence_conversations` | I1 | **Passive** — LLM conversation log |
+| `driver_settings_new` / `driver_active_market` / `monitor_last_report` / `deletion_requests` | I3 / I3 / U1 / I1 | **Other subsystem** — not the PUDO decision pipeline (settings, market, monitor, GDPR) |
+
 ## Review asks for Gemini
 
 1. **§I/§II non-merge** (adjustment #1) — agree the data-driven rule overrides the "merge into one
    section" aspiration? (§II's 6 code refs would break.)
-2. **§VIII EXECUTE lanes** — is the Authoritative-lane enumeration complete/correct? (offer_history
-   stamps, driver_trip_state mutations, predicate-composed eligibility.) Any state-write path missed?
+2. **§VIII EXECUTE lanes** — ratify each table's lane in the **State-write inventory above** (the
+   grep is exhaustive; completeness is verifiable, not opinable). Confirm the Authoritative/Passive/
+   Other classifications; the only judgment calls are the borderline ones (`decision_log`,
+   `intelligence_conversations`, the geo caches). Do NOT ratify against plausibility — ratify against
+   the inventory.
 3. **§VIII retitle** — acceptable to drop "4-BOX CONTROLLER" for "SEPARATION OF CONCERNS"?
 4. Confirm the Passive-lane "never read by runtime" + the `driver_trip_state` diff-seed resolution
    reads cleanly as canon (it's the §6.2 fork resolution made canonical).
