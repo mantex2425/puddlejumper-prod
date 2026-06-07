@@ -56,28 +56,43 @@ conn.commit()
 ## 2. The seed (diff-seed; lives in `driver_trip_state.ledger_state` jsonb — already migrated)
 
 `ledger_state = {last_queue_snapshot, last_matcher_snapshot, keyframe_count, last_keyframe_at}`.
-- **READ** at LOAD (one PK read; piggyback `compute_effective_last_move`'s existing
-  `driver_trip_state` SELECT, or a tiny adjacent SELECT). `:1978` does NOT touch `ledger_state`, so
-  the prior value is readable any time before the batch.
+- **READ** at LOAD via **one dedicated cheap PK SELECT** on `driver_trip_state` (chosen over
+  extending `compute_effective_last_move` — that helper is queue/staleness, ledger_state is
+  observability; keep them uncoupled per §VIII; the read is a single PK lookup, negligible). `:1978`
+  does NOT touch `ledger_state`, so the prior value is readable any time before the batch.
 - **WRITTEN** only inside the batch (`_advance_ledger_seed`), only on emitting ticks.
+- **Cold-start contract (`ledger_state IS NULL`, first post-migration tick):** treat `prior` as
+  **empty** but do NOT run the diff (an empty prior would otherwise emit "all offers entered"). Emit
+  a single **drive-start keyframe** (full current snapshot), set `seed := current`, emit no
+  `offer_entered` / no reaps. `_gather_ledger_events` states this in its contract.
 
-## 3. Queue-diff (C2/C3: emergent reaps, the gold event)
+## 3. Queue-diff (C3: emergent reaps, the gold event) — probe attributes ALL six
 
 `prior = ledger_state.last_queue_snapshot` (ids+status); `current = queue_offer_ids` (the live set
-already computed at `:1948`).
+computed at `:1948`).
 - `entered = current − prior` → `offer_entered_queue`.
-- `left = prior − current`:
-  - **Handler-attributable (C2):** if a dropoff/abandon fired this tick (in `executed_actions` / the
-    §9.9 sweep), attribute `terminated` / `abandoned` from the handler signal and treat the diff as a
-    *reconcile* cross-check, not the primary record.
-  - **Emergent (the gold):** otherwise run the **Option-B scoped probe** (C3) — ONE query for just
-    the dropped ids fetching the six attribution columns (`expected_pickup_distance`,
-    `expected_dropoff_distance`, `expected_odometer_status`, `last_odometer_move_at`,
-    `actual_pickup_at`, `actual_dropoff_at`) — then a six-clause check in Python maps the drop to a
-    reason ∈ {`causality`, `ceiling`, `staleness`, `band_overshot`(+leg)}. The projections do NOT
-    carry these columns (C3-verified), so the probe is required; it fires only on the rare reap tick.
-  - Emit `offer_left_queue(reason=…)`. All six reasons mirrored, incl. live-impossible `causality`
-    (C1 — capture clock/replay-seed bugs, never silently misattribute).
+- `left = prior − current` → the **Option-B scoped probe** for ALL left ids: ONE query for just the
+  dropped ids fetching the six attribution columns (`expected_pickup_distance`,
+  `expected_dropoff_distance`, `expected_odometer_status`, `last_odometer_move_at`,
+  `actual_pickup_at`, `actual_dropoff_at`) — then a six-clause check in Python maps the drop to a
+  reason ∈ {`terminated`, `causality`, `ceiling`, `staleness`, `band_overshot`(+leg), `abandoned`}.
+  Projections do NOT carry these columns (C3-verified); the probe fires only on the rare reap tick.
+
+**No handler-attribution special-case (revised — drop C2 as mechanism).** The LOAD/EXECUTE skew
+forbids it: `current` is captured at `:1948`, but `FireDropoff` runs at `:2344` — so a dropped
+offer stays in `current` *this* tick and only leaves the live set at the *next* tick's LOAD, by
+which point the fire is no longer in `executed_actions`. Handler-signal attribution would read the
+wrong tick. The probe reads the now-set `actual_dropoff_at` / `expected_odometer_status` directly,
+so `terminated` (clause 1) and `abandoned` (clause 6) map with **zero cross-tick state**. Keep the
+emergent/handler witness-split as *analysis*; handler⇄diff reconciliation is a Phase-2 enrichment,
+not built now. All six reasons mirror the predicate, incl. live-impossible `causality` (C1).
+
+**Empty-probe fallback (poison-pill defense):** if the probe returns no row for a left id, emit
+`offer_left_queue(reason='unprobeable')` AND advance the seed past it. This is NOT the async-write
+race Gemini posited (a reap's `offer_history` row is never deleted — C3 — rows are append-mostly);
+it's defense against a stuck seed: an unhandled empty result under batch-swallow would re-revert the
+seed every tick → the seed gets **permanently stuck** re-diffing the same id forever. `unprobeable`
++ seed-advance breaks that. (So: six real reasons + one defensive `unprobeable`.)
 
 ## 4. Matcher-inflection (C-§6.2)
 
@@ -100,12 +115,22 @@ from `diagnostics`/`matches` (top match + `_max_wai_confidence` already computed
 Every `post_heartbeat` event emits in the batch, which writes `ledger_state` once per **emitting**
 tick. So the keyframe counter (`keyframe_count`) rides that write **for free** — no `COUNT(*)`
 range-scan, no §VIII read-purity gray area. Keyframe fires when `keyframe_count ≥ 50` OR
-`now − last_keyframe_at ≥ 15 min` (both load-bearing; reset both on keyframe).
+`now − last_keyframe_at ≥ 15 min` (both load-bearing).
+- **Reset to 0 on keyframe — NOT mod-50 (reject Gemini).** A keyframe is an end-of-tick FULL
+  snapshot; it anchors the burst's overflow events via its own timestamp, so the post-keyframe delta
+  chain is genuinely zero. Reset `keyframe_count := 0` and `last_keyframe_at := now`. The overflow
+  test asserts `keyframe_count == 0` (not `3`).
+- **Keyframe is ordered LAST in the batch** and built from **end-of-tick** state — so its snapshot
+  reflects everything that happened this tick and the next chain truly starts from zero.
 - **Cost named (eyes open):** on emitting ticks this is a SECOND `driver_trip_state` write (the
   `:1978` authoritative write + the batch `ledger_state` write). That second write is the
   C4-correctness price already paid for the seed-advance (it MUST be in the batch, not `:1978`, to
   avoid silent-reap-loss) — so the counter is genuinely free, riding a write that must happen anyway.
-  Non-emitting ticks do only `:1978` (one write). MVCC-tolerable at 0.2–1 Hz.
+  Non-emitting ticks do only `:1978`. **Both writes are HOT-eligible** (verified: `driver_trip_state`
+  has only the PK index on `driver_id`; neither write touches it). **Forward-looking ops note (not a
+  Phase-1 blocker):** `ALTER TABLE app_private.driver_trip_state SET (fillfactor=80)` is clean upside
+  whenever applied (leaves page room for HOT chains). If a HOT test is written, assert
+  `n_tup_hot_upd` RISES — not `n_dead_tup` low (vacuous at single-driver load).
 - **Exception:** `offer_received` emits in `decisions/logger.py` (the `/decisions` endpoint), a
   different txn — it does NOT ride the heartbeat seed and does NOT touch `keyframe_count` (the
   keyframe counter is heartbeat-scoped). It carries no queue-diff.
@@ -129,13 +154,20 @@ behind one helper and the decision logic unit-testable.
 3. **Runtime-true keystone on a POPULATED CHILD partition (C6):** `atjb` UPDATE/DELETE denied where
    rows physically live (not just the parent — catalog-true ≠ runtime-true).
 4. **No-uncaught-raise structural test (C4 guard).**
-5. **Post-reap readability (C3 assumption):** a reaped offer is still SELECT-able from
-   `offer_history` with its six attribution columns.
+5. **Empty-probe poison-pill (replaces Gemini's write-visibility test, which is dropped):** force a
+   left id whose probe returns no row → assert `offer_left_queue(reason='unprobeable')` is emitted
+   AND the seed advances past it (no permanently-stuck seed). (Gemini's async-write-visibility
+   framing is moot — C3: a reap's row is never deleted.)
+6. **HOT-update (optional, forward-looking):** if written, assert `pg_stat_user_tables.n_tup_hot_upd`
+   for `driver_trip_state` RISES across the two per-tick writes — NOT `n_dead_tup` low (vacuous at
+   single-driver load).
 
 ## 9. Open / deferred
 
-- **§XVI.G `suppressed_contexts`** — promote to a first-class `lock_suppressed` event, or keep inside
-  the `tad_decision_context`-style payload? (Carried from the delta; decide during impl.)
+- **§XVI.G `suppressed_contexts`** — leave open, but **lean to a first-class `lock_suppressed`
+  event**. Gemini's keep-in-payload is defensible (one event, no temporal join), but it cuts against
+  the founding rationale: "show me every suppression" should be `WHERE event_type='lock_suppressed'`,
+  not a jsonb scan across `matcher_eval`. Additive either way; decide at impl.
 - Event `summary` text wording per type (human timeline lines) — cosmetic, settle in impl.
 
 ## 10. Scope guards (unchanged)
