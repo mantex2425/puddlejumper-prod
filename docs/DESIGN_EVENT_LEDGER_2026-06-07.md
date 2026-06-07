@@ -1,5 +1,13 @@
 # Event-Ledger — Design (greenfield Phase 1) for Gemini review
 
+> ⚠️ **SUPERSEDED IN PART** by `docs/DESIGN_EVENT_LEDGER_DELTA_2026-06-07.md` (post-recon, source-
+> ratified 2026-06-07). The delta corrects, against `file:line` citations: the reap-reason taxonomy
+> (**SIX** clauses, not the 5→4 below — §4 here is wrong; see C1), the emit/txn mechanism (batched
+> SAVEPOINT on the heartbeat connection, seed-advance inside the batch — replaces §3's per-emit
+> swallow; see C4), the attribution mechanism (Option-B scoped probe — the projections don't carry
+> the columns; see C3), and the §8 open questions (Q1/Q2 resolved; Q3 justification corrected; the
+> keyframe-counter fork reframed in C5). **Read the delta first; where they conflict, the delta wins.**
+
 **Status:** DESIGN proposal. Per the build loop (recon → **design** → Gemini-ratify → migrate);
 the L-6 writer inventory (`RECON_EVENT_LEDGER_WRITER_INVENTORY_2026-06-07.md`) is done. **No code
 until this design is ratified.** Builds on the now-live canon: §I/§II Foundation (Space/Time),
