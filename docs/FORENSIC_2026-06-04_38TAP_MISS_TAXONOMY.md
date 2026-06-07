@@ -5,7 +5,7 @@
 **Bottom line:** the misses on this drive are dominated by **offer availability** — the driver's
 actual offer was **not in the matcher's scored queue at the PUDO** (15 of 21 pickups). That is
 upstream of geocode/confidence/cadence/cluster, and it is the class the shipped §5.5/§9.9 fixes
-target. The decisive test is the cohort replay against `00649`. Several other hypotheses were
+target. The decisive test is a live `00649` drive (validation marker set); the event-ledger, once built, makes it a one-query read. Several other hypotheses were
 investigated and **refuted** (recorded below so they aren't re-walked).
 
 ## Framing: the taps are the eval harness, not the product
@@ -39,8 +39,9 @@ Availability is the discriminator. The offer was reaped/excluded from the live s
 before the arrest — so there was nothing to localize or score. On a ~97%-lost-mode drive this is
 exactly the pre-fix failure mode: fabricated idle anchors + no reaping discipline dropped valid
 offers from the queue. **§5.5 (defer-don't-fabricate) + §9.9 + the band fix were built to stop it**,
-which is why the next step is empirical: replay 06-04 against `00649` and measure how many of the
-15 come back into the queue and catch — with no matcher change at all.
+which is why the next step is empirical: a fresh measured drive on `00649` (the live pipeline; the
+validation marker is already set) directly shows how many of the 15 stay in the queue through the
+PUDO and catch — with no matcher change. The event-ledger, once built, makes this a one-query read.
 
 ## What else is solid
 
@@ -70,23 +71,24 @@ which is why the next step is empirical: replay 06-04 against `00649` and measur
   dispatch.py) — two events of two offers can't both register from one light-cycle cluster.
 - **2 dispatch-gap anomalies** (14:58, 15:03): strong localization (signal sum 2.0) yet no fire
   within 90s — a dispatch/arbitration issue.
-- **In-queue residual localization** (the 6, esp. 9166): only if it survives the cohort replay.
+- **In-queue residual localization** (the 6, esp. 9166): only if it survives the live-drive validation.
 
 ## Implications for the fix backlog
 
 - **The dominant lever is offer availability/liveness — already addressed by the shipped fixes.**
-  Validate by cohort replay before anything else; the miss count may collapse without new code.
+  Validate by a live `00649` drive before anything else; the miss count may collapse without new code.
 - **De-scope "Fix #3 = WAI confidence tuning"** and the geocode/cadence theories (all refuted).
 - The **product-correct direction** (memory `pudo-detection-is-fully-automated`): autonomous
   detection must rest on geocode-independent signals — TAD/odometer + sequence + breadcrumb +
-  cluster — but that work is gated on what the cohort replay leaves unrecovered.
+  cluster — but that work is gated on what the live-drive validation leaves unrecovered.
 
 ## Next steps (ordered)
 
-1. **Cohort replay** of the 06-04 PUDOs against `00649` (sentinel+reaping+band) → how many of the
-   15 not-in-queue offers return to the live set and catch, with no matcher change. **Decisive.**
+1. **Live measured drive on `00649`** (sentinel+reaping+band; validation marker already set) → tap
+   the PUDOs and score how many stay in the queue and catch, with no matcher change. **Decisive.**
+   (The event-ledger, once built, turns this into a one-query post-drive read.)
 2. **Dropoff attribution** (17 dropoff taps) by the same sequence method, for completeness.
-3. Whatever the replay leaves missed → the in-queue residual: multi-PUDO arbitration, the 2
+3. Whatever the live drive leaves missed → the in-queue residual: multi-PUDO arbitration, the 2
    dispatch anomalies, and (only if implicated) geocode-independent identification (TAD+sequence).
 
 ## Method caveats

@@ -145,14 +145,13 @@ Collapse to **ONE** canonical doc; demote the others to pointers or an archive. 
 a single scheme as part of the rewrite (the v2.1 renumbering and the file's numbering cannot both
 stand).
 
-## E. Out-of-band / measurement note (ties to Rule XVI + the cohort replay)
+## E. Out-of-band scripts: replay/harvest DELETED (2026-06-07)
 
-§XIV.H exempts replay/backtest/harvest/drive_review from `LIVE_OFFER_PREDICATE_SQL` (documented in
-`docs/out_of_band_offer_history_queries.md`). That exemption is where the **verdict-gated** logic
-lives — `scripts/harvest_ride.py:539` (`expected_pickup = app_verdict=='ACCEPT' …`). Rule XVI must
-extend to **measurement**: out-of-band tooling may skip the predicate, but must NOT gate
-expectations on `app_verdict` where it biases results (it would corrupt the planned 00649 cohort
-replay). Fix before that replay runs.
+`scripts/replay_pudo.py` and `scripts/harvest_ride.py` were unused (nothing imported them; both
+stale) and are **deleted**. Their Rule-XVI measurement leak (`app_verdict=='ACCEPT'` expectation
+gating) is therefore moot. Validation is the **live `00649` drive + the event-ledger**, not a replay
+harness. Canon follow-up (Phase 2): §XIV.H's out-of-band exception clause still names "replay …
+harvest" — drop those referents when §XIV is revised (drive_review/backtest stay if retained).
 
 ## F. Process & sequencing
 
