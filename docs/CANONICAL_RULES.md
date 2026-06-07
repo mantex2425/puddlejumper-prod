@@ -350,33 +350,57 @@ XIV, XV, XVI, XVII, and XVIII are fully current.
 
 ---
 
-## I. COORDINATE RULES (STRICT)
+## I. COORDINATE RULES — SPACE (Foundation)
 
-### Mandatory Functions
+These bind every coordinate that enters the system — including every persisted/logged event. A
+swapped or raw-geometry coordinate corrupts spatial joins and the event ledger silently, at the
+source. Trust the abstraction.
+
+### Mandatory functions (the only sanctioned path)
 
 - **H3:** `app_private.coords_to_h3(lat, lng)`, `app_private.h3_to_lat(h3)`, `app_private.h3_to_lng(h3)`
 - **Geometry:** `app_private.coords_to_point(lat, lng)`, `app_private.coords_to_geography(lat, lng)`
-- **Math:** `app_private.distance_miles(lat1, lng1, lat2, lng2)`
+- **Distance:** `app_private.distance_miles(lat1, lng1, lat2, lng2)`
 
-### The Blacklist
+### The ordering rule
 
-**NEVER** write `ST_MakePoint`, `h3_latlng_to_cell`, or `h3_cell_to_latlng` directly.
+Arguments are **always `(lat, lng)`**. If you are manually swapping them to fit a raw function,
+you are doing it wrong.
 
-### The Ordering Rule
+### The blacklist (code-review blockers)
 
-Arguments are **always** `(lat, lng)`. If you find yourself manually swapping them to fit a raw PostGIS function, you're doing it wrong.
+**NEVER** write `ST_MakePoint` (it takes `(lng, lat)` — the swap trap), `h3_latlng_to_cell`, or
+`h3_cell_to_latlng` directly. Any direct PostGIS/H3 primitive or raw geometry construction is a
+code-review blocker.
 
-### Developer Sanity Rule
+### Developer sanity rule
 
-> "If you find yourself thinking about coordinate order, local time offsets, or manual geometry creation, STOP. Use the `app_private` canonical functions. Trust the abstraction."
+> "If you find yourself thinking about coordinate order or manual geometry creation, STOP. Use the
+> `app_private` canonical functions. Trust the abstraction."
+
+### Persistence binding
+
+Stored coordinates use the `(lat, lng)` convention; any derived H3/geometry is produced through the
+canonical functions above. The event ledger's `lat`/`lng` and its `queue_snapshot`/`payload`
+coordinates follow this rule; the writer never constructs raw geometry.
 
 ---
 
-## II. TEMPORAL RULES (UTC-MANDATORY)
+## II. TEMPORAL RULES — TIME (Foundation, UTC-MANDATORY)
 
-- **Canonical Time:** Always use **UTC**.
-- **Postgres:** `(NOW() AT TIME ZONE 'UTC')`, or `NOW()` directly on `timestamptz` columns.
-- **The Rule:** The engine is timezone-agnostic. All "Texas Time" localization occurs at the edge (the UI), never in the logic.
+These bind every timestamp the system stores — including `event_time` on every logged event. A
+naive or local-time timestamp silently breaks chronological ordering, the `(driver_id, event_time
+DESC)` lookback, and any delta/keyframe reconstruction. Always UTC.
+
+- **Canonical time:** UTC, always.
+- **Postgres:** `(NOW() AT TIME ZONE 'UTC')`, or `NOW()` directly on a `timestamptz` column.
+- **The engine is timezone-agnostic.** All "Texas Time" localization happens at the edge (the UI),
+  never in system logic. Local-time SQL in the engine is a code-review blocker.
+
+### Persistence binding
+
+Event/log timestamps are `timestamptz` written via `NOW()` — never a naive datetime. Every
+ordering-dependent read (latest-row lookbacks, delta folds) relies on this.
 
 ---
 
@@ -428,42 +452,82 @@ Decisions, dispatch, business logic → Python.
 
 ---
 
-## VIII. THE 4-BOX CONTROLLER (MANDATORY ARCHITECTURE)
+## VIII. SEPARATION OF CONCERNS — MONITOR / DIAGNOSE / PLAN / EXECUTE
 
-Every file belongs to exactly one box:
+The 4-box *separation-of-concerns frame* survives the Sprint-A demolition; the state-machine file
+assignments and `sm_transition()` do not.
 
 ```
-MONITOR:  Receive sensor inputs only. No logic, no writes.
-          → driver_heartbeat.py (input receipt only)
-          → Android accessibility service
+MONITOR:  Receive sensor inputs. No logic, no writes.
+          → driver_heartbeat.py (heartbeat receipt / orchestration entry)
+          → Android accessibility service (offer-card capture)
 
-DIAGNOSE: Interpret sensor data. Pure reads only. No writes.
-          → nail_it_core.check_convergence()
-          → decisions/state_enricher.py (read state only)
-          → where_am_i.evaluate()
+DIAGNOSE: Interpret sensor data. Pure reads, no writes.
+          → where_am_i.evaluate() (the WAI matcher)
+          → cluster / arrest detection
 
 PLAN:     Business logic and strategy. No DB writes.
-          → decisions/router.py
-          → decisions/engine.py
-          → decisions/triangulation_enricher.py
-          → pudo_planner.consume()
+          → decisions/ (router, engine, triangulation_enricher)
+          → dispatch (PUDO action selection)
 
-EXECUTE:  The ONLY write path. Period.
-          → DriverStateMachine.transition()
-          → sm_transition() in Postgres
+EXECUTE:  The write path. Two strictly separated lanes (below).
 ```
 
-### Violation Pattern
+**Box assignment is per code-PATH, not per file.** A module spans boxes: `driver_heartbeat.py` is
+MONITOR at heartbeat receipt AND Authoritative EXECUTE when it orchestrates the dispatch writes —
+listing it under MONITOR does NOT make the file write-free. Classify each write/read path, not the
+file it lives in.
 
-If you see a DB write outside EXECUTE, or a `transition()` call outside the PLAN→EXECUTE handoff, **stop and redesign before proceeding.**
+### The EXECUTE two-lane rule (post-`sm_transition`)
 
-### Before Adding Any Code, Ask:
+"All writes go through one stored proc" died with `sm_transition()`. EXECUTE is now two lanes that
+must never blur. (Lane membership below is grep-verified against the state-write inventory, not
+asserted.)
 
-1. Which state level does this belong to?
-2. Which Monitor feed triggers it?
-3. Is it Diagnose (read), Plan (logic), or Execute (write)?
-4. If Execute — does it go through `sm_transition()`?
-   If not — it does not belong here.
+**Authoritative / Gated lane** — writes that ALTER system state OR record/feed the §0 product:
+- `offer_history` — offer lifecycle / queue source.
+- `driver_trip_state` — `current_offer_id`, arrest counters, leg odometer. **MVCC guard:** the
+  ledger diff-seed `last_queue_snapshot` is READ every heartbeat (it rides the existing authoritative
+  read) to detect deltas, but WRITTEN only on a detected change/reap — write frequency scales with
+  event density, never heartbeat density (avoids bloating row-versions on the highest-contention row
+  at 1 Hz).
+- `driver_trip_locks` — concurrency / lock state.
+- `decision_log` — read by the runtime as the offer-identity / driver-scoping bridge (`id`,
+  `driver_id`) the queue projection joins through; **verdict-blind** — the pipeline reads identity,
+  never `app_verdict` (§XV). The Authoritative join MUST NOT reach for `app_verdict`.
+- `pickup_market_signals` — the **pricing cache**. Genuinely **not droppable**: a lost fare signal
+  is lost product (§0 — pickups *are* the product).
+- geographic caches `poi_cache` / `geocode_cache` / `road_membership_cache` / `street_network*` —
+  **read at future offer-evaluation** (DIAGNOSE/WAI anchor resolution and the geocode-displacement
+  path); a stale/corrupt entry poisons the next evaluation's input. (A *dropped* geo-cache write
+  merely costs one API call — distinct from the pricing cache's lost-product cost.)
+
+State writes compose `LIVE_OFFER_PREDICATE_SQL` (§XIV.H). This is the ONLY lane a runtime decision
+may read from.
+
+**Passive / Open lane** — best-effort, non-blocking, **append-only observability**:
+`pudo_decision_context`, `heartbeat_log`, and the event ledger. This lane:
+- MUST NOT alter application state.
+- MUST NOT be the source of any runtime/business decision. Reading a *decision* out of it makes it a
+  parallel state machine and violates §VII (the ledger is observability, never truth).
+- MUST NOT block or fail a live decision — a logging error is swallowed.
+- Is NOT read by the runtime loop. The one piece of prior state the heartbeat needs (the
+  queue/matcher snapshot for the emergent-reap and inflection diff) lives on `driver_trip_state`
+  (the Authoritative lane the heartbeat already reads each tick), NOT on the ledger.
+
+### Violation patterns (stop and redesign)
+
+- A state mutation in the Passive lane, or an observability write in the Authoritative lane.
+- A runtime read of the Passive lane (the ledger) to drive a decision.
+- The Authoritative `decision_log` join reaching for `app_verdict` (breaks verdict-blindness).
+- A DB write inside MONITOR or DIAGNOSE; business logic that writes inside PLAN.
+
+### Before adding any write, ask:
+
+1. Does this ALTER state / visibility / eligibility, or feed the §0 product caches? → Authoritative lane.
+2. Or is it a record of what happened? → Passive lane; append-only, best-effort, never read by runtime.
+3. If a runtime loop needs to READ prior state → it reads the Authoritative lane
+   (`driver_trip_state`), never the Passive lane.
 
 ---
 
@@ -624,9 +688,8 @@ Code edits land via Python `str.replace` scripts, never `sed`-based patches.
 
 ### G. Coordinate and Time Canonicalization
 
-(Cross-reference Sections I and II — these remain canonical.)
-
-For new Sprint A code: when in doubt, route through `app_private.coords_to_*` (lat-first ordering) and `(NOW() AT TIME ZONE 'UTC')`. Any direct `ST_MakePoint` or local-time SQL is a code-review blocker.
+Superseded — folded into the Foundation sections. See **§I (Space)** and **§II (Time)**. Direct
+`ST_MakePoint` or local-time SQL remains a code-review blocker (stated canonically in §I/§II).
 
 ### H. Wall-Clock GC Predicate (canonical)
 

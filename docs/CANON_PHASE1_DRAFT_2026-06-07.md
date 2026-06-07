@@ -1,5 +1,37 @@
 # Canon rewrite — Phase 1 DRAFT (§I, §II, §VIII) for Gemini review
 
+## ✅ APPLIED to `CANONICAL_RULES.md` (2026-06-07) — consensus reached
+
+Claude proposed → Gemini reviewed → both corrected against the grep → consensus → §I/§II/§VIII +
+§XIV.G-redirect are now live in `CANONICAL_RULES.md`. **Three grep-verified corrections folded at
+apply-time** (the meta-result: on all three "ratified" judgment-calls, the grep moved one lane and
+corrected two reasons — every one was mis-laned or mis-justified, and neither plausibility-review
+caught it):
+1. **`decision_log`** — lane unchanged (Authoritative); REASON corrected: it's the runtime
+   offer-identity / driver-scoping bridge (`id`, `driver_id`) the queue projection joins through —
+   **verdict-blind** (reads identity, never `app_verdict`). NOT FK-lineage, NOT "insert fails →
+   tracking breaks." The Authoritative join must not reach for `app_verdict`.
+2. **`intelligence_conversations`** — **lane CORRECTED**: Passive → **Other subsystem**. Grep shows
+   `market_intelligence.py:317` reads `role`/`content` back to feed the next LLM turn → read-to-drive-
+   behavior, fails the Passive "never read by runtime" test; but it's the LLM-assistant subsystem,
+   not the PUDO pipeline → neither PUDO lane.
+3. **Geo caches** (`poi_cache`/`geocode_cache`/`road_membership_cache`) — lane unchanged
+   (Authoritative); REASON corrected from "not droppable" (false) to **"read at future
+   offer-evaluation; stale/corrupt poisons the next eval's input"** (poi_service.py:278/639,
+   geo_utils.py:82, road_membership.py:242). `pickup_market_signals` keeps the distinct
+   "genuinely not-droppable — lost fare = lost product (§0)" justification.
+
+Plus **Gemini's MVCC guardrail** on `driver_trip_state.last_queue_snapshot`: READ every heartbeat
+(rides the existing authoritative read) to detect deltas, WRITTEN only on detected change/reap —
+write frequency scales with event density, never heartbeat density.
+
+Housekeeping confirmed: no `tmp/road_membership.py` shadow copy exists (only production
+`./road_membership.py`). Phase 2 (§III/IX/X/XI/XII/XIII vocab purge; §XII = dead-machinery → fold
+prohibition into §X) defers to the ledger's shadow-validation window per the plan.
+
+---
+
+
 **Status:** DRAFT proposed replacement text for the Prerequisite Gate sections, per
 `docs/CANON_REWRITE_PLAN_2026-06-07.md` (ratified plan). **Not yet applied to
 `CANONICAL_RULES.md`** — this is the proposal for Gemini review; consensus → then it replaces the
