@@ -11,6 +11,51 @@ cleanly after Cut B3 lands." **Cut B3 landed; the cleanup never ran.** This loop
 
 ---
 
+## Gemini review outcomes (2026-06-07) — REVISIONS to this plan
+
+Gemini reviewed and pushed back; all corrections accepted (+ one refinement from Claude). **The full
+canon rewrite is STOOD DOWN; only two prerequisite sections execute now (see Sequencing Gate).**
+
+1. **Numbering RESOLVED by data (not preference).** `grep -rhoE "§…|Rule …" --include="*.py"` →
+   736 `§` refs in code, all in `CANONICAL_RULES.md`'s scheme (§XVIII×69, §XVII×52, §XIV.I×39,
+   §XVI.C×37, Rule XV×40, Rule XVI×17, §XIV.H/J, §0, §II, §V…). The v2.1 renumbering has **zero**
+   code uptake. ⇒ **Keep the file's scheme; rewrite sections IN PLACE (numbers stable); tombstone
+   cut sections (e.g. "§XI — retired, see §VI") rather than deleting numbers; renumber the v2.1
+   doc to adapt.** `Rule XVI` (17 refs) is load-bearing (Arrest-Defined Truth) — accept/decline goes
+   to Rule XV sub-clause or §XIX, never XVI.
+2. **§XII RECLASSIFIED: cut → rewrite-keep-principle, titled "Post-Pickup Motion Firewall."** The
+   ABORT verdict/S-codes are dead, but the principle is live: *physical pickup confirmation
+   permanently blinds the distance engine to outward divergence until a dropoff clears the
+   narrative.* Live analog: post-pickup, distance-to-*pickup* is irrelevant (relevant distance is
+   toward dropoff) — the band/TAD must honor it. Cutting the section would leave a vacuum a future
+   dev could refill with an auto-cancellation/tracking-reset loop. Keep the firewall explicit.
+3. **§VIII EXECUTE = hard blocker; define the dual-lane NOW (before the ledger schema):**
+   - **Authoritative / Gated lane:** inline, predicate-composed SQL state mutations that alter queue
+     visibility, matching eligibility, or contract lifecycle. (Replaces the dead "all writes via
+     `sm_transition`.")
+   - **Passive / Open lane:** non-blocking, best-effort, append-only observability writes (the event
+     ledger). Forbidden from altering application state or being **sourced for any business
+     decision**.
+   - **CLAUDE REFINEMENT (contradiction to resolve):** Gemini's "Passive lane never read by runtime
+     loops" collides with the ledger's §6.2 lookback (the heartbeat reads the prior
+     `queue_snapshot`/`matcher_snapshot` to compute the reap/inflection diff). Resolve one of two
+     ways: **(a)** refine the rule to *"no runtime read for business state/decisions; observability-
+     internal self-reads (the diff seed) allowed,"* or **(b)** honor the strict rule and move the
+     lookback to `driver_trip_state` (Authoritative lane, already read each heartbeat). The dual-lane
+     discipline argues for (b). **This fork must be decided as part of the §VIII rewrite.**
+4. **SEQUENCING GATE (decoupled phases):**
+   - **Phase 1 — Prerequisite Gate (execute now):** rewrite ONLY the merged **§I Foundations
+     (Space & Time)** and the **§VIII EXECUTE boundary** (dual-lane). These are the event-ledger's
+     direct ancestors; they must be pristine before the schema is cut.
+   - **Phase 2 — General Cleanup (deferred):** the dead-vocab purge of §III/§IX/§X/§XI/§XII/§XIII,
+     parked to run *during* the ledger's shadow-validation period (low-coupling; must not block
+     active tracking fixes).
+
+The cut/fold map in §B below stands as the Phase-2 blueprint; §A + the new §VIII dual-lane are
+Phase-1. Numbering questions in §G.1/§G are now resolved by item 1 above.
+
+---
+
 ## A. FOUNDATION FIRST — coord + time (Andrew's emphasis: make-or-break for the event-ledger)
 
 These are the rules every logging attempt inherits; get them wrong and the ledger is corrupt from
