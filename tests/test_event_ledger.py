@@ -14,7 +14,9 @@ Two layers:
 Deferred to the wiring step (need post_heartbeat): batch-atomicity/silent-loss in the
 orchestrator, and the no-uncaught-raise structural guard. Noted, not skipped silently.
 """
+import ast
 import datetime
+import os
 from datetime import timezone, timedelta
 from types import SimpleNamespace
 
@@ -231,3 +233,82 @@ def test_keystone_runtime_true_atjb_insert_ok_update_denied(db_cur, test_driver_
     with pytest.raises(psycopg2.errors.InsufficientPrivilege):
         db_cur.execute("DELETE FROM app_private.event_ledger WHERE driver_id = %s", (test_driver_id,))
     db_cur.execute("ROLLBACK TO SAVEPOINT ks2")
+
+
+# =============================================================================
+# LIVE-PG: C4 batch atomicity / silent-loss (exercises emit_batch directly)
+# =============================================================================
+
+def test_emit_batch_atomicity_and_no_silent_loss(db_cur, test_driver_id):
+    """Force an emit failure mid-batch → (a) the parent's pre-batch authoritative write
+    survives, (b) the emits revert AND the seed does NOT advance, (c) a re-run emits the
+    reap EXACTLY once and advances the seed. This is the C4 silent-loss guard."""
+    db_cur.execute(
+        "INSERT INTO app_private.driver_trip_state (driver_id) VALUES (%s) "
+        "ON CONFLICT (driver_id) DO NOTHING",
+        (test_driver_id,),
+    )
+    EL.advance_ledger_seed(db_cur, test_driver_id, {"last_queue_snapshot_ids": ["9001"], "keyframe_count": 5})
+    # parent authoritative write BEFORE the batch (stands in for the :1978 UPDATE)
+    db_cur.execute("UPDATE app_private.driver_trip_state SET heartbeat_at = NOW() WHERE driver_id = %s",
+                   (test_driver_id,))
+
+    good = {"event_type": "offer_left_queue", "offer_id": "9001",
+            "queue_delta": {"left": [{"offer_id": "9001", "reason": "terminated"}]}}
+    poison = {"event_type": None}          # NOT NULL violation on the 2nd emit, mid-batch
+    advanced = {"last_queue_snapshot_ids": [], "keyframe_count": 0}
+
+    EL.emit_batch(db_cur, test_driver_id, [good, poison], advanced)   # batch-level swallow
+
+    # (a) parent authoritative write survived the batch rollback
+    db_cur.execute("SELECT heartbeat_at FROM app_private.driver_trip_state WHERE driver_id = %s",
+                   (test_driver_id,))
+    assert db_cur.fetchone()["heartbeat_at"] is not None
+    # (b) emits reverted (good is gone too — batch atomicity) AND seed did NOT advance
+    db_cur.execute("SELECT count(*) AS c FROM app_private.event_ledger WHERE driver_id = %s",
+                   (test_driver_id,))
+    assert db_cur.fetchone()["c"] == 0
+    assert EL.read_ledger_seed(db_cur, test_driver_id)["last_queue_snapshot_ids"] == ["9001"]
+
+    # (c) re-run (reap re-detected against the un-advanced seed) → emits exactly once
+    EL.emit_batch(db_cur, test_driver_id, [good], advanced)
+    db_cur.execute("SELECT count(*) AS c FROM app_private.event_ledger WHERE driver_id = %s",
+                   (test_driver_id,))
+    assert db_cur.fetchone()["c"] == 1
+    assert EL.read_ledger_seed(db_cur, test_driver_id)["last_queue_snapshot_ids"] == []
+
+
+# =============================================================================
+# STRUCTURAL (no DB): no uncaught raise / rollback between emit and commit (C4 guard)
+# =============================================================================
+
+def test_no_uncaught_raise_between_emit_and_commit():
+    """Static guard: in post_heartbeat, between the first event-ledger emit
+    (emit_batch/emit_event) and the terminal conn.commit() (:2406), there is NO `raise`
+    and NO `conn.rollback()`. Vacuously satisfied until the wiring adds the emit call —
+    it CONSTRAINS that wiring (the production-touching edit), per C4."""
+    path = os.path.join(os.path.dirname(__file__), "..", "driver_heartbeat.py")
+    with open(path) as f:
+        tree = ast.parse(f.read())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "post_heartbeat"), None)
+    assert fn is not None, "post_heartbeat not found"
+
+    def _attr_or_name(node, names):
+        return (isinstance(node, ast.Call)
+                and ((isinstance(node.func, ast.Attribute) and node.func.attr in names)
+                     or (isinstance(node.func, ast.Name) and node.func.id in names)))
+
+    emit_lines = [n.lineno for n in ast.walk(fn) if _attr_or_name(n, {"emit_batch", "emit_event"})]
+    if not emit_lines:
+        return  # wiring not present yet — constraint vacuously satisfied; activates on wiring
+    first_emit = min(emit_lines)
+    commit_lines = [n.lineno for n in ast.walk(fn) if _attr_or_name(n, {"commit"}) and n.lineno >= first_emit]
+    assert commit_lines, "no conn.commit() after the first ledger emit"
+    commit_line = min(commit_lines)
+    offending = [
+        n.lineno for n in ast.walk(fn)
+        if first_emit < n.lineno < commit_line
+        and (isinstance(n, ast.Raise) or _attr_or_name(n, {"rollback"}))
+    ]
+    assert not offending, f"raise/rollback between emit and commit at lines {offending}"

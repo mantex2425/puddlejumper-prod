@@ -18,9 +18,12 @@ post_heartbeat calls it (separate, tested step).
 """
 import datetime
 import json
+import logging
 
 from driver_queue import GC_ABANDONMENT_CEILING_HOURS, GC_ODOMETER_FREEZE_MINUTES
 from pudo_types import odometer_band, ODOMETER_STATUS_ABANDONED
+
+log = logging.getLogger(__name__)
 
 # ── reap reasons: mirror the SIX AND-ed LIVE_OFFER_PREDICATE_SQL clauses ──────────
 #   (driver_queue.py:192-265 — clause numbers below match that source)
@@ -293,3 +296,31 @@ def advance_ledger_seed(cur, driver_id, new_seed):
         "UPDATE app_private.driver_trip_state SET ledger_state = %s::jsonb WHERE driver_id = %s",
         (json.dumps(new_seed), driver_id),
     )
+
+
+def emit_batch(cur, driver_id, events, new_seed, *, ctx=None):
+    """The C4 batched savepoint — the SOLE thing the wiring calls. All emits AND the
+    seed-advance run atomically in ONE savepoint on the heartbeat connection, with a
+    BATCH-level swallow (NOT per-emit). On any failure, ROLLBACK TO the savepoint reverts
+    the emits AND the seed-advance together — so the next tick re-diffs the un-advanced
+    seed and retries (no silent reap-loss, no duplicate; single connection ⇒ nothing
+    partial separately committed). The parent's authoritative writes precede this
+    savepoint and are untouched. Best-effort: a ledger failure never propagates (§VIII).
+
+    Does NOT commit — post_heartbeat's terminal conn.commit() (:2406) owns that. `ctx`
+    carries per-tick fields (lat/lng/gps_accuracy_m/cumulative_miles) passed to each emit.
+    """
+    if not events:
+        return
+    try:
+        cur.execute("SAVEPOINT ledger_batch")
+        for ev in events:
+            emit_event(cur, driver_id, ev, **(ctx or {}))
+        advance_ledger_seed(cur, driver_id, new_seed)
+        cur.execute("RELEASE SAVEPOINT ledger_batch")
+    except Exception as e:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT ledger_batch")
+        except Exception:
+            pass
+        log.warning("[event_ledger] emit batch failed (swallowed; seed not advanced): %s", e)
