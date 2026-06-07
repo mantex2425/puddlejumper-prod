@@ -171,6 +171,10 @@ def gather_ledger_events(
     cold_start = prior_seed is None
     prior_count = int((prior_seed or {}).get("keyframe_count", 0))
     last_keyframe_at = (prior_seed or {}).get("last_keyframe_at")
+    # ledger_state is jsonb → last_keyframe_at round-trips as an ISO STRING; parse it
+    # back to a tz-aware datetime for the time-threshold comparison below.
+    if isinstance(last_keyframe_at, str):
+        last_keyframe_at = datetime.datetime.fromisoformat(last_keyframe_at)
     matcher_snap = _matcher_snapshot(matches)
 
     if not cold_start:
