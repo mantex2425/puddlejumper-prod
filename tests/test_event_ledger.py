@@ -308,7 +308,8 @@ def test_no_uncaught_raise_between_emit_and_commit():
     commit_line = min(commit_lines)
     offending = [
         n.lineno for n in ast.walk(fn)
-        if first_emit < n.lineno < commit_line
+        if getattr(n, "lineno", None) is not None   # not all AST nodes carry lineno
+        and first_emit < n.lineno < commit_line
         and (isinstance(n, ast.Raise) or _attr_or_name(n, {"rollback"}))
     ]
     assert not offending, f"raise/rollback between emit and commit at lines {offending}"
