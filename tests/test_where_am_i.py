@@ -2768,13 +2768,15 @@ class TestItem3DualCommitRule:
                 current_odometer=1.5,
             )
 
-        # §XVI.C: matcher IS invoked now (no bouncer) ...
-        assert len(matcher_calls) == 1, (
-            f"Matcher called {len(matcher_calls)} times; expected 1 (§XVI.C removed the bouncer)"
+        # §XVI.C: matcher IS invoked now (no bouncer) — both the pickup and dropoff
+        # candidates the Map step generates for the offer are scored (was 0: bounced).
+        assert len(matcher_calls) == 2, (
+            f"Matcher called {len(matcher_calls)} times; expected 2 (§XVI.C removed the bouncer; "
+            f"pickup+dropoff candidates both score)"
         )
         # ... and a strong-WAI (0.99) passed=False offer commits — ground truth wins.
-        assert len(matches) == 1
-        assert matches[0].offer_id == offer.offer_id
+        assert len(matches) >= 1
+        assert all(m.offer_id == offer.offer_id for m in matches)
         # Forensic context still carries the verdict for the JSONB blob
         assert diag.tad_verdicts == fake_verdicts
 
