@@ -812,22 +812,42 @@ def _signal_semantic_anchor(
     return best_score, best_witness
 
 
+# §P18b — venue track (2026-06-08). Geofence containment is GROUND TRUTH ("the car
+# is the sensor"): a genuine STOP inside a venue polygon IS a PUDO there, regardless
+# of how the Uber address string classified. Empirically the 1.0 name-match almost
+# never fires (the address rarely matches the polygon name; 2,104 mall polygons are
+# unnamed) and the rare 1.0 fuzzy is loose (GBIA→"Alvin Airpark" at 0.70). So a real
+# stop (not a drive-through) lifts the containment-only score above the commit floor.
+GEOFENCE_MIN_DWELL_S: float = 45.0                 # a genuine stop, not a pass-through
+GEOFENCE_MAX_SPREAD_M: float = 75.0                # tight cluster = a real stop
+GEOFENCE_CONTAINMENT_COMMIT_SCORE: float = 0.60    # clears normal (0.40) + lost (0.55) floors
+
+
 def _signal_geofence_membership(
     cur,
     cluster_lat: float,
     cluster_lng: float,
     target_text: str,
-    fuzzy_floor: float = 0.6,
+    fuzzy_floor: float = 0.8,
+    cluster_duration_s: "Optional[float]" = None,
+    cluster_spread_m: "Optional[float]" = None,
 ) -> tuple[float, "Optional[str]"]:
     """Head 6 (P18): ground-truth polygon containment from routing.geofence_polygons.
 
     Ratified Andrew + Gemini revision 3, 2026-05-20. See
-    docs/RFC_P18_GEOFENCE_MEMBERSHIP_HEAD.md.
+    docs/RFC_P18_GEOFENCE_MEMBERSHIP_HEAD.md. §P18b venue track 2026-06-08.
 
     Scoring:
       1.0  — cluster inside polygon AND name/IATA matches target_text
-      0.30 — cluster inside polygon BUT no name/IATA matches
+      0.60 — cluster inside polygon, NO name match, but a GENUINE STOP (§P18b:
+             dwell >= GEOFENCE_MIN_DWELL_S and spread <= GEOFENCE_MAX_SPREAD_M).
+             Requires cluster_duration_s + cluster_spread_m to be passed; absent →
+             falls through to 0.30 (back-compat for callers that don't pass them).
+      0.30 — cluster inside polygon BUT no name/IATA match and not a genuine stop
       0.0  — cluster not inside any polygon
+
+    fuzzy_floor raised 0.6→0.8 (§P18b): the global lift exposes the 1.0 path to all
+    address classes, and 0.6 was loose enough to false-match (GBIA→Alvin Airpark 0.70).
 
     Iteration: containment results ORDER BY area_m2 ASC LIMIT 5.
     Phase 2a scans ALL rows for IATA/ICAO word-boundary match (codes
@@ -889,6 +909,18 @@ def _signal_geofence_membership(
     innermost = rows[0]
     pname = (innermost.get("name") if isinstance(innermost, dict) else innermost["name"]) or (innermost.get("category") if isinstance(innermost, dict) else innermost["category"]) or "unknown"
     area = (innermost.get("area_m2") if isinstance(innermost, dict) else innermost["area_m2"]) or 0.0
+    # §P18b: containment with no name match, but a GENUINE STOP (real dwell + tight
+    # spread) inside the polygon → fire at the commit score. The car physically
+    # stopped inside the venue; that IS the PUDO. A drive-through (short dwell / loose
+    # spread) stays 0.30 (below floor). Back-compat: callers that don't pass the
+    # cluster shape get the original 0.30.
+    if (cluster_duration_s is not None and cluster_spread_m is not None
+            and cluster_duration_s >= GEOFENCE_MIN_DWELL_S
+            and cluster_spread_m <= GEOFENCE_MAX_SPREAD_M):
+        return GEOFENCE_CONTAINMENT_COMMIT_SCORE, (
+            f"geofence:contained-genuine-stop in {pname} "
+            f"(area={area:.0f}m2 dwell={cluster_duration_s:.0f}s spread={cluster_spread_m:.0f}m)"
+        )
     return 0.30, f"geofence:contained-no-name-match in {pname} (area={area:.0f}m2)"
 
 
@@ -2206,12 +2238,15 @@ class WhereAmI:
                 self.cur, cluster, topo, target,
             )
             # P18: compute geofence containment here where self.cur is in scope.
-            # Only _match_poi_class uses it; other matchers ignore via **kwargs.
+            # §P18b: now passed cluster shape (dwell/spread) so a genuine STOP inside a
+            # venue polygon with no name match still scores (containment-fire, 0.60).
             geo_score, geo_witness = _signal_geofence_membership(
                 self.cur,
                 cluster_lat=cluster.median_lat,
                 cluster_lng=cluster.median_lng,
                 target_text=getattr(target, "address", "") or "",
+                cluster_duration_s=cluster.duration_s,
+                cluster_spread_m=cluster.spread_m,
             )
             outcome = matcher(
                 cluster, matcher_topo, target,
@@ -2220,6 +2255,23 @@ class WhereAmI:
                 **({"geofence_score": geo_score, "geofence_witness": geo_witness}
                     if matcher is _match_poi_class else {}),
             )
+            # §P18b — GLOBAL geofence lift. Head 6 is ground truth for ANY address
+            # class, not just poi: previously only _match_poi_class consumed geo_score,
+            # so a mis-classed venue ("Terminal D/E" → intersection) discarded the
+            # containment fact. When the geofence is the strongest signal and clears the
+            # report floor, lift the outcome — the car physically stopped inside the
+            # venue, so it commits at the cluster centroid (the product location). Only
+            # overrides when geofence beats the class match (the `>` guard). _commits
+            # still gates on the TAD verdict; geofence-over-TAD is a deliberate follow-up.
+            if geo_score >= MIN_REPORT_THRESHOLD and geo_score > outcome.confidence:
+                outcome = replace(
+                    outcome,
+                    matched=True,
+                    confidence=geo_score,
+                    corrected_lat=cluster.median_lat,
+                    corrected_lng=cluster.median_lng,
+                    reason=f"geofence_lift[{geo_witness}]",
+                )
             per_target_outcomes.append((offer_id, location_type, outcome))
 
         # Step 6 (Reduce, Phase 2c.2 Item 3c): apply dual commit rule per
