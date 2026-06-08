@@ -131,3 +131,50 @@ def test_cluster_dataclass_carries_started_at_when_provided():
         started_at=started,
     )
     assert c.started_at == started
+
+
+def _haversine_m(lat1, lng1, lat2, lng2):
+    import math
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def test_density_peak_lands_at_knot_while_median_smears(db_cur):
+    """§P18b db_cur integration (§XIV.J — real cursor, real GROUP BY coords_to_h3,
+    NOT a mock). A synthetic ELONGATED stillness run: a sparse creep-in string
+    (8 samples ~18 m apart, speed 0.3 → in the run) plus a dense knot at the curb
+    (6 samples within ~2 m, speed 0.0). The density-peak (densest H3 cell centroid)
+    must land at the KNOT; the median (PERCENTILE_CONT) is dragged back along the
+    creep. Asserts committed-anchor (peak) ≈ knot, median off it, peak closer."""
+    drv = "test-density-peak-driver-p18b"
+    knot_lat, knot_lng = 29.99100, -95.33680
+
+    rows = []
+    # Creep-in string: 8 samples, ~18 m apart, heading toward the curb, slow-creep
+    # (0.3 mph < 0.5 → is_moving False → in the stillness run). secs-ago 14..7.
+    creep_offsets = [0.00130, 0.00114, 0.00097, 0.00081, 0.00065, 0.00049, 0.00032, 0.00016]
+    for i, off in enumerate(creep_offsets):
+        rows.append((knot_lat - off, knot_lng, 0.3, 14 - i))
+    # Dense knot: 6 samples within ~2 m (one H3 cell), stopped. secs-ago 6..1.
+    knot_jit = [0.00002, -0.00002, 0.00001, -0.00001, 0.0, 0.00002]
+    for j, jit in enumerate(knot_jit):
+        rows.append((knot_lat + jit, knot_lng + jit, 0.0, 6 - j))
+
+    for lat, lng, spd, ago in rows:
+        db_cur.execute(
+            """INSERT INTO app_private.heartbeat_log (driver_id, lat, lng, speed_mph, logged_at)
+               VALUES (%s, %s, %s, %s, NOW() - make_interval(secs => %s))""",
+            (drv, lat, lng, spd, ago),
+        )
+
+    c = detect_cluster(drv, db_cur)
+    assert c is not None, "expected a stillness cluster from the synthetic run"
+    assert c.peak_lat is not None, "density-peak must be populated"
+    peak_d = _haversine_m(c.peak_lat, c.peak_lng, knot_lat, knot_lng)
+    med_d = _haversine_m(c.median_lat, c.median_lng, knot_lat, knot_lng)
+    assert peak_d < 10, f"density-peak should land at the knot; got {peak_d:.1f} m off"
+    assert med_d > 20, f"median should smear back along the creep; got only {med_d:.1f} m off"
+    assert peak_d < med_d, f"peak ({peak_d:.1f} m) must beat median ({med_d:.1f} m) to the knot"

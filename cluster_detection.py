@@ -50,6 +50,12 @@ import logging
 # 2026-05-29 forensic). Unified here per One Arrest Period ratification.
 ARREST_DURATION_THRESHOLD_S = 5.0
 
+# §P18b venue anchor (2026-06-08): H3 resolution for the density-peak binning.
+# Res 11 ≈ 25 m edge — coarse enough to hold a ~5 s dwell of 1 Hz samples in one
+# cell, fine enough that the creep-in string fragments into sparse cells. The one
+# tunable: coarser → degenerates toward the mean; finer → GPS jitter splits the knot.
+_DENSITY_PEAK_H3_RES = 11
+
 
 # ============================================================================
 # Cluster -- immutable snapshot returned by detect_cluster()
@@ -87,6 +93,13 @@ class Cluster:
     duration_s: float
     latest: datetime
     started_at: Optional[datetime] = None
+    # §P18b venue anchor (2026-06-08): the centroid of the DENSEST coords_to_h3
+    # cell in the stillness run — the dwell "knot" (where the car sat longest),
+    # robust to the creep-in/creep-past smear that pulls the median off the curb.
+    # Used ONLY for NULL-geocode venue fires; geocoded fires keep median_lat/lng
+    # (their smear is the separate Phase-4 track). None when no run / stub Clusters.
+    peak_lat: Optional[float] = None
+    peak_lng: Optional[float] = None
 
 
 # ============================================================================
@@ -166,12 +179,37 @@ def detect_cluster(driver_id: str, cur,
                 HAVING COUNT(*) >= %s
                    AND EXTRACT(EPOCH FROM (MAX(logged_at) - MIN(logged_at))) >= %s
                    AND MAX(logged_at) >= NOW() - make_interval(secs => %s)
+            ),
+            -- §P18b venue anchor: the density-peak = centroid of the densest
+            -- coords_to_h3 cell in the run (the dwell knot), computed alongside
+            -- the median. Binning via the canonical coords_to_h3 helper (§I).
+            run_cells AS (
+                SELECT run_id, lat, lng,
+                       app_private.coords_to_h3(lat, lng, %s)::text AS cell
+                FROM labeled
+                WHERE NOT is_moving
+            ),
+            cell_counts AS (
+                SELECT run_id, cell, COUNT(*) AS cnt,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) AS peak_lat,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lng) AS peak_lng
+                FROM run_cells
+                GROUP BY run_id, cell
+            ),
+            densest_cell AS (
+                SELECT DISTINCT ON (run_id) run_id, peak_lat, peak_lng
+                FROM cell_counts
+                ORDER BY run_id, cnt DESC, cell   -- densest per run; cell tie-break = deterministic
             )
-            SELECT run_id, n, median_lat, median_lng, started_at, latest, duration_s
-            FROM stillness_runs
-            ORDER BY latest DESC
+            SELECT sr.run_id, sr.n, sr.median_lat, sr.median_lng,
+                   sr.started_at, sr.latest, sr.duration_s,
+                   dc.peak_lat, dc.peak_lng
+            FROM stillness_runs sr
+            LEFT JOIN densest_cell dc ON dc.run_id = sr.run_id
+            ORDER BY sr.latest DESC
             LIMIT 1
-        """, (driver_id, window_sec, min_samples, min_duration_s, departure_grace_s))
+        """, (driver_id, window_sec, min_samples, min_duration_s,
+              departure_grace_s, _DENSITY_PEAK_H3_RES))
         row = cur.fetchone()
         if not row or row["n"] is None:
             return None
@@ -207,6 +245,8 @@ def detect_cluster(driver_id: str, cur,
             duration_s=float(row["duration_s"]),
             latest=row["latest"],
             started_at=row["started_at"],
+            peak_lat=float(row["peak_lat"]) if row.get("peak_lat") is not None else None,
+            peak_lng=float(row["peak_lng"]) if row.get("peak_lng") is not None else None,
         )
     except Exception as e:
         logging.warning(f"[CLUSTER] detect_cluster failed: {e}")

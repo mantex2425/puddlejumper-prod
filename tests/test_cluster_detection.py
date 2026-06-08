@@ -79,15 +79,16 @@ def test_cluster_is_frozen():
 
 
 def test_cluster_field_count():
-    """Cluster has exactly 6 fields. Adding a field is a contract change that
-    should be deliberate; if this test fails after a Cluster edit, audit
-    consumers (bead_on_wire, where_am_i) for compatibility.
+    """Cluster field contract. Adding a field is a deliberate contract change;
+    if this test fails after a Cluster edit, audit consumers (bead_on_wire,
+    where_am_i, driver_heartbeat) for compatibility.
 
-    Phase E Step 6 sub-step 1a: added 'latest' field to expose MAX(logged_at)
-    that the SQL was already aggregating, for offer-anchored lookback sorting."""
+    Phase E Step 6 sub-step 1a: added 'latest' field to expose MAX(logged_at).
+    §P18b 2026-06-08: added peak_lat/peak_lng (density-peak venue anchor)."""
     import dataclasses
     field_names = {f.name for f in dataclasses.fields(Cluster)}
-    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s", "latest", "started_at"}
+    assert field_names == {"n", "median_lat", "median_lng", "spread_m", "duration_s",
+                           "latest", "started_at", "peak_lat", "peak_lng"}
 
 
 # ============================================================================
