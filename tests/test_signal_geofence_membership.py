@@ -93,8 +93,10 @@ def test_geofence_terminal_iata_inheritance_via_outer_polygon():
     assert "HOU" in witness
 
 
-def test_geofence_containment_no_metadata_returns_thirty():
-    """Containment exists but neither IATA nor fuzzy name match (no cluster shape)."""
+def test_geofence_containment_returns_commit_score():
+    """§P18b (reshaped 2026-06-08): containment with no name match is the ground-truth
+    LOCATION signal → GEOFENCE_CONTAINMENT_COMMIT_SCORE (0.60), no dwell/spread guard.
+    Whether it FIRES is the dispatch's call (NULL-geocode offers only + the §XVI.C floor)."""
     rows = [
         {"id": 999, "name": None, "name_normalized": None,
          "category": "mall", "area_m2": 10000.0, "iata": None, "icao": None},
@@ -104,50 +106,8 @@ def test_geofence_containment_no_metadata_returns_thirty():
         cur, cluster_lat=29.7, cluster_lng=-95.4,
         target_text="Some Random Office, Houston, Texas",
     )
-    assert score == 0.30, f"contained-no-name-match must score 0.30; got {score}"
-    assert "contained-no-name-match" in witness
-
-
-# --- §P18b venue track (2026-06-08): containment-fire on a genuine stop ---------
-
-_MALL_ROW = [
-    {"id": 999, "name": None, "name_normalized": None,
-     "category": "mall", "area_m2": 10000.0, "iata": None, "icao": None},
-]
-
-
-def test_geofence_containment_genuine_stop_fires():
-    """§P18b: containment + a real STOP (long dwell, tight spread) → commit score."""
-    cur = _build_cursor(list(_MALL_ROW))
-    score, witness = _signal_geofence_membership(
-        cur, cluster_lat=29.7, cluster_lng=-95.4,
-        target_text="Some Random Office, Houston, Texas",
-        cluster_duration_s=60.0, cluster_spread_m=30.0,
-    )
-    assert score == 0.60, f"genuine stop inside polygon must fire (0.60); got {score}"
-    assert "contained-genuine-stop" in witness
-
-
-def test_geofence_containment_drivethrough_short_dwell_stays_thirty():
-    """A pass-through (dwell below the floor) must NOT fire — stays 0.30."""
-    cur = _build_cursor(list(_MALL_ROW))
-    score, _ = _signal_geofence_membership(
-        cur, cluster_lat=29.7, cluster_lng=-95.4,
-        target_text="Some Random Office, Houston, Texas",
-        cluster_duration_s=10.0, cluster_spread_m=30.0,
-    )
-    assert score == 0.30, f"short-dwell pass-through must stay 0.30; got {score}"
-
-
-def test_geofence_containment_loose_spread_stays_thirty():
-    """A loose cluster (not a real stop) must NOT fire — stays 0.30."""
-    cur = _build_cursor(list(_MALL_ROW))
-    score, _ = _signal_geofence_membership(
-        cur, cluster_lat=29.7, cluster_lng=-95.4,
-        target_text="Some Random Office, Houston, Texas",
-        cluster_duration_s=120.0, cluster_spread_m=300.0,
-    )
-    assert score == 0.30, f"loose-spread cluster must stay 0.30; got {score}"
+    assert score == 0.60, f"containment must return the commit score (0.60); got {score}"
+    assert "contained" in witness
 
 
 def test_geofence_fuzzy_floor_tightened_rejects_loose_match():
