@@ -175,6 +175,10 @@ def test_density_peak_lands_at_knot_while_median_smears(db_cur):
     assert c.peak_lat is not None, "density-peak must be populated"
     peak_d = _haversine_m(c.peak_lat, c.peak_lng, knot_lat, knot_lng)
     med_d = _haversine_m(c.median_lat, c.median_lng, knot_lat, knot_lng)
-    assert peak_d < 10, f"density-peak should land at the knot; got {peak_d:.1f} m off"
+    # Tolerance = ~half a res-11 cell (~25 m across): the densest-cell centroid is
+    # only accurate to the cell, so a correct impl can sit ~half a cell off the true
+    # knot when it lands near a boundary. <20 m guards against flake; the DECISIVE
+    # claim is peak-beats-median below.
+    assert peak_d < 20, f"density-peak should land near the knot (<~half-cell); got {peak_d:.1f} m off"
     assert med_d > 20, f"median should smear back along the creep; got only {med_d:.1f} m off"
     assert peak_d < med_d, f"peak ({peak_d:.1f} m) must beat median ({med_d:.1f} m) to the knot"
