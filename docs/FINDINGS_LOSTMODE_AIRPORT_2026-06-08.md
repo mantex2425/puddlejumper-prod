@@ -186,3 +186,50 @@ misses**, visible in `./analysis/pickup_accuracy.sh`, not silent drops.
    bias (the receipt-time bias question)?
 2. Receipt latency budget for a cache-miss Places call (sync vs async fallback).
 3. Gemini review of this fix set (esp. F1 placement + the F3 None-anchor guard).
+
+## §8 VENUE TRACK — geofence-as-ground-truth (supersedes the §XVII/classifier airport framing)
+
+**The geofence already exists and is broad.** `routing.geofence_polygons` holds **2,959 polygons** —
+mall (2,104), themepark (371), arena (276), hospital (82), university (53), train_station (49),
+airport (12), terminal (10), stadium (2). Containment is computed every tick by
+`_signal_geofence_membership` (`where_am_i.py:815`, `ST_Contains`), Head 6 / P18. This is the literal
+"car is the sensor": if the cluster is inside polygon X, that's ground truth.
+
+**Two reasons it doesn't catch venue PUDOs today:**
+1. **POI-gated.** `where_am_i.py:2210` computes `geo_score` for EVERY target, but `:2220` passes it
+   **only to `_match_poi_class`** (`if matcher is _match_poi_class`). `intersection`/`single_road`/
+   `number_on_street` matchers never see it — so a mis-classed venue ("Terminal D/E" → intersection)
+   has its containment computed and discarded.
+2. **Containment-only scores 0.30 (< 0.40 floor); the 1.0 name-match almost never fires.**
+   Empirically (2026-06-08): terminal/mall polygons + their own address text all returned **0.30** —
+   even a polygon named "Terminal E" did not match "Terminal D/E", and 2,104 mall polygons are
+   unnamed. The rare 1.0 is a LOOSE fuzzy match (GBIA → "Alvin Airpark" at 0.70 — a false positive).
+   So un-gating (fix 1 alone) is necessary but **NOT sufficient** — a 0.30 signal still can't clear
+   the floor.
+
+**The fix (pure car-is-the-sensor): containment + a genuine cluster FIRES.** A real cluster (driver
+stopped — tightness + dwell) inside a venue polygon IS a PUDO at that venue. Fire it and attribute
+the live/recent offer by **time/sequence**; ignore the unreliable name-match and geocode entirely.
+This catches the whole venue class — airport terminals + the 2,104 malls + every category — because
+it stops depending on the Uber address string that is the root unreliability.
+- **Globally**, not POI-gated (fix 1: apply `geo_score`/containment to all classes).
+- **Containment + cluster clears the floor** (fix 2: the real lever — trust the polygon + the stop,
+  not the 0.30 score).
+- **Guards:** require a genuine cluster (stop, not drive-through — the main false-positive guard);
+  polygon-size sanity (1,100 m² terminal = strong; 100k m² airpark/university = weak, could be a
+  through-road); de-emphasize the fuzzy name-match.
+- **Attribution:** the polygon says "which venue"; the clock says "which offer" (time/sequence among
+  candidates in the polygon).
+
+**Reframes abandon-at-source:** do NOT abandon venue offers — keep them live so the geofence catches
+them when the car reaches the polygon. Abandon becomes the true last resort (no geocode AND never
+enters any polygon AND aged out). Pairs with F3 (geocoded offers fire on spatial).
+
+**Why this supersedes F1′/classifier:** the classifier (route "Terminal D/E" → POI) was a fight we
+couldn't win cleanly (slash vs Terminal Road vs intersection thicket). The geofence makes it moot —
+polygon containment is ground truth, address-class is irrelevant. This is the venue track; it is the
+high-value path (malls dominate Houston PUDOs), not an airport niche.
+
+**Open before drafting:** the cluster-genuineness + polygon-size guards (avoid through-road false
+positives); whether containment-fires is a confidence floor-override or a distinct commit path;
+Gemini review. Still ships AFTER F3 (the geocoded 0/5 cure, already done).
