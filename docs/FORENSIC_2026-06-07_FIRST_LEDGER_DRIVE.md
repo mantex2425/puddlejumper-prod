@@ -27,9 +27,14 @@ hot-swap branch (`dispatch.py`) required `current_offer_id == dropoff.offer_id`;
 (`current_offer_id` None) that failed → `LogAmbiguousMatch(hot_swap_without_matching_active)` →
 **fired NOTHING** → the 10470 pickup pricing observation (the product) was lost. It is not a genuine
 ambiguity (distinct legs of distinct offers). **Fixed `a80e4a3`** (Rule XV): that branch now fires
-`FireDropoffObservation + FirePickupObservation` (both cache writes) and **defers the narrative**
-(leaves `current_offer_id` untouched — never risks the queue), mirroring what §5.3 already does.
-Tests: the lost-mode (None) + third-ride (999) cases assert both observations fire (40/40 green).
+`FireDropoffObservation + FirePickupObservation` (both cache writes). **Narrative (corrected — it is
+NOT just "deferred"):** we don't force a bind (no `FirePickup`); `FirePickupObservation`'s own §XVIII
+**cold-start bind** handles `current_offer_id` correctly — it **binds when the pickup is the sole
+pickup-floor-clearer among alive-unpicked offers** (the unambiguous hot-swap case → the system
+RECOVERS the narrative / exits lost-mode), and leaves it untouched only when genuinely ambiguous.
+Recover-when-safe, never a risky forced bind. In the 10470 case 10470 is the sole pickup floor-clearer
+(10469 already picked up) → it binds. Tests: lost-mode (None) + third-ride (999) assert both
+observations fire (40/40 green).
 
 **3. Uber's TRIP estimates are accurate at scale — 10469's +63% was a genuine OUTLIER, not
 garbage-in.** Over 66 completed rides with usable odometer deltas: median actual/estimate **0.99**,

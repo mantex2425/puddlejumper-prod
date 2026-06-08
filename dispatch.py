@@ -318,14 +318,17 @@ def _dispatch_pair(
             ]
         # Different-offer pickup+dropoff, but current_offer_id does NOT match the
         # dropoff side — lost-mode (current_offer_id is None), or a third ride bound.
-        # The §5.2 NARRATIVE hot-swap can't commit (no matching active ride to confirm
-        # which ride the dropoff completes). But this is NOT a genuine ambiguity: it is a
-        # dropoff of one ride and a pickup of ANOTHER. Per Rule XV (Observation Over
-        # Narrative), fire BOTH observations — capture the pricing + geo cache writes
-        # (pickups ARE the product, §0) — and DEFER the narrative: leave current_offer_id
-        # untouched, never risking the queue on an uncommittable narrative. This recovers
-        # the lost-mode hot-swap, the dominant lost-mode multi-PUDO-at-one-stop shape
-        # (see docs/FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md). The earlier
+        # This is NOT a genuine ambiguity: it is a dropoff of one ride and a pickup of
+        # ANOTHER. Per Rule XV, fire BOTH observations — capture the pricing + geo cache
+        # writes (pickups ARE the product, §0). NOTE on the narrative: we do NOT fire a
+        # FirePickup (which would FORCE a bind); FirePickupObservation handles the
+        # narrative *correctly by itself* via its §XVIII cold-start bind — it binds
+        # current_offer_id ONLY when the pickup is the sole pickup-floor-clearer among
+        # alive-unpicked offers (the unambiguous case, which the canonical 1-dropoff+
+        # 1-pickup hot-swap is), and leaves it untouched when genuinely ambiguous. So the
+        # narrative RECOVERS-when-safe / defers-when-not — never a forced (risky) bind.
+        # Recovers the lost-mode hot-swap (the dominant lost-mode multi-PUDO-at-one-stop
+        # shape; docs/FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md). The earlier
         # LogAmbiguousMatch fail-closed here dropped the pickup observation = product loss.
         return [
             FireDropoffObservation(dropoff.offer_id),
