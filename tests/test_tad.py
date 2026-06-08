@@ -667,3 +667,44 @@ class TestTadVerdictImmutability:
         )
         with pytest.raises(Exception):
             verdicts["freeze-v"].passed = False  # type: ignore[misc]
+
+
+class TestDeferredNoAnchorF3:
+    """F3 (2026-06-08): a §5.5-deferred offer carries a NULL pickup anchor
+    (expected_pickup_distance=None). It must NOT crash _evaluate_pickup_leg's
+    odometer math, and must route to passed=None (fireable on spatial at
+    COMMIT_LOST_FLOOR) instead of being dropped. The pickup-leg evaluator is
+    reachable even when the global lost_mode flag is False (lost-mode flickers
+    intra-drive) — that is the case that pre-F3 crashed on `None - float`."""
+
+    def test_flicker_off_none_anchor_routes_passed_none_not_crash(self):
+        # Global lost_mode False, but the offer is deferred (None anchor). Pre-F3
+        # this hit `None - float(pickup_miles)` in _evaluate_pickup_leg. The guard
+        # must short-circuit to passed=None with the deferred_no_anchor label.
+        offer = _make_offer("deferred-flicker", accepted_at=NOW)
+        state = _make_state("deferred-flicker", expected_pickup_distance=None)
+        verdicts = evaluate_tad_gate(
+            cluster=_make_cluster(latest=NOW),
+            queue_offers=(offer,),
+            current_odometer=120.0,
+            per_offer_state={"deferred-flicker": state},
+            lost_mode=False,
+        )
+        v = verdicts["deferred-flicker"]
+        assert v.passed is None                                   # spatial-firing, NOT skipped
+        assert v.leg_evaluated == "pickup"
+        assert v.distance_gate["mode"] == "deferred_no_anchor"    # went through the F3 guard
+
+    def test_lost_mode_none_anchor_passed_none(self):
+        # In lost_mode the deferred offer takes _build_lost_mode_verdict (also passed=None,
+        # but via the lost_mode path) — confirms it isn't excluded to passed=False either way.
+        offer = _make_offer("deferred-lost", accepted_at=NOW)
+        state = _make_state("deferred-lost", expected_pickup_distance=None)
+        verdicts = evaluate_tad_gate(
+            cluster=_make_cluster(latest=NOW),
+            queue_offers=(offer,),
+            current_odometer=120.0,
+            per_offer_state={"deferred-lost": state},
+            lost_mode=True,
+        )
+        assert verdicts["deferred-lost"].passed is None

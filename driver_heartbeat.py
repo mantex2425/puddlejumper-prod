@@ -1184,7 +1184,8 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
             oh.actual_pickup_at,
             oh.cumulative_miles_at_pickup_fire,
             oh.pickup_exit_time,
-            oh.exit_velocity_timeout
+            oh.exit_velocity_timeout,
+            oh.expected_odometer_status
         FROM app_private.offer_history oh
         JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
         WHERE oh.id = ANY(%s::bigint[])
@@ -1194,11 +1195,19 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
     )
     out = {}
     for row in cur.fetchall():
-        # Exclude legacy rows with NULL expected_* (pre-3b.W writer).
-        if row["expected_pickup_arrival_time"] is None:
-            continue
-        if row["expected_pickup_distance"] is None:
-            continue
+        deferred = (row["expected_odometer_status"] == "deferred")
+        # Legacy pre-3b.W rows have NULL expected_* and are NOT 'deferred' — skip them (TAD
+        # then records a missing_state -> passed=False verdict). A §5.5-deferred offer ALSO
+        # has NULL pickup anchors (lost-mode receipt, 9acd504), but it is a CURRENT,
+        # spatially-matchable offer: build its state with None anchors so _evaluate_pickup_leg
+        # routes it to the lost-mode verdict (F3) rather than the offer being silently
+        # excluded -> TAD passed=False -> dispatch-skip (the 2026-06-08 0/5 cascade).
+        if not deferred:
+            if row["expected_pickup_arrival_time"] is None:
+                continue
+            if row["expected_pickup_distance"] is None:
+                continue
+        # No odometer anchor at all (odometer-absent defer / pre-writer) — can't build state.
         if row["miles_at_offer_receipt"] is None:
             continue
         out[str(row["id"])] = OfferTadState(
@@ -1206,7 +1215,11 @@ def _assemble_per_offer_state(cur, driver_id, queue_offer_ids):
             miles_at_offer_receipt=float(row["miles_at_offer_receipt"]),
             accepted_at=_to_utc(row["created_at"]),
             expected_pickup_arrival_time=_to_utc(row["expected_pickup_arrival_time"]),
-            expected_pickup_distance=float(row["expected_pickup_distance"]),
+            expected_pickup_distance=(
+                float(row["expected_pickup_distance"])
+                if row["expected_pickup_distance"] is not None
+                else None
+            ),
             actual_pickup_at=_to_utc(row["actual_pickup_at"]),
             cumulative_miles_at_pickup_fire=(
                 float(row["cumulative_miles_at_pickup_fire"])

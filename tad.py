@@ -351,8 +351,12 @@ class OfferTadState:
     offer_id: str
     miles_at_offer_receipt: float
     accepted_at: datetime
-    expected_pickup_arrival_time: datetime
-    expected_pickup_distance: float
+    # §5.5-deferred offers (lost-mode receipt, 9acd504) carry NULL pickup anchors — the
+    # odometer band is genuinely unknowable in lost-mode, but the offer is still pickup-
+    # matchable on spatial signal. Optional so the deferred state constructs; the pickup-leg
+    # evaluator guards on these being None (F3, routes to the passed=None lost-mode verdict).
+    expected_pickup_arrival_time: Optional[datetime]
+    expected_pickup_distance: Optional[float]
     actual_pickup_at: Optional[datetime]
     cumulative_miles_at_pickup_fire: Optional[float]
     pickup_exit_time: Optional[datetime]
@@ -528,6 +532,26 @@ def _evaluate_pickup_leg(
             distance_gate={
                 "mode": "missing_offer_fields",
                 "passed": True,
+                "fail_reason": None,
+            },
+            time_signal=None,
+        )
+
+    # §5.5-deferred offer: NULL pickup anchor (lost-mode receipt, 9acd504). The odometer
+    # band is genuinely unknowable in lost-mode, but the pickup is still spatially matchable
+    # — route to the lost-mode verdict (passed=None → commit at COMMIT_LOST_FLOOR on spatial
+    # signal) rather than crash on None odometer math (F3). NB lost-mode flickers intra-drive,
+    # so this branch IS reachable with the global lost_mode flag False — hence a guard here,
+    # not an assert upstream.
+    if state.expected_pickup_distance is None:
+        return TadVerdict(
+            passed=None,
+            time_boost=0.0,
+            leg_evaluated="pickup",
+            lost_mode_reason="deferred_no_anchor",
+            distance_gate={
+                "mode": "deferred_no_anchor",
+                "passed": None,
                 "fail_reason": None,
             },
             time_signal=None,
