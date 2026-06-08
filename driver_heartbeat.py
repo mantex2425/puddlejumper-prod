@@ -372,7 +372,8 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
                     fallback_lat=None, fallback_lng=None,
                     cumulative_miles=None,
                     alive_unpicked_offer_ids=frozenset(),
-                    pickup_floor_clearers=frozenset()):
+                    pickup_floor_clearers=frozenset(),
+                    nail_telemetry=None):
     """Map a dispatch Action to its DB side effect.
 
     Per dispatch.py contract:
@@ -444,6 +445,15 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             if _venue_row is not None and _venue_row["pickup_lat"] is None:
                 nail_lat, nail_lng = _peak_lat, cluster.peak_lng
                 nail_anchor = "density_peak"
+                if nail_telemetry is not None:
+                    # §P18b forensic: record the chosen anchor + both candidate
+                    # coords for the pickup_detected ledger event (measurability).
+                    nail_telemetry[str(action.offer_id)] = {
+                        "nail_anchor": nail_anchor,
+                        "nail_lat": nail_lat, "nail_lng": nail_lng,
+                        "median_lat": cluster.median_lat, "median_lng": cluster.median_lng,
+                        "peak_lat": _peak_lat, "peak_lng": cluster.peak_lng,
+                    }
 
         if isinstance(action, FirePickup):
             if nail_lat is None or nail_lng is None:
@@ -2385,6 +2395,7 @@ def post_heartbeat():
     cluster = diagnostics.cluster
     executed_actions: list = []
     dispatch_error_msg = None
+    nail_telemetry = {}  # §P18b: venue density-peak forensic, folded into pickup_detected
     for action in actions:
         executed, err = _execute_action(
             action, cur, conn, driver_id, queue, cluster,
@@ -2392,6 +2403,7 @@ def post_heartbeat():
             fallback_lat=current_lat, fallback_lng=current_lng,
             alive_unpicked_offer_ids=alive_unpicked_offer_ids,
             pickup_floor_clearers=pickup_floor_clearers,
+            nail_telemetry=nail_telemetry,
         )
         if executed:
             executed_actions.append(action)
@@ -2475,7 +2487,8 @@ def post_heartbeat():
             executed_actions=executed_actions, arrest_started_at=arrest_started_at_post,
             arrest_counter_s=arrest_counter_s_post, cluster=cluster,
             cadence_target_hz=cadence_target_hz, now=_heartbeat_now,
-            wai_per_offer_scores=_ledger_wai, bound_offer_id=current_offer_id)
+            wai_per_offer_scores=_ledger_wai, bound_offer_id=current_offer_id,
+            nail_telemetry=nail_telemetry)
         event_ledger.emit_batch(
             cur, driver_id, _ledger_events, _ledger_new_seed,
             ctx={"lat": current_lat, "lng": current_lng,

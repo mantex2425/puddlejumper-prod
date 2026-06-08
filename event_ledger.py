@@ -164,6 +164,8 @@ def gather_ledger_events(
                                  # attached to matcher_eval so the WHY is in the ledger
     bound_offer_id=None,         # the live bound ride (snapshot's reconciled hint); names the
                                  # X in an ambiguous_third_ride_suppressed event (measurability)
+    nail_telemetry=None,         # §P18b: {offer_id: {nail_anchor, nail_lat/lng, median/peak}}
+                                 # for venue density-peak fires → pickup_detected enrichment
 ):
     """PURE: assemble (events, new_seed) from in-hand tick state. No DB I/O — the probe
     already ran; this only classifies + assembles. The orchestrator emits the events and
@@ -212,7 +214,7 @@ def gather_ledger_events(
                                        if wai_per_offer_scores else None)})
 
         # PUDO events from executed actions (action class -> event)
-        for ev in _pudo_events(executed_actions, bound_offer_id):
+        for ev in _pudo_events(executed_actions, bound_offer_id, nail_telemetry):
             events.append(ev)
 
     # keyframe decision (counter reset-to-0, NOT mod-50; keyframe ordered LAST in batch)
@@ -240,18 +242,38 @@ def gather_ledger_events(
     return events, new_seed
 
 
-def _pudo_events(executed_actions, bound_offer_id=None):
+def _pudo_events(executed_actions, bound_offer_id=None, nail_telemetry=None):
     """Map executed dispatch actions to PUDO ledger events. Imported lazily (action
-    classes live in dispatch.py — verified, not assumed)."""
+    classes live in dispatch.py — verified, not assumed). nail_telemetry (§P18b):
+    {offer_id: {nail_anchor, nail_lat, nail_lng, median_lat/lng, peak_lat/lng}} for
+    venue density-peak fires — folds the chosen anchor + both candidates into the
+    pickup_detected payload and pins the event at the committed nail."""
     from dispatch import (
         FirePickup, FireDropoff, FirePickupObservation, FireDropoffObservation, ClearNarrative,
         LogAmbiguousMatch,
     )
+    nail_telemetry = nail_telemetry or {}
     out = []
     for a in (executed_actions or []):
         if isinstance(a, (FirePickup, FirePickupObservation)):
-            out.append({"event_type": "pickup_detected", "offer_id": str(getattr(a, "offer_id", None)),
-                        "payload": {"observation": isinstance(a, FirePickupObservation)}})
+            _oid = str(getattr(a, "offer_id", None))
+            _ev = {"event_type": "pickup_detected", "offer_id": _oid,
+                   "payload": {"observation": isinstance(a, FirePickupObservation)}}
+            _tel = nail_telemetry.get(_oid)
+            if _tel is not None:
+                # §P18b: venue density-peak fire — pin the event at the NAIL (the peak,
+                # via the per-event lat/lng override in emit_event), and record the
+                # chosen anchor + BOTH candidate coords so the accuracy metric can
+                # distinguish working peak-selection from all-median-fallback and
+                # measure the peak↔median offset.
+                _ev["lat"] = _tel.get("nail_lat")
+                _ev["lng"] = _tel.get("nail_lng")
+                _ev["payload"].update({
+                    "nail_anchor": _tel.get("nail_anchor"),
+                    "median_lat": _tel.get("median_lat"), "median_lng": _tel.get("median_lng"),
+                    "peak_lat": _tel.get("peak_lat"), "peak_lng": _tel.get("peak_lng"),
+                })
+            out.append(_ev)
         elif isinstance(a, (FireDropoff, FireDropoffObservation)):
             out.append({"event_type": "dropoff_detected", "offer_id": str(getattr(a, "offer_id", None)),
                         "payload": {"observation": isinstance(a, FireDropoffObservation)}})
@@ -282,11 +304,17 @@ def emit_event(cur, driver_id, ev, *, event_time=None, lat=None, lng=None,
     moment the human marked the PUDO, consistent with how tap-vs-detection has been analyzed."""
     def _j(v):
         return json.dumps(v) if v is not None else None
+    # §P18b: per-event lat/lng override. The batch ctx carries the heartbeat
+    # position, applied to every event — but a pickup_detected must record the
+    # COMMITTED NAIL (the density-peak for a venue fire), not the heartbeat point.
+    # No existing event sets ev["lat"], so this is inert except where set explicitly.
+    _lat = ev.get("lat", lat)
+    _lng = ev.get("lng", lng)
     cols = ["driver_id", "event_type", "offer_id", "cluster_id", "arrest_id",
             "lat", "lng", "gps_accuracy_m", "cumulative_miles",
             "queue_snapshot", "queue_delta", "matcher_snapshot", "payload", "summary"]
     vals = [driver_id, ev["event_type"], ev.get("offer_id"), cluster_id, arrest_id,
-            lat, lng, gps_accuracy_m, cumulative_miles,
+            _lat, _lng, gps_accuracy_m, cumulative_miles,
             _j(ev.get("queue_snapshot")), _j(ev.get("queue_delta")),
             _j(ev.get("matcher_snapshot")), _j(ev.get("payload")), ev.get("summary")]
     if event_time is not None:        # else the column DEFAULT now() (§II) applies

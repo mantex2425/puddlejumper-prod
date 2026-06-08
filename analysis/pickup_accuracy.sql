@@ -98,3 +98,58 @@ SELECT to_char(t.event_time AT TIME ZONE 'America/Chicago', 'HH24:MI:SS') AS tap
            FROM fires f WHERE t.lat IS NOT NULL)::numeric, 0) AS nearest_fire_m,
     t.had_queue
 FROM taps t ORDER BY t.event_time;
+
+-- ============================================================================
+-- §P18b VENUE DENSITY-PEAK validation (2026-06-08). For venue (NULL-geocode)
+-- fires that committed at the density-peak, did the peak move the pinned point
+-- off the smeared run-median and TOWARD the curb (your manual tap)? Reads the
+-- pickup_detected payload (nail_anchor / median_* / peak_*) the §P18b forensic emits.
+--   venue_peak_fires      — # density-peak commits this drive (0 on a drive WITH
+--                           terminal/mall pickups ⇒ all-fallback: peak never selected,
+--                           investigate detect_cluster.peak, NOT a tuning knob)
+--   peak_vs_median_m      — median offset the peak corrected (how far the median smeared)
+--   moved_toward_curb     — # where the peak landed closer to the nearest tap than the
+--                           median would have (the decisive "fixed it" count)
+-- ============================================================================
+WITH drive AS (
+    SELECT COALESCE(
+        (SELECT max(event_time) FROM app_private.event_ledger
+         WHERE driver_id = :drv AND event_type = 'drive_start_marker'),
+        NOW() - INTERVAL '12 hours') AS since
+),
+vtaps AS (
+    SELECT el.lat, el.lng FROM app_private.event_ledger el, drive
+    WHERE el.driver_id = :drv AND el.event_type = 'ground_truth_tap'
+      AND el.payload->>'label' = 'pickup' AND el.event_time >= drive.since
+      AND el.lat IS NOT NULL
+),
+venue AS (
+    SELECT el.lat AS peak_lat, el.lng AS peak_lng,
+           (el.payload->>'median_lat')::float AS median_lat,
+           (el.payload->>'median_lng')::float AS median_lng
+    FROM app_private.event_ledger el, drive
+    WHERE el.driver_id = :drv AND el.event_type = 'pickup_detected'
+      AND el.event_time >= drive.since
+      AND el.payload->>'nail_anchor' = 'density_peak'
+      AND el.lat IS NOT NULL AND (el.payload->>'median_lat') IS NOT NULL
+),
+scored AS (
+    SELECT
+      2*6371000*asin(sqrt(power(sin(radians(v.peak_lat - v.median_lat)/2),2)
+        + cos(radians(v.median_lat))*cos(radians(v.peak_lat))
+          *power(sin(radians(v.peak_lng - v.median_lng)/2),2)))            AS peak_vs_median_m,
+      (SELECT MIN(2*6371000*asin(sqrt(power(sin(radians(t.lat - v.peak_lat)/2),2)
+        + cos(radians(v.peak_lat))*cos(radians(t.lat))
+          *power(sin(radians(t.lng - v.peak_lng)/2),2)))) FROM vtaps t)    AS peak_to_tap_m,
+      (SELECT MIN(2*6371000*asin(sqrt(power(sin(radians(t.lat - v.median_lat)/2),2)
+        + cos(radians(v.median_lat))*cos(radians(t.lat))
+          *power(sin(radians(t.lng - v.median_lng)/2),2)))) FROM vtaps t)  AS median_to_tap_m
+    FROM venue v
+)
+SELECT
+    count(*)                                                               AS venue_peak_fires,
+    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY peak_vs_median_m)::numeric, 1)   AS peak_vs_median_m,
+    count(*) FILTER (WHERE peak_to_tap_m < median_to_tap_m)                 AS moved_toward_curb,
+    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY peak_to_tap_m)::numeric, 1)      AS peak_to_tap_median_m,
+    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY median_to_tap_m)::numeric, 1)    AS median_to_tap_median_m
+FROM scored;

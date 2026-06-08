@@ -109,6 +109,55 @@ def test_gather_matcher_inflection_on_tier_change():
     assert me[0]["payload"]["wai_per_offer_scores"] == wai
 
 
+def test_gather_pickup_detected_carries_venue_density_peak_telemetry():
+    """§P18b: a venue density-peak fire folds the chosen anchor + BOTH candidate
+    coords into the pickup_detected payload, and pins the event at the NAIL (the
+    peak) so the accuracy metric reads the committed point — not the heartbeat ctx."""
+    from dispatch import FirePickup
+    now = datetime.datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc)
+    prior = {"last_queue_snapshot_ids": ["9001"], "last_matcher_snapshot": {},
+             "keyframe_count": 0, "last_keyframe_at": now.isoformat()}
+    tel = {"9001": {"nail_anchor": "density_peak",
+                    "nail_lat": 29.99100, "nail_lng": -95.33680,
+                    "median_lat": 29.99076, "median_lng": -95.33680,
+                    "peak_lat": 29.99100, "peak_lng": -95.33680}}
+    events, _ = EL.gather_ledger_events(
+        prior_seed=prior, current_ids={"9001"}, current_status={}, reap_rows={},
+        reference_time=now, cumulative_miles=100.0, effective_last_move=now,
+        matches=[], executed_actions=[FirePickup(offer_id="9001")],
+        arrest_started_at=None, arrest_counter_s=None, cluster=None,
+        cadence_target_hz=1.0, now=now, nail_telemetry=tel,
+    )
+    pd = [e for e in events if e["event_type"] == "pickup_detected"]
+    assert len(pd) == 1
+    # pinned at the NAIL (the peak), via the per-event lat/lng override
+    assert pd[0]["lat"] == 29.99100 and pd[0]["lng"] == -95.33680
+    p = pd[0]["payload"]
+    assert p["nail_anchor"] == "density_peak"           # explicit choice (not inferred)
+    assert p["peak_lat"] == 29.99100                     # both candidates recorded
+    assert p["median_lat"] == 29.99076
+
+
+def test_gather_pickup_detected_without_telemetry_has_no_anchor_fields():
+    """A geocoded (non-venue) fire — no telemetry — keeps the bare pickup_detected
+    payload (no nail_anchor), so 'all-fallback' is distinguishable by absence."""
+    from dispatch import FirePickup
+    now = datetime.datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc)
+    prior = {"last_queue_snapshot_ids": ["9001"], "last_matcher_snapshot": {},
+             "keyframe_count": 0, "last_keyframe_at": now.isoformat()}
+    events, _ = EL.gather_ledger_events(
+        prior_seed=prior, current_ids={"9001"}, current_status={}, reap_rows={},
+        reference_time=now, cumulative_miles=100.0, effective_last_move=now,
+        matches=[], executed_actions=[FirePickup(offer_id="9001")],
+        arrest_started_at=None, arrest_counter_s=None, cluster=None,
+        cadence_target_hz=1.0, now=now,   # no nail_telemetry
+    )
+    pd = [e for e in events if e["event_type"] == "pickup_detected"]
+    assert len(pd) == 1
+    assert "nail_anchor" not in pd[0]["payload"]
+    assert pd[0].get("lat") is None   # falls back to the batch ctx at emit
+
+
 def test_gather_emits_ambiguous_third_ride_suppressed():
     """Refinement-2: the §5.2 live-third-ride suppression is LOGGED, not silent — gather
     turns LogAmbiguousMatch(ambiguous_third_ride_suppressed) into a measurable ledger event
