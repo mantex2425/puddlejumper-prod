@@ -160,6 +160,8 @@ def gather_ledger_events(
     cluster,               # diagnostics.cluster (or None)
     cadence_target_hz,     # this tick's cadence
     now,                   # reference_time again (UTC); kept explicit for keyframe stamping
+    wai_per_offer_scores=None,   # the per-offer signal breakdown (already a Python obj),
+                                 # attached to matcher_eval so the WHY is in the ledger
 ):
     """PURE: assemble (events, new_seed) from in-hand tick state. No DB I/O — the probe
     already ran; this only classifies + assembles. The orchestrator emits the events and
@@ -201,7 +203,11 @@ def gather_ledger_events(
                 or matcher_snap["confidence_tier"] != prior_matcher.get("confidence_tier")):
             events.append({"event_type": "matcher_eval",
                            "offer_id": matcher_snap["top_candidate_offer_id"],
-                           "matcher_snapshot": matcher_snap})
+                           "matcher_snapshot": matcher_snap,
+                           # the per-offer signal breakdown — the matcher's REASONING, not
+                           # just its verdict (this is what reveals a multi-match/hot-swap).
+                           "payload": ({"wai_per_offer_scores": wai_per_offer_scores}
+                                       if wai_per_offer_scores else None)})
 
         # PUDO events from executed actions (action class -> event)
         for ev in _pudo_events(executed_actions):

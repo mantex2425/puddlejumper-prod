@@ -2427,6 +2427,11 @@ def post_heartbeat():
         _ledger_current_status = {
             oid: {"picked_up": (oid == _ledger_post_offer_id)} for oid in queue_offer_ids
         }
+        # the matcher's REASONING (per-offer signal breakdown) for the matcher_eval event —
+        # _build_wai_per_offer_scores returns a JSON STRING, so parse to an object so the
+        # ledger payload nests cleanly instead of double-encoding.
+        _ledger_wai = _build_wai_per_offer_scores(diagnostics)
+        _ledger_wai = json.loads(_ledger_wai) if _ledger_wai else None
         _ledger_events, _ledger_new_seed = event_ledger.gather_ledger_events(
             prior_seed=_ledger_prior_seed, current_ids=queue_offer_ids,
             current_status=_ledger_current_status, reap_rows=_ledger_reap_rows,
@@ -2434,7 +2439,8 @@ def post_heartbeat():
             effective_last_move=effective_last_move, matches=matches,
             executed_actions=executed_actions, arrest_started_at=arrest_started_at_post,
             arrest_counter_s=arrest_counter_s_post, cluster=cluster,
-            cadence_target_hz=cadence_target_hz, now=_heartbeat_now)
+            cadence_target_hz=cadence_target_hz, now=_heartbeat_now,
+            wai_per_offer_scores=_ledger_wai)
         event_ledger.emit_batch(
             cur, driver_id, _ledger_events, _ledger_new_seed,
             ctx={"lat": current_lat, "lng": current_lng,

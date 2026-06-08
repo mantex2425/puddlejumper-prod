@@ -94,15 +94,19 @@ def test_gather_matcher_inflection_on_tier_change():
              "last_matcher_snapshot": {"top_candidate_offer_id": "9001", "confidence_tier": "below"},
              "keyframe_count": 0, "last_keyframe_at": now.isoformat()}
     matches = [SimpleNamespace(offer_id="9001", confidence=0.55)]   # below -> floor tier cross
+    wai = [{"offer_id": "9001", "leg": "pickup", "confidence": 0.55,
+            "signals": {"proximity": 0.68}}]
     events, _ = EL.gather_ledger_events(
         prior_seed=prior, current_ids={"9001"}, current_status={}, reap_rows={},
         reference_time=now, cumulative_miles=100.0, effective_last_move=now,
         matches=matches, executed_actions=[], arrest_started_at=None, arrest_counter_s=None,
-        cluster=None, cadence_target_hz=1.0, now=now,
+        cluster=None, cadence_target_hz=1.0, now=now, wai_per_offer_scores=wai,
     )
     me = [e for e in events if e["event_type"] == "matcher_eval"]
     assert len(me) == 1
     assert me[0]["matcher_snapshot"]["confidence_tier"] == "floor"
+    # the WHY (per-offer reasoning) rides on the matcher_eval payload
+    assert me[0]["payload"]["wai_per_offer_scores"] == wai
 
 
 # =============================================================================
@@ -244,10 +248,11 @@ def test_ground_truth_tap_event_time_override_and_context(db_cur, test_driver_id
         {"event_type": "ground_truth_tap", "offer_id": "9001",
          "queue_snapshot": {"ids": ["9001", "9002"]},
          "payload": {"label": "pickup", "label_time_ms": 1, "label_id": 42}},
-        event_time=tap_time,
+        event_time=tap_time, cumulative_miles=144.5, lat=30.14489, lng=-95.47345,
     )
     db_cur.execute(
-        "SELECT event_time, event_type, offer_id, queue_snapshot, payload "
+        "SELECT event_time, event_type, offer_id, queue_snapshot, payload, "
+        "       cumulative_miles, lat, lng "
         "FROM app_private.event_ledger WHERE driver_id=%s AND event_type='ground_truth_tap'",
         (test_driver_id,),
     )
@@ -256,6 +261,9 @@ def test_ground_truth_tap_event_time_override_and_context(db_cur, test_driver_id
     assert r["offer_id"] == "9001"
     assert r["queue_snapshot"]["ids"] == ["9001", "9002"]
     assert r["payload"]["label"] == "pickup"
+    # the ground-truth odometer + position AT the tap (the band-measurement anchor)
+    assert float(r["cumulative_miles"]) == 144.5
+    assert round(float(r["lat"]), 5) == 30.14489
 
 
 # =============================================================================

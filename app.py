@@ -301,6 +301,15 @@ def contest_label():
                     (uid,),
                 )
                 _dts = cur.fetchone()
+                # latest telemetry (odometer + position) at the tap — the ground-truth
+                # anchor that makes "was a band reap premature vs where I actually was" a
+                # pure ledger read (reap_odo vs tap_odo), no heartbeat_log join needed.
+                cur.execute(
+                    "SELECT cumulative_miles, lat, lng FROM app_private.heartbeat_log "
+                    "WHERE driver_id = %s ORDER BY logged_at DESC LIMIT 1",
+                    (uid,),
+                )
+                _hb = cur.fetchone()
                 event_ledger.emit_event(
                     cur, uid,
                     {"event_type": "ground_truth_tap",
@@ -309,6 +318,9 @@ def contest_label():
                      "payload": {"label": label, "label_time_ms": label_time_ms,
                                  "label_id": row["label_id"]}},
                     event_time=label_dt,
+                    cumulative_miles=(_hb or {}).get("cumulative_miles"),
+                    lat=(_hb or {}).get("lat"),
+                    lng=(_hb or {}).get("lng"),
                 )
                 cur.execute("RELEASE SAVEPOINT tap_ledger")
             except Exception as _le:
