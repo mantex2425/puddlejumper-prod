@@ -34,7 +34,7 @@ deferred offer in *normal* mode (lost-mode flicker off)?
 
 ---
 
-## Piece 2 — Venue track §P18b: geofence as ground-truth  [COMMITTED `c2cbfdc`, NOT deployed; BEING RESHAPED]
+## Piece 2 — Venue track §P18b: geofence as ground-truth  [COMMITTED `c2cbfdc`→reshaped `699e1fa`, NOT deployed]
 **Motive.** `routing.geofence_polygons` holds **2,959 venue polygons** (2,104 malls + airports/
 terminals/arenas/hospitals/universities/train_stations). `_signal_geofence_membership`
 (`where_am_i.py:815`) computes ground-truth `ST_Contains` every tick — but it was (1) **POI-gated**
@@ -43,25 +43,28 @@ it) and (2) containment-only scored **0.30** (< 0.40 floor); the 1.0 name-match 
 (empirically even a "Terminal E" polygon didn't match "Terminal D/E"; malls unnamed; the rare 1.0 is
 a loose fuzzy FP — GBIA→"Alvin Airpark" at 0.70).
 
-**What shipped in `c2cbfdc`:** containment-fire on a genuine stop (dwell≥45s AND spread≤75m → 0.60),
-a global dispatch lift (apply `geo_score` to all classes, not just `_match_poi_class`), fuzzy floor
-0.6→0.8.
+**`c2cbfdc` first cut (SUPERSEDED):** containment-fire on a genuine stop (dwell≥45s AND spread≤75m
+→ 0.60) + a global dispatch lift + fuzzy floor 0.6→0.8.
 
-**RESHAPE PENDING (Andrew + Claude review, post-commit) — do NOT review `c2cbfdc` as final:**
-- **Andrew's frame:** the geofence is *just another WAI head* (a ground-truth *location* signal);
-  the **proven PUDO logic — arrest physics (§0.D.4) + commit — detects the EVENT.** The geofence
-  identifies "we're at venue X," not "a PUDO happened."
-- So **the dwell/spread guard is being REMOVED** — it re-implemented arrest detection inside the
-  geofence (redundant) and was mis-calibrated (a 60–120s Houston light clears 45s at ~0 spread → FP
-  at the mall centroid; and it would reject fast curbside pickups that **horny mode** —
-  `driver_heartbeat.py:2389`, 1 Hz when WAI≥0.40 & speed<5 mph — exists to catch).
-- **Open design question for Gemini (the crux):** with the dwell guard gone, containment-only is
-  0.30 (< floor) so it won't fire; raising it re-exposes the light FP, because **containment is
-  coarser than geocode-proximity** — a light *inside* a venue polygon looks like "at the venue,"
-  and in lost-mode there's no odometer band to filter it. What is the right **light-discriminator a
-  light can't fake**? Candidates: off-wire / left-the-road-into-the-venue; the offer-attribution
-  requirement (only fires if a venue offer is in the queue); polygon-size weighting. **This is the
-  one unresolved design fork.**
+**RESHAPED in `699e1fa` (review THIS, not `c2cbfdc`).** Andrew's frame: the geofence is *just another
+WAI head* — a ground-truth *location* signal; the **arrest physics (§0.D.4) + commit detect the
+EVENT**; horny mode (`driver_heartbeat.py:2389`, 1 Hz when WAI≥0.40 & speed<5 mph) catches fast
+PUDOs. So:
+- **Dwell/spread guard REMOVED** (it re-implemented arrest detection and mis-fired — a 60–120s
+  Houston light clears 45s at ~0 spread; it also rejected fast curbside pickups). Constants + params
+  deleted. `_signal_geofence_membership` containment-with-no-name-match now returns the commit score
+  (0.60) directly — the location signal.
+- **Lift gated on `target.lat is None`** (the dispatch). The geofence rescues ONLY offers that lack
+  a geocode (venue offers with no spatial signal); geocoded offers use proximity and are never
+  hijacked. This fixes a **real flaw in `c2cbfdc`**: the `>`-guard alone would lift any *low-confidence*
+  offer — including a far *geocoded* one — to a venue centroid when the car is in a polygon
+  (containment says where the CAR is, not which OFFER belongs there).
+- **LIGHT-FP TAIL (the remaining open call for Gemini, NOT a hard gate):** containment can't
+  distinguish a venue PUDO-stop from a stopped-at-a-light-inside-the-polygon. Deliberately NOT
+  guarded by a speculative discriminator — **off-wire breaks on-road airport curbside pickups; dwell
+  overlaps light cycles.** Instead bounded by NULL-geocode + arrest + offer presence and **monitored
+  via the `geofence_lift[...]` reason in the ledger.** Question for Gemini: accept the monitored tail,
+  or is there a discriminator that doesn't break the airport case?
 
 ---
 
@@ -113,8 +116,8 @@ false-positive class? (5) The two open calls above.
 
 ## Outstanding tasks
 - [ ] **Gemini review** of Piece 3 (§XVI.C) + the two open calls (wallet, uniform floor) → then deploy.
-- [ ] **Geofence-head reshape** (Piece 2): remove the dwell guard; decide the light-discriminator
-      (off-wire / offer-attribution / polygon-size). Blocked on the design fork above.
+- [x] **Geofence-head reshape** (Piece 2) — DONE in `699e1fa` (dwell guard removed; NULL-geocode
+      gate; containment→0.60). REMAINING for Gemini: ratify the light-FP tail (monitor vs discriminator).
 - [ ] **Fuzzy-band forensic** (Flag 3): what fired in the 0.6–0.8 geofence-fuzzy band recently.
 - [ ] **F2** (abandon-at-source): **DROPPED** — conflicts with keeping venue offers live, and F3 +
       geofence + §XVI.C neutralize the phantom; the 4h ceiling reaps it. (Recorded for the trail.)
