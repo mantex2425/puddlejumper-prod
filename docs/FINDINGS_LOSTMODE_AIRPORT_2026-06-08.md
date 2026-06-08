@@ -115,14 +115,27 @@ track (geofence + classifier nudge), AFTER the lost-mode 0/5 fix ships.
 **SHIP NOW (the actual 0/5 cure): F2 (abandon-the-unresolvable → cures the cascade) + F3 (A backstop).**
 F1 dead, F1′/airports deferred to the follow-up track, F4 follow-up.
 
-**(F2) Abandon-the-unresolvable. [cure for the cascade + honest miss]** If a coordinate cannot be
-resolved after geocode **and** §XVII, mark the offer `expected_odometer_status='abandoned'` (§9.9
-flag) instead of leaving it live-NULL. An abandoned offer is excluded from
+**(F2) Abandon-the-unresolvable. [cure for the cascade + honest miss]**
+**Trigger — SEAM RESOLVED 2026-06-08 (do NOT abandon at receipt):** F1 is dead, so **§XVII does not
+run at receipt** — at receipt only the plain geocode has executed. Abandoning a NULL-geocode offer at
+receipt would kill airport offers *before* scoring-time §XVII + the geofence ever get their shot,
+reopening conceding-airports. So F2 abandons a NULL-geocode offer **only after it has aged out
+unmatched**: it stayed live (giving every scoring tick's §XVII + geofence a chance to match it at a
+cluster), was never matched/resolved, and lingered past a staleness bound → only *then* mark
+`expected_odometer_status='abandoned'` (§9.9 flag). An abandoned offer is excluded from
 `_get_alive_unpicked_offer_ids` (`LIVE_OFFER_PREDICATE_SQL:265`,
-`expected_odometer_status IS DISTINCT FROM 'abandoned'`), so it **can't pin lost-mode or be a
-deferral peer** — the phantom 10550, abandoned, stops the cascade. This is the *correct* form of the
-old "#1 phantom-exclusion" (no NULL-geocode criterion, no airport conflation; it uses the existing
-abandoned-exclusion). These abandons are **counted as misses** in the pickup-accuracy metric.
+`expected_odometer_status IS DISTINCT FROM 'abandoned'`), so once aged out it **can't pin lost-mode or
+be a deferral peer** — the phantom 10550 stops the cascade. (No NULL-geocode-at-receipt criterion, no
+airport conflation.) These abandons are **counted as misses** in the pickup-accuracy metric.
+**Couplings to settle at draft time:** (i) the staleness bound must exceed the longest plausible
+airport deadhead (don't abandon a real airport offer the driver is still driving to); (ii) NULL-geocode
+*alone* cannot distinguish a phantom from a real airport offer — *that is exactly why* the trigger is
+aged-out-unmatched, not receipt-NULL; (iii) F3 already lets deferred-but-*geocoded* offers fire during
+any pin, so F2's bound only governs *how long* a phantom keeps us at the higher lost-mode floor (0.55)
+rather than whether geocoded offers fire; (iv) actually *catching* airports (vs merely not abandoning
+them prematurely) needs the follow-up classifier nudge so terminal offers reach the POI matcher +
+geofence before they age out — until that ships, airports still age out → abandoned, which is the
+accepted-5% case, not a regression.
 
 **(F3) A — spatial firing for deferred-but-geocoded offers. [backstop]** A legitimately deferred
 offer that *does* have a geocode should still fire on a strong cluster. Route it to the lost-mode
