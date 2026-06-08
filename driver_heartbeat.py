@@ -2440,7 +2440,7 @@ def post_heartbeat():
             executed_actions=executed_actions, arrest_started_at=arrest_started_at_post,
             arrest_counter_s=arrest_counter_s_post, cluster=cluster,
             cadence_target_hz=cadence_target_hz, now=_heartbeat_now,
-            wai_per_offer_scores=_ledger_wai)
+            wai_per_offer_scores=_ledger_wai, bound_offer_id=current_offer_id)
         event_ledger.emit_batch(
             cur, driver_id, _ledger_events, _ledger_new_seed,
             ctx={"lat": current_lat, "lng": current_lng,

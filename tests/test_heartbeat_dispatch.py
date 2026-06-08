@@ -201,22 +201,29 @@ def test_case_d_implicit_cancel_then_pickup():
             [FireDropoff("1"), FirePickup("2")],
             id="52_hot_swap_clean",
         ),
-        # §5.2 hot-swap -- no matching active ride (lost-mode current=None, or a third
-        # ride bound). NOT a genuine ambiguity (dropoff of one ride + pickup of another):
-        # per Rule XV fire BOTH observations (capture pricing+geo caches, §0), DEFER the
-        # narrative (current_offer_id untouched). The §0-critical lost-mode hot-swap fix
-        # (recovers product pickups; see FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md).
+        # §5.2 hot-swap -- NO live bound ride: current=None OR a ghost/stale pointer that
+        # snapshot's L-19 reconciliation (711e10b) has ALREADY collapsed to None. (The ghost
+        # path is exercised end-to-end in test_hot_swap_ghost_pointer_behaves_like_none below;
+        # at this dispatch boundary a ghost is indistinguishable from None, by construction.)
+        # NOT a genuine ambiguity: per Rule XV fire BOTH observations (caches, §0); narrative
+        # recovers-when-safe via FirePickupObservation's §XVIII cold-start bind (not forced).
         pytest.param(
             _M_HOT_SWAP,
             None,
             [FireDropoffObservation("1"), FirePickupObservation("2")],
-            id="52_hot_swap_lost_mode_fires_both_observations",
+            id="52_hot_swap_no_live_bound_fires_both_observations",
         ),
+        # §5.2 hot-swap -- a GENUINE LIVE third ride is bound (current="999" is in the queue
+        # and NOT definitively dead — snapshot returns non-None ONLY for that case, so this
+        # is NOT a ghost). Clobbering a live ride corrupts the queue (§0), so fail closed:
+        # preserve X, SUPPRESS the A/B fires, and LOG it so the ledger can measure
+        # real-vs-ghost. NB LogAmbiguousMatch makes NO state change → current_offer_id intact.
         pytest.param(
             _M_HOT_SWAP,
             "999",
-            [FireDropoffObservation("1"), FirePickupObservation("2")],
-            id="52_hot_swap_third_ride_active_fires_both_observations",
+            [LogAmbiguousMatch(candidates=tuple(_M_HOT_SWAP),
+                               reason="ambiguous_third_ride_suppressed")],
+            id="52_hot_swap_live_third_ride_suppressed",
         ),
         # §5.3 two-pickups case removed in Phase 2 (2026-05-13). Old
         # assertion was LogAmbiguousMatch(reason="two_pickups"); new
@@ -244,6 +251,38 @@ def test_case_e_disambiguation(matches, current_offer_id, expected):
         queue[current_offer_id] = _meta()
     actions = dispatch(matches, current_offer_id, queue)
     assert actions == expected
+
+
+def test_hot_swap_ghost_pointer_behaves_like_none():
+    """Refinement-1 end-to-end: a definitively-dead (ghost) bound pointer is collapsed to
+    None by snapshot()'s L-19 reconciliation (711e10b, _is_offer_definitively_dead), so the
+    §5.2 hot-swap then fires BOTH observations exactly as the bare-None case — the
+    stale-pointer hot-swap is NOT lost (the bug that a bare `is None` gate would have masked
+    only if snapshot did NOT reconcile; this proves it does)."""
+    from unittest.mock import MagicMock
+    from driver_queue import DriverQueue
+
+    cur = MagicMock()
+    # snapshot() issues, in order: _project_offers (fetchall) -> _select_bound_offer_id
+    # (fetchone) -> _is_offer_definitively_dead (fetchone). Wire a DEAD bound "X" (dropoff
+    # fired) that is NOT in the live queue.
+    fetchall_returns = [[]]  # empty live queue -> X not present (L-19 violation)
+    fetchone_returns = [
+        {"current_offer_id": "X"},
+        {"actual_dropoff_at": datetime(2026, 6, 7, tzinfo=timezone.utc),
+         "created_at": datetime(2026, 6, 6, tzinfo=timezone.utc)},
+    ]
+    cur.fetchall.side_effect = lambda: fetchall_returns.pop(0) if fetchall_returns else []
+    cur.fetchone.side_effect = lambda: fetchone_returns.pop(0) if fetchone_returns else None
+
+    q = DriverQueue("driver-x", target_spec_builder=lambda *a, **kw: None)
+    snap = q.snapshot(cur, current_cumulative_miles=None, last_odometer_move_at=None)
+    # ghost reconciled to None -> dispatch sees None, not a live third ride (refinement 1).
+    assert snap.bound_offer_id is None
+
+    actions = dispatch(_M_HOT_SWAP, snap.bound_offer_id,
+                       {m.offer_id: _meta() for m in _M_HOT_SWAP})
+    assert actions == [FireDropoffObservation("1"), FirePickupObservation("2")]
 
 
 # ============================================================================

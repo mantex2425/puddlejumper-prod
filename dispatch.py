@@ -316,24 +316,35 @@ def _dispatch_pair(
                 FireDropoff(dropoff.offer_id),
                 FirePickup(pickup.offer_id),
             ]
-        # Different-offer pickup+dropoff, but current_offer_id does NOT match the
-        # dropoff side — lost-mode (current_offer_id is None), or a third ride bound.
-        # This is NOT a genuine ambiguity: it is a dropoff of one ride and a pickup of
-        # ANOTHER. Per Rule XV, fire BOTH observations — capture the pricing + geo cache
-        # writes (pickups ARE the product, §0). NOTE on the narrative: we do NOT fire a
-        # FirePickup (which would FORCE a bind); FirePickupObservation handles the
-        # narrative *correctly by itself* via its §XVIII cold-start bind — it binds
-        # current_offer_id ONLY when the pickup is the sole pickup-floor-clearer among
-        # alive-unpicked offers (the unambiguous case, which the canonical 1-dropoff+
-        # 1-pickup hot-swap is), and leaves it untouched when genuinely ambiguous. So the
-        # narrative RECOVERS-when-safe / defers-when-not — never a forced (risky) bind.
-        # Recovers the lost-mode hot-swap (the dominant lost-mode multi-PUDO-at-one-stop
-        # shape; docs/FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md). The earlier
-        # LogAmbiguousMatch fail-closed here dropped the pickup observation = product loss.
-        return [
-            FireDropoffObservation(dropoff.offer_id),
-            FirePickupObservation(pickup.offer_id),
-        ]
+        if current_offer_id is None:
+            # No LIVE bound ride — None OR a confirmed ghost/stale pointer. NB:
+            # `current_offer_id` is snapshot's RECONCILED bound hint: DriverQueue.snapshot()
+            # (L-19, 711e10b) has already collapsed a not-in-queue pointer to None, clearing
+            # the DB pointer when X is definitively dead per _is_offer_definitively_dead. So
+            # `is None` means "None OR confirmed-ghost" BY CONSTRUCTION — no hand-rolled
+            # staleness check. NOT a genuine ambiguity: a dropoff of one ride + a pickup of
+            # ANOTHER. Per Rule XV fire BOTH observations (capture pricing+geo caches, §0).
+            # Narrative: we do NOT force a bind; FirePickupObservation's §XVIII cold-start
+            # bind recovers current_offer_id only when the pickup is the sole floor-clearer
+            # among alive-unpicked (unambiguous → binds; else defers). Recovers BOTH the
+            # lost-mode hot-swap AND the stale-pointer hot-swap.
+            # docs/FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md.
+            return [
+                FireDropoffObservation(dropoff.offer_id),
+                FirePickupObservation(pickup.offer_id),
+            ]
+        # current_offer_id is a GENUINE live third ride: snapshot returned it non-None, so X
+        # is IN the live queue and not definitively dead (X ∉ {dropoff, pickup}). A cluster
+        # matching a dropoff + pickup of two OTHER offers while bound to a live X is *evidence
+        # X may be wrong* — but X is not dead, so we MUST NOT clobber it (queue integrity, §0:
+        # rather miss than corrupt the queue). Fail closed: preserve X, SUPPRESS the A/B fires.
+        # We LOG it (ambiguous_third_ride_suppressed) — NOT a silent drop — so the ledger can
+        # measure how often third-ride-bound is real vs a not-yet-reconciled ghost (the parked
+        # question, made measurable the same way the band question now is).
+        return [LogAmbiguousMatch(
+            candidates=tuple(matches),
+            reason="ambiguous_third_ride_suppressed",
+        )]
 
     # §XIV.I asymmetric ambiguity: pickups vs dropoffs handled differently.
     if types == {"pickup"}:

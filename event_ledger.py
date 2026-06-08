@@ -162,6 +162,8 @@ def gather_ledger_events(
     now,                   # reference_time again (UTC); kept explicit for keyframe stamping
     wai_per_offer_scores=None,   # the per-offer signal breakdown (already a Python obj),
                                  # attached to matcher_eval so the WHY is in the ledger
+    bound_offer_id=None,         # the live bound ride (snapshot's reconciled hint); names the
+                                 # X in an ambiguous_third_ride_suppressed event (measurability)
 ):
     """PURE: assemble (events, new_seed) from in-hand tick state. No DB I/O — the probe
     already ran; this only classifies + assembles. The orchestrator emits the events and
@@ -210,7 +212,7 @@ def gather_ledger_events(
                                        if wai_per_offer_scores else None)})
 
         # PUDO events from executed actions (action class -> event)
-        for ev in _pudo_events(executed_actions):
+        for ev in _pudo_events(executed_actions, bound_offer_id):
             events.append(ev)
 
     # keyframe decision (counter reset-to-0, NOT mod-50; keyframe ordered LAST in batch)
@@ -238,11 +240,12 @@ def gather_ledger_events(
     return events, new_seed
 
 
-def _pudo_events(executed_actions):
+def _pudo_events(executed_actions, bound_offer_id=None):
     """Map executed dispatch actions to PUDO ledger events. Imported lazily (action
     classes live in dispatch.py — verified, not assumed)."""
     from dispatch import (
         FirePickup, FireDropoff, FirePickupObservation, FireDropoffObservation, ClearNarrative,
+        LogAmbiguousMatch,
     )
     out = []
     for a in (executed_actions or []):
@@ -254,6 +257,19 @@ def _pudo_events(executed_actions):
                         "payload": {"observation": isinstance(a, FireDropoffObservation)}})
         elif isinstance(a, ClearNarrative):
             out.append({"event_type": "unbind", "offer_id": str(getattr(a, "offer_id", None))})
+        elif (isinstance(a, LogAmbiguousMatch)
+                and getattr(a, "reason", None) == "ambiguous_third_ride_suppressed"):
+            # §5.2 hot-swap suppressed because a GENUINE live third ride (X) was bound — A/B
+            # fires withheld to protect the queue. Logged (NOT silent) so the parked question
+            # "how often is third-ride-bound real vs a not-yet-reconciled ghost" is measurable:
+            # offer_id = X (the preserved ride); payload lists the suppressed dropoff+pickup.
+            out.append({"event_type": "ambiguous_third_ride_suppressed",
+                        "offer_id": (str(bound_offer_id) if bound_offer_id is not None else None),
+                        "payload": {"bound_offer_id": (str(bound_offer_id) if bound_offer_id is not None else None),
+                                    "suppressed_candidates": [
+                                        {"offer_id": str(getattr(c, "offer_id", None)),
+                                         "leg": getattr(c, "location_type", None)}
+                                        for c in getattr(a, "candidates", ()) or ()]}})
     return out
 
 

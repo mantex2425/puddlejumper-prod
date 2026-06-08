@@ -109,6 +109,34 @@ def test_gather_matcher_inflection_on_tier_change():
     assert me[0]["payload"]["wai_per_offer_scores"] == wai
 
 
+def test_gather_emits_ambiguous_third_ride_suppressed():
+    """Refinement-2: the §5.2 live-third-ride suppression is LOGGED, not silent — gather
+    turns LogAmbiguousMatch(ambiguous_third_ride_suppressed) into a measurable ledger event
+    naming the preserved X (offer_id) + the suppressed dropoff/pickup candidates, so the
+    parked question 'how often is third-ride-bound real vs ghost' is countable from drives."""
+    from dispatch import LogAmbiguousMatch
+    now = datetime.datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
+    prior = {"last_queue_snapshot_ids": ["X"],
+             "last_matcher_snapshot": {"top_candidate_offer_id": None, "confidence_tier": "below"},
+             "keyframe_count": 0, "last_keyframe_at": now.isoformat()}
+    action = LogAmbiguousMatch(
+        candidates=(SimpleNamespace(offer_id="A", location_type="dropoff"),
+                    SimpleNamespace(offer_id="B", location_type="pickup")),
+        reason="ambiguous_third_ride_suppressed")
+    events, _ = EL.gather_ledger_events(
+        prior_seed=prior, current_ids={"X"}, current_status={}, reap_rows={},
+        reference_time=now, cumulative_miles=100.0, effective_last_move=now,
+        matches=[], executed_actions=[action], arrest_started_at=None, arrest_counter_s=None,
+        cluster=None, cadence_target_hz=1.0, now=now, bound_offer_id="X",
+    )
+    sup = [e for e in events if e["event_type"] == "ambiguous_third_ride_suppressed"]
+    assert len(sup) == 1
+    assert sup[0]["offer_id"] == "X"                       # the preserved live ride
+    assert sup[0]["payload"]["bound_offer_id"] == "X"
+    cands = {(c["offer_id"], c["leg"]) for c in sup[0]["payload"]["suppressed_candidates"]}
+    assert cands == {("A", "dropoff"), ("B", "pickup")}    # the withheld fires
+
+
 # =============================================================================
 # LIVE-PG: clause-mapping / drift-pin (the anti-drift guard)
 # =============================================================================
