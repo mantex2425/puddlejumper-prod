@@ -421,8 +421,29 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
     """
     nail_lat = cluster.median_lat if cluster else fallback_lat
     nail_lng = cluster.median_lng if cluster else fallback_lng
+    nail_anchor = "median"  # §P18b: which anchor this fire committed at (for the ledger)
 
     try:
+        # §P18b venue anchor: a NULL-geocode (venue) PICKUP commits at the density-
+        # peak (dwell knot), not the run median — the median smears off-curb along
+        # the creep-in vector on elongated venue stops, poisoning the pickup-centric
+        # Price Radar IDW. Geocoded pickups keep the median (broader fire-smear =
+        # the separate Phase-4 track). Covers BOTH FirePickup and its lost-mode
+        # demotion FirePickupObservation (nail_lat is shared here). Gated on
+        # peak_lat being present (a real detect_cluster result) so it's inert for
+        # stub-cluster unit tests, and the lookup runs only for venue-candidate
+        # pickup fires. None-guard (not assert): peak None → keep the median.
+        if (cluster is not None and cluster.peak_lat is not None
+                and isinstance(action, (FirePickup, FirePickupObservation))):
+            cur.execute(
+                "SELECT pickup_lat FROM app_private.offer_history WHERE id = %s::bigint",
+                (action.offer_id,),
+            )
+            _venue_row = cur.fetchone()
+            if _venue_row is not None and _venue_row["pickup_lat"] is None:
+                nail_lat, nail_lng = cluster.peak_lat, cluster.peak_lng
+                nail_anchor = "density_peak"
+
         if isinstance(action, FirePickup):
             if nail_lat is None or nail_lng is None:
                 # Defensive guard — heartbeat path supplies cluster, manual
