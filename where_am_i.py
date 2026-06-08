@@ -1845,9 +1845,11 @@ def _commits(outcome, verdict) -> bool:
             already compensates for broken narrative; POI further corroborates
             when available.
 
-    verdict.passed is False is unreachable here — Step 5 skips dispatch for
-    those offers, so per_target_outcomes never contains them. Defensive
-    fall-through returns False.
+      4. verdict.passed is False (TAD narrative DISAGREES — band overshoot):
+            §XVI.C amendment (2026-05-22) — TAD is advisory, not a veto. Ground
+            truth wins: commit if (confidence + lift) >= COMMIT_LOST_FLOOR (0.55),
+            same stricter floor as Lost Mode. Was a hard skip (return False) pre-
+            amendment — that veto caused the stacked-offer false-negative.
     """
     if not outcome.matched:
         return False
@@ -1863,11 +1865,20 @@ def _commits(outcome, verdict) -> bool:
     if verdict.passed is True:
         # Normal Mode: TAD's three-signal corroboration is sufficient.
         return conf >= COMMIT_NORMAL_FLOOR
-    if verdict.passed is None:
-        # Lost Mode: stricter floor compensates for broken narrative.
-        return conf >= COMMIT_LOST_FLOOR
-    # passed=False: defensive (Step 5 already skipped this offer)
-    return False
+    # §XVI.C (amended 2026-05-22): TAD is ADVISORY, not a veto — "when [TAD and
+    # ground truth] disagree, ground truth wins" (CANONICAL_RULES §XVI.C:1055).
+    # Both lost-mode (passed=None, no narrative) and a disagreeing narrative
+    # (passed=False, band overshoot) mean "TAD narrative untrustworthy" → the
+    # stricter floor, NOT a hard skip. A strong ground-truth signal (geofence
+    # containment / strong WAI) commits despite TAD's caution. This removes the
+    # pre-amendment veto that produced the stacked-offer false-negative
+    # (§XVI.C:1046: "WAI confidence cleared but its TAD gate blocked, causing the
+    # observation to be missed").
+    # OPEN FOR GEMINI: §XVI.C:1057 says lost-mode commits at WAI>=0.40 (uniform),
+    # not 0.55. The 0.55 retained here is the conservative pre-existing strictness;
+    # whether to collapse passed=None/False to a uniform 0.40 is the remaining
+    # canon-alignment call (deferred — needs the over-fire risk weighed).
+    return conf >= COMMIT_LOST_FLOOR
 
 
 def classify_commit_rule(outcome, verdict) -> str:
@@ -1883,7 +1894,9 @@ def classify_commit_rule(outcome, verdict) -> str:
       "normal_floor_with_poi_lift"— verdict.passed=True, POI lifted match over floor
       "lost_floor"                — verdict.passed=None, conf >= 0.55, no POI lift
       "lost_floor_with_poi_lift"  — verdict.passed=None, POI lifted match over floor
-      "unknown"                   — defensive (verdict.passed=False; unreachable)
+      "narrative_disagree_floor"  — verdict.passed=False (§XVI.C: NOT vetoed; commits
+                                    at the 0.55 floor when ground truth is strong)
+      "narrative_disagree_floor_with_poi_lift" — passed=False, POI lifted over the floor
 
     NOT a decision function — _commits() owns the decision. This labels the
     decision after the fact for forensic queries like "how often does POI lift
@@ -1897,7 +1910,8 @@ def classify_commit_rule(outcome, verdict) -> str:
         return "normal_floor_with_poi_lift" if poi_lifted else "normal_floor"
     if verdict.passed is None:
         return "lost_floor_with_poi_lift" if poi_lifted else "lost_floor"
-    return "unknown"
+    # §XVI.C: passed=False is no longer vetoed — it commits at the stricter floor.
+    return "narrative_disagree_floor_with_poi_lift" if poi_lifted else "narrative_disagree_floor"
 
 
 class WhereAmI:
@@ -2200,20 +2214,21 @@ class WhereAmI:
             )
 
         # Step 5 (Evaluate): run per-class matcher against each candidate.
-        # TAD-failed offers (verdict.passed is False) are skipped here — no
-        # spatial scoring, no Google API spend (Bible Rule 1, the wallet gate).
+        # §XVI.C (amended 2026-05-22): TAD is NOT a gate — "all heartbeats with
+        # live offers advance to candidate evaluation regardless of TAD verdict"
+        # (CANONICAL_RULES §XVI.C:1089). The pre-amendment "TAD bouncer" that
+        # skipped verdict.passed=False offers here is REMOVED: it caused the
+        # stacked-offer false-negative (§XVI.C:1046) and blocked ground-truth
+        # (geofence / strong-WAI) commits. _commits() now applies the stricter
+        # COMMIT_LOST_FLOOR to passed=False rather than vetoing — ground truth wins.
+        # WALLET NOTE (Bible Rule 1, flagged for Gemini): this now scores
+        # passed=False offers too. The expensive §XVII semantic lookup is
+        # cache-first (365-day TTL) so marginal Google spend is bounded, but the
+        # wallet-gate-vs-§XVI.C tension is a deliberate canon-vs-canon call to ratify.
         # Defensive logging on unknown address_class — alerts to upstream
         # geocoding drift without polluting the match logic.
         per_target_outcomes = []
         for target, location_type, offer_id in candidates:
-            # TAD bouncer skip: when verdicts dict is populated and verdict
-            # for this offer says passed=False, skip entirely. passed=True
-            # and passed=None both proceed to spatial scoring (Lost Mode
-            # still scores; Step 6 applies stricter rule).
-            if tad_verdicts:
-                verdict = tad_verdicts.get(offer_id)
-                if verdict is not None and verdict.passed is False:
-                    continue
             matcher = _CLASS_DISPATCH.get(target.address_class)
             if matcher is None:
                 log.warning(

@@ -2554,6 +2554,23 @@ class TestCommitsHelper:
         # POI lift insufficient if confidence too far below floor
         assert _commits(_make_outcome(confidence=0.40, poi_type_match=True), verdict) is False
 
+    def test_xvi_c_passed_false_not_vetoed_commits_at_lost_floor(self):
+        from where_am_i import _commits, COMMIT_LOST_FLOOR
+        # §XVI.C (2026-05-22): passed=False is NO LONGER a hard veto. TAD is
+        # advisory; ground truth wins — commit at the stricter floor (0.55), same
+        # as lost-mode (narrative untrustworthy, but not vetoed).
+        verdict = _make_verdict(passed=False)
+        assert COMMIT_LOST_FLOOR == 0.55
+        # Strong ground truth (>= 0.55) commits despite TAD disagreeing.
+        assert _commits(_make_outcome(confidence=0.60, poi_type_match=None), verdict) is True
+        assert _commits(_make_outcome(confidence=0.55, poi_type_match=None), verdict) is True
+        # Below the stricter floor -> still no commit (not a wrong fire).
+        assert _commits(_make_outcome(confidence=0.54, poi_type_match=None), verdict) is False
+        # POI lift applies: 0.46 + 0.10 = 0.56 >= 0.55.
+        assert _commits(_make_outcome(confidence=0.46, poi_type_match=True), verdict) is True
+        # Unmatched never commits regardless of verdict.
+        assert _commits(_make_outcome(matched=False, confidence=0.99), verdict) is False
+
 
 class TestClassifyCommitRule:
     """Pure-function tests for classify_commit_rule() — Fix B labels (2026-05-11)."""
@@ -2591,12 +2608,14 @@ class TestClassifyCommitRule:
         assert classify_commit_rule(_make_outcome(confidence=0.60, poi_type_match=True), verdict) == "lost_floor_with_poi_lift"
         assert classify_commit_rule(_make_outcome(confidence=0.46, poi_type_match=True), verdict) == "lost_floor_with_poi_lift"
 
-    def test_unknown_when_passed_is_false(self):
+    def test_narrative_disagree_floor_when_passed_is_false(self):
         from where_am_i import classify_commit_rule
-        # Defensive: passed=False shouldn't reach classify_commit_rule in
-        # production (Step 5 skips dispatch), but if it does, label as unknown.
+        # §XVI.C (2026-05-22): passed=False is no longer vetoed/unreachable — TAD
+        # is advisory, ground truth wins. It commits at the stricter floor and is
+        # labeled narrative_disagree_floor (POI-lifted variant when poi_type_match).
         verdict = _make_verdict(passed=False)
-        assert classify_commit_rule(_make_outcome(confidence=0.95), verdict) == "unknown"
+        assert classify_commit_rule(_make_outcome(confidence=0.95, poi_type_match=None), verdict) == "narrative_disagree_floor"
+        assert classify_commit_rule(_make_outcome(confidence=0.95, poi_type_match=True), verdict) == "narrative_disagree_floor_with_poi_lift"
 
     def test_classify_matches_commits_decision(self):
         """Cross-check: every classification corresponds to a True _commits result.
@@ -2707,8 +2726,11 @@ class TestItem3DualCommitRule:
         # Diagnostics carry the verdicts dict for forensic JSONB serialization
         assert diag.tad_verdicts == fake_verdicts
 
-    def test_step_5_skips_dispatch_for_passed_false_verdict(self):
-        """passed=False verdict -> per-class matcher NOT invoked for that offer."""
+    def test_xvi_c_passed_false_now_scored_and_commits(self):
+        """§XVI.C (2026-05-22): the TAD bouncer is REMOVED — a passed=False offer
+        IS scored (matcher invoked) and commits when ground truth is strong
+        (WAI >= COMMIT_LOST_FLOOR). Was: bouncer skipped it entirely, the
+        stacked-offer false-negative (CANONICAL_RULES §XVI.C:1046)."""
         cluster = self._build_cluster()
         topo = self._build_topo()
         wai = _wai_with_fakes(cluster, topo)
@@ -2746,12 +2768,13 @@ class TestItem3DualCommitRule:
                 current_odometer=1.5,
             )
 
-        # Matcher NOT called: TAD bouncer skipped the offer entirely
-        assert len(matcher_calls) == 0, (
-            f"Matcher was called {len(matcher_calls)} times; expected 0 for passed=False verdict"
+        # §XVI.C: matcher IS invoked now (no bouncer) ...
+        assert len(matcher_calls) == 1, (
+            f"Matcher called {len(matcher_calls)} times; expected 1 (§XVI.C removed the bouncer)"
         )
-        # No matches produced
-        assert matches == []
+        # ... and a strong-WAI (0.99) passed=False offer commits — ground truth wins.
+        assert len(matches) == 1
+        assert matches[0].offer_id == offer.offer_id
         # Forensic context still carries the verdict for the JSONB blob
         assert diag.tad_verdicts == fake_verdicts
 
