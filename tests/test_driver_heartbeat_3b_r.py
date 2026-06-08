@@ -85,6 +85,8 @@ def _row(**overrides):
         "cumulative_miles_at_pickup_fire": None,
         "pickup_exit_time": None,
         "exit_velocity_timeout": False,
+        "expected_odometer_status": "active",  # F3: _assemble reads this; 'deferred' builds
+                                               # a None-anchor state instead of excluding.
     }
     base.update(overrides)
     return base
@@ -223,6 +225,21 @@ class TestAssemblePerOfferState:
         result = _assemble_per_offer_state(cur, "driver-x", [7770, 7771])
         assert "7770" not in result
         assert "7771" in result
+
+    def test_deferred_offer_null_anchors_is_built_not_excluded_f3(self):
+        """F3: a §5.5-deferred offer has NULL expected_* but is a CURRENT,
+        spatially-matchable offer — it must be BUILT (with None anchors), not
+        excluded like a legacy row, so _evaluate_pickup_leg can route it to the
+        passed=None lost-mode verdict instead of TAD passed=False -> dispatch-skip."""
+        cur = _mock_cursor(rows=[
+            _row(id=7780, expected_odometer_status="deferred",
+                 expected_pickup_arrival_time=None, expected_pickup_distance=None),
+        ])
+        result = _assemble_per_offer_state(cur, "driver-x", [7780])
+        assert "7780" in result                                    # built, NOT excluded
+        assert result["7780"].expected_pickup_distance is None     # None anchor preserved
+        assert result["7780"].expected_pickup_arrival_time is None
+        assert result["7780"].miles_at_offer_receipt == 145.5      # odometer anchor still set
 
     def test_naive_timestamps_get_utc_attached_defensively(self):
         """psycopg2 connection-config drift defense (Q5 ratification)."""
