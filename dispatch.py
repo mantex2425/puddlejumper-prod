@@ -316,13 +316,21 @@ def _dispatch_pair(
                 FireDropoff(dropoff.offer_id),
                 FirePickup(pickup.offer_id),
             ]
-        # Different-offer pickup+dropoff but current_offer_id doesn't match
-        # the dropoff side. §5.2 assumes current_offer_id == dropoff.offer_id;
-        # this shape is unenumerated. Fail closed.
-        return [LogAmbiguousMatch(
-            candidates=tuple(matches),
-            reason="hot_swap_without_matching_active",
-        )]
+        # Different-offer pickup+dropoff, but current_offer_id does NOT match the
+        # dropoff side — lost-mode (current_offer_id is None), or a third ride bound.
+        # The §5.2 NARRATIVE hot-swap can't commit (no matching active ride to confirm
+        # which ride the dropoff completes). But this is NOT a genuine ambiguity: it is a
+        # dropoff of one ride and a pickup of ANOTHER. Per Rule XV (Observation Over
+        # Narrative), fire BOTH observations — capture the pricing + geo cache writes
+        # (pickups ARE the product, §0) — and DEFER the narrative: leave current_offer_id
+        # untouched, never risking the queue on an uncommittable narrative. This recovers
+        # the lost-mode hot-swap, the dominant lost-mode multi-PUDO-at-one-stop shape
+        # (see docs/FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md). The earlier
+        # LogAmbiguousMatch fail-closed here dropped the pickup observation = product loss.
+        return [
+            FireDropoffObservation(dropoff.offer_id),
+            FirePickupObservation(pickup.offer_id),
+        ]
 
     # §XIV.I asymmetric ambiguity: pickups vs dropoffs handled differently.
     if types == {"pickup"}:

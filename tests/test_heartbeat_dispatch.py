@@ -201,15 +201,22 @@ def test_case_d_implicit_cancel_then_pickup():
             [FireDropoff("1"), FirePickup("2")],
             id="52_hot_swap_clean",
         ),
-        # §5.2 hot-swap -- current matches neither side. Unenumerated.
+        # §5.2 hot-swap -- no matching active ride (lost-mode current=None, or a third
+        # ride bound). NOT a genuine ambiguity (dropoff of one ride + pickup of another):
+        # per Rule XV fire BOTH observations (capture pricing+geo caches, §0), DEFER the
+        # narrative (current_offer_id untouched). The §0-critical lost-mode hot-swap fix
+        # (recovers product pickups; see FORENSIC_2026-06-07_FIRST_LEDGER_DRIVE.md).
+        pytest.param(
+            _M_HOT_SWAP,
+            None,
+            [FireDropoffObservation("1"), FirePickupObservation("2")],
+            id="52_hot_swap_lost_mode_fires_both_observations",
+        ),
         pytest.param(
             _M_HOT_SWAP,
             "999",
-            [LogAmbiguousMatch(
-                candidates=tuple(_M_HOT_SWAP),
-                reason="hot_swap_without_matching_active",
-            )],
-            id="52_hot_swap_broken_fail_closed",
+            [FireDropoffObservation("1"), FirePickupObservation("2")],
+            id="52_hot_swap_third_ride_active_fires_both_observations",
         ),
         # §5.3 two-pickups case removed in Phase 2 (2026-05-13). Old
         # assertion was LogAmbiguousMatch(reason="two_pickups"); new
