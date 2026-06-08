@@ -433,7 +433,8 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
         # peak_lat being present (a real detect_cluster result) so it's inert for
         # stub-cluster unit tests, and the lookup runs only for venue-candidate
         # pickup fires. None-guard (not assert): peak None → keep the median.
-        if (cluster is not None and cluster.peak_lat is not None
+        _peak_lat = getattr(cluster, "peak_lat", None) if cluster is not None else None
+        if (_peak_lat is not None
                 and isinstance(action, (FirePickup, FirePickupObservation))):
             cur.execute(
                 "SELECT pickup_lat FROM app_private.offer_history WHERE id = %s::bigint",
@@ -441,7 +442,7 @@ def _execute_action(action, cur, conn, driver_id, queue, cluster=None,
             )
             _venue_row = cur.fetchone()
             if _venue_row is not None and _venue_row["pickup_lat"] is None:
-                nail_lat, nail_lng = cluster.peak_lat, cluster.peak_lng
+                nail_lat, nail_lng = _peak_lat, cluster.peak_lng
                 nail_anchor = "density_peak"
 
         if isinstance(action, FirePickup):
