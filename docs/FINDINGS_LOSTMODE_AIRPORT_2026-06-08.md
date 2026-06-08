@@ -81,13 +81,39 @@ never solved on the pickup leg.**
 
 ## §4 The fix set
 
-**(F1) Move §XVII into the receipt geocode path as a NULL-fallback. [primary — catches airports]**
-`plain geocode → if NULL, get_anchors_for_text(offer_text, bias) → store coordinate → if still NULL,
-abandon`. Catches airport terminals (Terminal D/E → searchText → coordinate → normal spatial match)
-and makes abandon an honest last resort. **Verified:** §XVII is cache-bounded (365-day TTL, API on
-miss only); leg-agnostic (resolves pickup terminals). **Before drafting confirm:** (i) receipt
-latency budget for a cache-miss Places call (or make it async); (ii) the receipt-time *bias* (driver
-location, wide radius) resolves a not-yet-reached terminal — one live `searchText` test.
+**(F1) Move §XVII into the receipt geocode path — KILLED by the live test (2026-06-08).**
+`get_anchors_for_text("Terminal D/E, Departures: Zone 5E")` returns **n=0 from a 45 km bias**, n=1
+("George Bush Intercontinental Airport", `dist_m=0`) only from a bias AT IAH. "Terminal D/E" is
+ambiguous without proximity, and the 50 km *soft* bias can't surface it from afar. So §XVII is
+**inherently scoring-time** — it resolves the venue the driver is *at* (cluster bias), not a
+not-yet-reached terminal at receipt. Receipt-time §XVII yields nothing. **Do not pursue F1.**
+
+**(F1′) Airport fix, revised: classifier→POI + stay-in-normal-mode (no receipt §XVII).**
+Airports are catchable via **scoring-time** §XVII, in **normal mode**:
+  1. **Classifier routes "Terminal D/E" → `poi`** (not `intersection`), so `_match_poi_class`/§XVII
+     runs. This is the hard part (the collision thicket — candidate-a dead, reorder breaks "Terminal
+     Road"). Options: a targeted heuristic (a `/`-disjunction with single-letter parts → POI), or
+     accept some airport pickups in the 5% via F2.
+  2. **F2 keeps us in normal mode** (abandon the phantom → lost-mode clears → floor 0.40). The live
+     test showed §XVII resolves the **airport centroid (~0.50** at a terminal ~500 m out), which
+     clears the **normal** floor (0.40) but **not** the lost-mode floor (0.55). So normal-mode is
+     required for the ~0.50 centroid to fire.
+  3. Then scoring-time §XVII fires the airport pickup. No receipt coordinate needed.
+
+**Airport mechanism is the GEOFENCE, not precise-terminal resolution (Andrew, 2026-06-08).**
+`_match_poi_class` takes `geofence_score`/`geofence_witness` — a cluster-in-airport-polygon signal.
+So an airport PUDO is identified by "you're inside the IAH geofence," NOT by resolving "Terminal D/E"
+to a point. BUT the geofence lives *inside the POI matcher*, so it shares the same classifier gate:
+on 10471 the offer was classed `intersection` → POI matcher (geofence + §XVII) never ran. So the
+airport fix is the **light** version: get airport offers *to the POI matcher* (a small classifier
+nudge so terminal addresses route to `poi`), then geofence + §XVII catch the at-airport PUDO.
+**Decision: do NOT abandon every airport PUDO** (the geofence catches them once they reach the POI
+matcher) and do NOT rabbit-hole precise-terminal classification. **95% accepts that some airport
+pickups won't be perfect; it does not accept conceding the whole class.** Airports = a follow-up
+track (geofence + classifier nudge), AFTER the lost-mode 0/5 fix ships.
+
+**SHIP NOW (the actual 0/5 cure): F2 (abandon-the-unresolvable → cures the cascade) + F3 (A backstop).**
+F1 dead, F1′/airports deferred to the follow-up track, F4 follow-up.
 
 **(F2) Abandon-the-unresolvable. [cure for the cascade + honest miss]** If a coordinate cannot be
 resolved after geocode **and** §XVII, mark the offer `expected_odometer_status='abandoned'` (§9.9
