@@ -257,9 +257,17 @@ def _apply_dsi_decision(cur, uid, ep, basic_result):
         (DSI_MODE_TRADITIONAL, uid),
     )
     s = cur.fetchone() or {}
-    personal_dsi = compute_personal_dsi(
-        ep.get("effective_hourly_rate"), ep.get("dollars_per_mile"), s.get("cost_per_mile")
-    )
+    # The /decisions request does NOT carry the Uber card rates (only the community harvest
+    # path does). The SQL engine's computed hourlyRate/dollarsPerMile are always present and
+    # match the community surface (both ~ fare/time gross), so fall back to them when the card
+    # rates are absent — otherwise Personal DSI is silently null and DSI_ACTIVE no-ops.
+    ehr = ep.get("effective_hourly_rate")
+    if ehr is None:
+        ehr = basic_result.get("hourlyRate")
+    dpm = ep.get("dollars_per_mile")
+    if dpm is None:
+        dpm = basic_result.get("dollarsPerMile")
+    personal_dsi = compute_personal_dsi(ehr, dpm, s.get("cost_per_mile"))
     local_market_dsi = interpolate_area_dsi(cur, ep.get("current_lat"), ep.get("current_lng"))
     return _dsi_verdict(personal_dsi, local_market_dsi,
                         s.get("decision_mode") or DSI_MODE_TRADITIONAL, basic_result)
