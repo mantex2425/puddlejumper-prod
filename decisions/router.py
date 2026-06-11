@@ -270,6 +270,10 @@ def parse_request(p, uid):
         "ride_type": ride_type, "is_surge": is_surge,
         "is_priority": is_priority, "is_reserve": is_reserve,
         "mode_name": mode_name, "market_name": market_name,
+        # Card rates (Android-computed from the Uber card) — the SAME inputs the community
+        # DSI surface uses; threaded through for the §6 Personal-DSI comparison in engine.py.
+        "effective_hourly_rate": float(p["hourlyRate"]) if p.get("hourlyRate") is not None else None,
+        "dollars_per_mile": float(p["dollarsPerMile"]) if p.get("dollarsPerMile") is not None else None,
     }
 
 

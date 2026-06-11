@@ -168,9 +168,99 @@ def run_decision_engine(cur, conn, uid, params):
         "thresholdSource":  row["threshold_source"],
     }
 
+    # ── DSI verdict override (spec §6) — per-driver opt-in, SQL engine UNTOUCHED ──
+    # decision_engine_v2 above produced the verdict + rates. When the driver has opted
+    # into Drive Score Index decisions (driver_settings_new.settings.dsi_decision_enabled),
+    # OVERRIDE the verdict with the §6 comparison (Personal DSI >= Local Market DSI),
+    # preserving the SQL verdict as legacyVerdict. Flag OFF (the default) = traditional
+    # $/hr & $/mi, unchanged. Best-effort: any failure keeps the SQL verdict.
+    try:
+        basic_result.update(_apply_dsi_decision(cur, uid, ep, basic_result))
+    except Exception as _dsi_err:
+        logging.warning(f"[DSI] override skipped (SQL verdict kept): {_dsi_err}")
+
     # Stash raw trace for log_decision (piggybacks on ep dict)
     ep["_raw_trace"]      = row.get("trace_data") or {}
     ep["_arc_band_trace"] = arc_band_trace
 
     return basic_result, arc_band_trace, ep
+
+
+# ======================================================================
+# DSI (Drive Score Index) verdict override — spec §6
+# ======================================================================
+# Threshold below which the radar-less fallback declines (spec §4 interim).
+DSI_FALLBACK_THRESHOLD = 22.0
+
+
+# Three driver-selectable decision modes (UserPreferences -> settings.decision_mode):
+DSI_MODE_TRADITIONAL   = "TRADITIONAL"        # $/hr & $/mi only (SQL verdict; DSI hidden)
+DSI_MODE_OBSERVATIONAL = "DSI_OBSERVATIONAL"  # SQL verdict, but DSI numbers shown
+DSI_MODE_ACTIVE        = "DSI_ACTIVE"          # DSI makes the call
+
+
+def _dsi_verdict(personal_dsi, local_market_dsi, decision_mode, sql_result):
+    """Pure §6 decision logic (no I/O — unit-testable).
+
+    `decision_mode` is the driver's choice: TRADITIONAL, DSI_OBSERVATIONAL, or DSI_ACTIVE.
+    ALWAYS returns DSI telemetry (personalDsi / localMarketDsi / legacyVerdict /
+    decisionMode) so the client can show the numbers in OBSERVATIONAL/ACTIVE and the
+    backend can measure DSI vs the SQL engine in every mode. Overrides verdict/reason ONLY
+    in DSI_ACTIVE (and only when personal_dsi is computable):
+        Personal DSI >= Local Market DSI -> ACCEPT, else DECLINE.
+    No local-market data -> graceful fallback to the §4 interim absolute threshold.
+
+    SWITCH-MODE COHERENCE: a DSI ACCEPT means "take THIS ride", so it CLEARS any
+    switchToMode / switchToMarketId the SQL engine attached to its (now-overridden)
+    decline — otherwise the client would see "accept + go switch markets". A DSI DECLINE
+    leaves the SQL's reposition advice intact (decline + reposition is coherent).
+    """
+    out = {
+        "personalDsi":    round(personal_dsi, 1) if personal_dsi is not None else None,
+        "localMarketDsi": round(local_market_dsi, 1) if local_market_dsi is not None else None,
+        "legacyVerdict":  sql_result.get("verdict"),
+        "decisionMode":   decision_mode,
+    }
+    # Only DSI_ACTIVE overrides the verdict; TRADITIONAL and DSI_OBSERVATIONAL keep the SQL
+    # verdict (telemetry above still flows, so the client can display it / we can measure).
+    if decision_mode != DSI_MODE_ACTIVE or personal_dsi is None:
+        return out
+
+    if local_market_dsi is not None:
+        accept = personal_dsi >= local_market_dsi
+        out["reason"] = (f"Drive Score {personal_dsi:.1f} "
+                         f"{'>=' if accept else '<'} local market {local_market_dsi:.1f}")
+    else:
+        accept = personal_dsi >= DSI_FALLBACK_THRESHOLD
+        out["reason"] = (f"Drive Score {personal_dsi:.1f} vs threshold "
+                         f"{DSI_FALLBACK_THRESHOLD:.0f} (no local market data)")
+    out["verdict"] = "ACCEPT" if accept else "DECLINE"
+    if accept:
+        # take THIS ride -> suppress any market/mode switch tied to the SQL's decline
+        out["switchToMode"] = None
+        out["switchToMarketId"] = None
+    return out
+
+
+def _apply_dsi_decision(cur, uid, ep, basic_result):
+    """Read the driver's cost_per_mile + decision_mode, compute Personal DSI (card rates +
+    driver cost) and Local Market DSI (time-aware community radar at the driver's location),
+    then apply _dsi_verdict. Never touches the SQL decision engine. cost_per_mile is READ
+    from settings (NULL-strict downstream — never assumed); decision_mode defaults to
+    TRADITIONAL when unset."""
+    from dsi import compute_personal_dsi
+    from area_dsi import interpolate_area_dsi
+    cur.execute(
+        """SELECT (settings->>'cost_per_mile')::float      AS cost_per_mile,
+                  COALESCE(settings->>'decision_mode', %s)  AS decision_mode
+           FROM app_private.driver_settings_new WHERE driver_id = %s""",
+        (DSI_MODE_TRADITIONAL, uid),
+    )
+    s = cur.fetchone() or {}
+    personal_dsi = compute_personal_dsi(
+        ep.get("effective_hourly_rate"), ep.get("dollars_per_mile"), s.get("cost_per_mile")
+    )
+    local_market_dsi = interpolate_area_dsi(cur, ep.get("current_lat"), ep.get("current_lng"))
+    return _dsi_verdict(personal_dsi, local_market_dsi,
+                        s.get("decision_mode") or DSI_MODE_TRADITIONAL, basic_result)
 

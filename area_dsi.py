@@ -1,12 +1,16 @@
 """DSI v1 area readout — IDW interpolation of the community_offers DSI surface.
 
 OBSERVATIONAL ONLY: the value is shown under the frog and NEVER affects any
-verdict. Interpolates dsi_v1 (inverse-distance-weighted by H3 grid distance)
-from community_offers whose pickup_h3 is within AREA_DSI_K_RINGS of the driver's
-current res-8 H3 cell — the same cell function (app_private.safe_h3) that wrote
-pickup_h3, so the resolution/convention match. Null when no nearby data.
+verdict. Interpolates dsi_v1 inverse-distance-weighted across BOTH space (H3 grid
+distance from the driver's res-8 cell, via the same app_private.safe_h3 that wrote
+pickup_h3) AND time (hour-of-day + weekday/weekend distance, market-local) — so the
+readout reflects the local market at THIS time of day, not an all-hours average
+(spec §1: "Sat night != Mon morning"). Spatially bounded to AREA_DSI_K_RINGS; the
+temporal weight is SOFT (down-weights, never excludes) so sparse weekend/late-night
+buckets degrade gracefully instead of starving the radar to NULL. Null when no
+nearby data.
 
-See dsi.py (per-offer DSI) and docs/FEATURE_PROPOSAL_DSI_2026-06-02.md.
+See dsi.py (per-offer DSI) and docs/FEATURE_PROPOSAL_DSI_2026-06-02-v2.md.
 """
 import logging
 
@@ -15,36 +19,80 @@ log = logging.getLogger(__name__)
 # k-ring radius over res-8 cells (~1.2 km across) -> ~6 km. Tunable.
 AREA_DSI_K_RINGS = 5
 
+# Empty-disk fallback: when the primary disk has NO eligible offers (an uncovered/edge
+# area), widen to this radius once before giving up (~14 km). Graceful degradation —
+# the decision rule needs a number; only a truly data-empty WIDE disk returns None, and
+# the caller then falls back to the interim absolute threshold.
+AREA_DSI_FALLBACK_K_RINGS = 12
+
+# Temporal weighting (spec §1). The IDW weight folds a TIME distance in alongside the
+# spatial H3-ring distance, so same-time-same-place offers dominate while distant-in-time
+# offers still contribute (down-weighted, never excluded — SOFT, so sparse weekend/
+# late-night buckets degrade gracefully rather than starving the radar to NULL).
+#   temporal_distance = circular_hour_diff(0..12) + DAYTYPE_PENALTY (weekday<->weekend)
+# scaled by TIME_WEIGHT into H3-ring-equivalents. Both are TUNABLE product params (spec
+# §7: the weight family has no data-derived optimum). At 0.4 a 12h swing ~= 5 rings
+# (= the disk radius); a weekday/weekend mismatch ~= 2.4 rings.
+AREA_DSI_TIME_WEIGHT = 0.4
+AREA_DSI_DAYTYPE_PENALTY = 6.0
+
+# §6 read-filter: drop capture-error junk (effective_hourly_rate <= 0 OR
+# dollars_per_mile <= 0) but KEEP legitimately-negative dsi_v1 — real money-losers are
+# the core signal, so NEVER filter on dsi_v1 > 0. Declined offers are valid market signal.
 _AREA_DSI_SQL = """
-WITH cc AS (SELECT app_private.safe_h3(%s, %s)::h3index AS cell)
-SELECT
-    sum(co.dsi_v1 / (h3_grid_distance(co.pickup_h3::h3index, cc.cell) + 1.0))
-    / NULLIF(sum(1.0 / (h3_grid_distance(co.pickup_h3::h3index, cc.cell) + 1.0)), 0)
-        AS area_dsi
-FROM public.community_offers co
-JOIN cc ON TRUE
-JOIN (SELECT h3_grid_disk((SELECT cell FROM cc), %s) AS cell) disk
-    ON co.pickup_h3::h3index = disk.cell
-WHERE co.dsi_v1 IS NOT NULL
+WITH cc AS (
+    SELECT app_private.safe_h3(%s, %s)::h3index AS cell,
+           EXTRACT(hour FROM now() AT TIME ZONE 'America/Chicago')::int       AS qhour,
+           (EXTRACT(dow FROM now() AT TIME ZONE 'America/Chicago')::int IN (0, 6)) AS qweekend
+)
+SELECT sum(s.dsi_v1 * s.w) / NULLIF(sum(s.w), 0) AS area_dsi
+FROM (
+    SELECT co.dsi_v1,
+        1.0 / (
+            h3_grid_distance(co.pickup_h3::h3index, cc.cell)
+            + %s * (
+                LEAST(
+                    abs(EXTRACT(hour FROM co.created_at AT TIME ZONE 'America/Chicago')::int - cc.qhour),
+                    24 - abs(EXTRACT(hour FROM co.created_at AT TIME ZONE 'America/Chicago')::int - cc.qhour)
+                )
+                + CASE WHEN (EXTRACT(dow FROM co.created_at AT TIME ZONE 'America/Chicago')::int IN (0, 6)) <> cc.qweekend
+                       THEN %s ELSE 0.0 END
+            )
+            + 1.0
+        ) AS w
+    FROM public.community_offers co
+    JOIN cc ON TRUE
+    JOIN (SELECT h3_grid_disk((SELECT cell FROM cc), %s) AS cell) disk
+        ON co.pickup_h3::h3index = disk.cell
+    WHERE co.dsi_v1 IS NOT NULL
+      AND co.effective_hourly_rate > 0
+      AND co.dollars_per_mile > 0
+) s
 """
 
 
 def interpolate_area_dsi(cur, lat, lng):
-    """Return the IDW community DSI at (lat, lng), or None.
+    """Return the time-aware IDW community DSI at (lat, lng), or None.
 
-    Best-effort: missing coords or any query failure return None so this can
-    never break the heartbeat (liveness over completeness).
+    Tries the primary disk (AREA_DSI_K_RINGS); on an EMPTY disk, widens once to
+    AREA_DSI_FALLBACK_K_RINGS before giving up (graceful degradation — the decision
+    rule needs a number). Best-effort: missing coords or any query failure return None
+    so this can never break the heartbeat / decision (liveness over completeness; the
+    caller falls back to the interim threshold on None).
     """
     if lat is None or lng is None:
         return None
-    try:
-        cur.execute(_AREA_DSI_SQL, (lat, lng, AREA_DSI_K_RINGS))
-        row = cur.fetchone()
-        if not row:
+    for k_rings in (AREA_DSI_K_RINGS, AREA_DSI_FALLBACK_K_RINGS):
+        try:
+            cur.execute(_AREA_DSI_SQL, (lat, lng, AREA_DSI_TIME_WEIGHT,
+                                        AREA_DSI_DAYTYPE_PENALTY, k_rings))
+            row = cur.fetchone()
+            # RealDictCursor -> dict-like; fall back to positional for tuple cursors.
+            val = (row["area_dsi"] if hasattr(row, "keys") else row[0]) if row else None
+            if val is not None:
+                return float(val)
+            # None == empty disk at this radius: widen and retry (loop continues).
+        except Exception as e:
+            log.warning("[area_dsi] interpolation failed (k=%s): %s", k_rings, e)
             return None
-        # RealDictCursor -> dict-like; fall back to positional for tuple cursors.
-        val = row["area_dsi"] if hasattr(row, "keys") else row[0]
-        return float(val) if val is not None else None
-    except Exception as e:
-        log.warning("[area_dsi] interpolation failed: %s", e)
-        return None
+    return None
