@@ -1310,6 +1310,23 @@ def _get_last_known_anchor_id(cur, driver_id, current_cumulative_miles, referenc
 # body call it unchanged. One body, three consumers — see its docstring.
 
 
+def _compute_lost_mode(current_offer_id, alive_unpicked_offer_ids):
+    """§XVIII.A lost-mode = BOTH bits.
+
+      bit-1: current_offer_id IS NULL          (narrative unbound)
+      bit-2: >= 1 predicate-alive offer with no recorded pickup
+
+    Pre-2026-06-16 the heartbeat derived lost_mode from bit-2 ALONE, so binding
+    current_offer_id never exited lost-mode while any other unpicked offer was
+    alive — the mechanical cause of permanent lost-mode and the 2026-06-15
+    over-fire spray (33 fires for 14 real taps). current_offer_id here is the
+    reconciled snap.bound_offer_id (snapshot() already cleared stale-dead
+    pointers per §XVIII.A stale-pointer reconciliation), so a dead pointer
+    reads None and cannot strand the driver in 'found'.
+    """
+    return current_offer_id is None and len(alive_unpicked_offer_ids) > 0
+
+
 def _detect_lost_mode(cur, driver_id, queue_offer_ids, current_cumulative_miles, reference_time, last_odometer_move_at=None):
     """Detect driver-state lost-mode per §XVIII.
 
@@ -2149,7 +2166,7 @@ def post_heartbeat():
     alive_unpicked_offer_ids = _get_alive_unpicked_offer_ids(
         cur, driver_id, cumulative_miles, _heartbeat_now, effective_last_move,
     )
-    lost_mode = len(alive_unpicked_offer_ids) > 0
+    lost_mode = _compute_lost_mode(current_offer_id, alive_unpicked_offer_ids)
 
     wai = WhereAmI(cur)
     matches, diagnostics = wai.evaluate_with_diagnostics(
@@ -2282,23 +2299,24 @@ def post_heartbeat():
         if len(candidates) == 1:
             # Single-match express lane (Option β).
             offer_id, leg, _conf = candidates[0]
-            # §XVIII.C.4: in lost-mode, demote narrative fires to
-            # observation fires. The §5.3 path achieves this via
-            # dispatch(lost_mode=True); the express lane bypasses
-            # dispatch, so the demotion is applied here directly.
-            # Mapping mirrors dispatch._demote_to_observation per
-            # §XVIII.C.4 canonical text.
+            # §XVIII amendment (2026-06-16): a SINGLE confident WAI match is
+            # an UNAMBIGUOUS PUDO identification — WAI disambiguated to exactly
+            # one offer, so the driver is NOT lost. Bind narrative (FirePickup /
+            # FireDropoff) and exit lost-mode rather than demoting to
+            # observation-only. Observation-only-without-bind is reserved for
+            # genuine §5.3 ambiguity (the len(candidates) >= 2 dispatch path
+            # below). FirePickup is a strict superset of FirePickupObservation's
+            # cache writes plus the bind, so no fare signal is lost. Paired with
+            # the §XVIII.A bit-1 lost_mode fix (_compute_lost_mode) so the bind
+            # exits lost-mode next heartbeat. Forensic: 2026-06-15 over-fire
+            # (33 fires for 14 real taps; 100% demoted to lost_mode_observation).
             if leg == 'pickup':
-                action_cls = FirePickupObservation if lost_mode else FirePickup
+                action_cls = FirePickup
             else:
-                action_cls = FireDropoffObservation if lost_mode else FireDropoff
+                action_cls = FireDropoff
             matcher_actions = [action_cls(offer_id=offer_id)]
             matched_offer_id = offer_id
-            # §XVI.C / §XVIII.D.1: lost-mode fires get canonical
-            # lost_mode_observation label; non-lost fires use
-            # wai_above_floor (post-2026-05-22 taxonomy; 'tad_and_wai'
-            # deprecated when TAD became input, not gate).
-            match_signal = 'lost_mode_observation' if lost_mode else 'wai_above_floor'
+            match_signal = 'wai_above_floor'
             # phase_reached: write-frozen per Decision 1 of §XVI.C
             # amendment (2026-05-22). Field deprecated; derive
             # equivalents from matched_offer_id, unmatched_reason,

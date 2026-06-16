@@ -184,10 +184,10 @@ class TestXviiiDForensicVocabulary:
         import driver_heartbeat
         with open(driver_heartbeat.__file__, "r", encoding="utf-8") as f:
             source = f.read()
-        assert "'lost_mode_observation'" in source, (
-            "§XVIII.D.1 canonical match_signal 'lost_mode_observation' "
-            "not found in driver_heartbeat.py"
-        )
+        # 'lost_mode_observation' (single-match) was RETIRED by the
+        # 2026-06-16 amendment — single confident matches now bind and emit
+        # 'wai_above_floor'. It remains a valid HISTORICAL PDC label.
+        # 'lost_mode_ambiguous_observation' (§5.3 multi-match) is still live.
         assert "'lost_mode_ambiguous_observation'" in source, (
             "§XVIII.D.1 canonical match_signal 'lost_mode_ambiguous_observation' "
             "not found in driver_heartbeat.py"
@@ -203,31 +203,25 @@ class TestXviiiDForensicVocabulary:
             "not found in driver_heartbeat.py"
         )
 
-    def test_express_lane_demotes_in_lost_mode(self):
-        """§XVIII.C.4: the §XVI Phase 2b single-match express lane must
-        emit observation fires (FirePickupObservation / FireDropoffObservation)
-        in lost-mode, not narrative fires.
+    def test_express_lane_binds_single_confident_match(self):
+        """§XVIII amendment (2026-06-16): the single-match express lane
+        BINDS a unique confident WAI match (FirePickup / FireDropoff) even in
+        lost-mode — a single candidate is an unambiguous PUDO, so the driver
+        is not lost. Observation-only-without-bind is reserved for §5.3
+        ambiguity (the len(candidates) >= 2 dispatch path).
 
-        Gemini-review regression guard 2026-05-17: the express lane
-        bypasses dispatch() and so does not inherit the dispatch-layer
-        demotion. The demotion must be applied inline. This test asserts
-        the inline demotion pattern is present in the production module.
-
-        Source-grep style: checks for the canonical conditional that
-        chooses Observation vs narrative action_cls based on lost_mode.
-        If the express lane ever drifts back to emitting raw FirePickup
-        or FireDropoff unconditionally, this test fails before deploy.
+        Replaces the 2026-05-17 demotion guard, which pinned the
+        over-generalized blanket demotion that caused the 2026-06-15
+        over-fire (33 fires / 14 real taps, all lost_mode_observation).
+        Guards against drift back to the demotion.
         """
         import driver_heartbeat
         with open(driver_heartbeat.__file__, "r", encoding="utf-8") as f:
             source = f.read()
-        assert "FirePickupObservation if lost_mode else FirePickup" in source, (
-            "§XVIII.C.4 express-lane pickup demotion not found in "
-            "driver_heartbeat.py — express lane may emit narrative "
-            "fires in lost-mode (contract violation)"
+        assert "FirePickupObservation if lost_mode else FirePickup" not in source, (
+            "express lane regressed to the retired §XVIII.C.4 blanket "
+            "demotion — a single confident match must bind (FirePickup)"
         )
-        assert "FireDropoffObservation if lost_mode else FireDropoff" in source, (
-            "§XVIII.C.4 express-lane dropoff demotion not found in "
-            "driver_heartbeat.py — express lane may emit narrative "
-            "fires in lost-mode (contract violation)"
+        assert "FireDropoffObservation if lost_mode else FireDropoff" not in source, (
+            "express lane regressed to the retired §XVIII.C.4 blanket demotion"
         )
