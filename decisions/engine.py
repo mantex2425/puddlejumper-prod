@@ -87,6 +87,18 @@ def run_decision_engine(cur, conn, uid, params):
         _pickup_addr, _bias_lat, _bias_lng,
         ep.get("p_lat"), ep.get("p_lng")
     )
+    # §single_road projection (2026-06-18): a bare road name geocodes to the road
+    # CENTROID (measured median 1.5km from the real pickup). Project onto the
+    # named road at pickup_miles from the driver instead (precomputed roads_by_name,
+    # ~ms). Decision-time sampling only (radar/DSI/distance); firing uses arrest
+    # (§XVI). None -> keep geocode.
+    from bead_on_wire import project_single_road_pickup as _proj_sr
+    _sr = _proj_sr(cur, _pickup_addr, _bias_lat, _bias_lng,
+                   ep.get("pickup_miles"), ep["p_lat"], ep["p_lng"])
+    if _sr is not None:
+        logging.info(f"[GEO] single_road projected onto road @ pickup_miles: "
+                     f"{_sr[0]:.5f},{_sr[1]:.5f} (geocode was {ep['p_lat']},{ep['p_lng']})")
+        ep["p_lat"], ep["p_lng"] = _sr
     if _same_addr:
         ep["d_lat"], ep["d_lng"] = ep["p_lat"], ep["p_lng"]
         logging.info(f"[GEO] Same-address errand — mirroring pickup to dropoff")

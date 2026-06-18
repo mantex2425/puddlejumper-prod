@@ -854,3 +854,82 @@ def compute_target(
 # ============================================================================
 # Additional primitives live below once written.
 # ============================================================================
+
+
+# ============================================================================
+# SINGLE_ROAD pickup projection (scoped arc-band, restored 2026-06-18)
+# ============================================================================
+# Tortuosity band, data-driven from 554 rides (refined pre-nuke): pickup_miles is
+# DRIVING distance; straight-line distance to the pickup is pickup_miles /
+# tortuosity, Houston route tortuosity ~0.9 (freeway) to ~2.5 (p95). A bare road
+# name geocodes to the road centroid (median 1.5km off — measured); for single_road
+# we project onto the named road instead.
+SINGLE_ROAD_TORT_MIN = 0.9
+SINGLE_ROAD_TORT_MAX = 2.5
+
+
+def single_road_band_m(pickup_miles):
+    """Straight-line (lo, hi) metres for a DRIVING pickup_miles via the tortuosity
+    band; None if pickup_miles missing/non-positive."""
+    if not pickup_miles or pickup_miles <= 0:
+        return None
+    return (pickup_miles * 1609.344 / SINGLE_ROAD_TORT_MAX,
+            pickup_miles * 1609.344 / SINGLE_ROAD_TORT_MIN)
+
+
+def project_single_road_pickup(cur, pickup_address, driver_lat, driver_lng,
+                               pickup_miles, geocode_lat, geocode_lng):
+    """Project a SINGLE_ROAD pickup onto the named road at pickup_miles (driving)
+    from the driver. The geocode fixes WHICH road (nearest precomputed road) +
+    rough direction; the tortuosity band fixes WHERE along it.
+
+    Runs against app_private.roads_by_name (one ST_Simplify'd merged geom per road
+    name, GiST-indexed) — benchmarked 3-196ms; the live houston_ways query was
+    1.5-27s and unstable. Returns (lat, lng) or None (not single_road / missing
+    inputs / road or candidate not found / any failure) — caller keeps the geocode.
+    Decision-time sampling only; firing uses the arrest (§XVI).
+    """
+    band = single_road_band_m(pickup_miles)
+    if (band is None or driver_lat is None or driver_lng is None
+            or geocode_lat is None or geocode_lng is None):
+        return None
+    try:
+        if classify_address(pickup_address or "").get("bucket") != "single_road":
+            return None
+        lo, hi = band
+        cur.execute("""
+            WITH rn AS (
+                SELECT geom FROM app_private.roads_by_name
+                ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                LIMIT 1
+            ),
+            ring AS (
+                SELECT ST_Difference(
+                    ST_Buffer(app_private.coords_to_geography(%s, %s), %s)::geometry,
+                    ST_Buffer(app_private.coords_to_geography(%s, %s), %s)::geometry
+                ) AS g
+            ),
+            cand AS (
+                SELECT ST_Intersection(rn.geom, ring.g) AS g FROM rn, ring
+                WHERE rn.geom IS NOT NULL
+            )
+            SELECT ST_Y(p) AS lat, ST_X(p) AS lng
+            FROM (
+                SELECT ST_ClosestPoint(g, ST_SetSRID(ST_MakePoint(%s, %s), 4326)) AS p
+                FROM cand WHERE g IS NOT NULL AND NOT ST_IsEmpty(g)
+            ) z
+        """, (geocode_lng, geocode_lat,        # rn: nearest road to geocode (x=lng,y=lat)
+              driver_lat, driver_lng, hi,      # ring outer (coords_to_geography is lat,lng)
+              driver_lat, driver_lng, lo,      # ring inner
+              geocode_lng, geocode_lat))       # disambiguate: closest to geocode
+        row = cur.fetchone()
+        if not row:
+            return None
+        lat = row["lat"] if hasattr(row, "keys") else row[0]
+        lng = row["lng"] if hasattr(row, "keys") else row[1]
+        if lat is None or lng is None:
+            return None
+        return (float(lat), float(lng))
+    except Exception as e:
+        logging.warning(f"[BEAD] single_road projection failed: {e}")
+        return None
