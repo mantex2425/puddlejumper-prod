@@ -274,6 +274,15 @@ _SEMANTIC_TYPE_HORIZON_MAP: dict[str, float] = {
 # Default horizon for anchors whose types don't match any key above.
 _SEMANTIC_DEFAULT_HORIZON_M: float = 500.0
 
+# §Phase2 transit-road pin gate (2026-06-18). on_target_road fires for being on the
+# named road ANYWHERE; on a long TRANSIT road (Gulf Fwy) that full-credited stops km
+# from the pickup — the over-fire long-road false match. Gate it there by distance to
+# the pin (now meaningful: roads_by_name single_road projection). ONLY on transit
+# roads: a short residential road still credits at any distance, preserving the Path
+# B.2 rescue (bad pin, proximity=0, car at the real pickup). Generous horizon: the
+# single_road projected pin sits within the tortuosity band, not exact. Calibratable.
+ON_TARGET_ROAD_PIN_HORIZON_M: float = 750.0
+
 
 # §XVII Patch 3: fixed market-center bias for Head 5 searchText calls.
 # Per Andrew + Gemini ratification 2026-05-14, the locationBias center
@@ -440,17 +449,33 @@ def _signal_cluster_duration(cluster: Cluster) -> float:
 def _signal_on_target_road(
     current_road: Optional[str],
     target_road_names: tuple[str, ...],
+    current_road_class: Optional[str] = None,
+    dist_to_pin_m: Optional[float] = None,
 ) -> float:
-    """Is the driver currently snapped to a road that appears in the
-    target's address?
+    """Is the driver snapped to a target road (and, on a TRANSIT road, near the pin)?
 
     Step function (boolean by nature):
-      - current_road matches a target road:  1.0
-      - current_road is None (off-wire):     0.0
-      - current_road doesn't match:          0.0
-      - target_road_names is empty:          0.0
+      - current_road matches a target road:                              1.0
+      - EXCEPT on a 'transit' road beyond ON_TARGET_ROAD_PIN_HORIZON_M
+        of the pin (the over-fire long-road false match):               0.0
+      - current_road None / no match / no target roads:                  0.0
+
+    The transit condition is what makes this safe: on a short residential road,
+    being on it implies near the pickup, so it still credits at ANY distance —
+    that preserves the Path B.2 rescue (bad geocode pin, proximity=0, car at the
+    real pickup). On a long transit road, being on it says nothing about being
+    near the pickup, so we require the pin. dist_to_pin_m None (no pin) or
+    non-transit class -> no gate (back-compat).
     """
     if current_road is None or not target_road_names:
+        return 0.0
+    # PIN-GATE (§Phase2, 2026-06-18): on a TRANSIT-class (long) road, road
+    # membership alone full-credited stops km from the pickup (the over-fire
+    # long-road false match). No road credit there beyond the pin horizon.
+    # Residential / off-wire roads are exempt — that is the Path B.2 rescue.
+    if (current_road_class == 'transit'
+            and dist_to_pin_m is not None
+            and dist_to_pin_m > ON_TARGET_ROAD_PIN_HORIZON_M):
         return 0.0
     for target_road in target_road_names:
         if _road_names_match(current_road, target_road):
@@ -1118,6 +1143,12 @@ def _compute_signals(
         "cluster_duration": _signal_cluster_duration(cluster),
         "on_target_road": _signal_on_target_road(
             topo.current_road, target.named_roads,
+            current_road_class=topo.current_road_class,
+            dist_to_pin_m=(
+                haversine_meters(cluster.median_lat, cluster.median_lng,
+                                 target.lat, target.lng)
+                if (cluster is not None and target.lat is not None
+                    and target.lng is not None) else None),
         ),
         "off_wire_pivot": _signal_off_wire_pivot(
             on_wire=topo.on_wire,
