@@ -25,13 +25,6 @@ AREA_DSI_K_RINGS = 5
 # the caller then falls back to the interim absolute threshold.
 AREA_DSI_FALLBACK_K_RINGS = 12
 
-# §thin-market gate (spec "sparse rows -> NULL", FEATURE_PROPOSAL_DSI_2026-06-02;
-# documented-never-built until 2026-06-16). A local-market bar built on fewer than
-# this many VALID offers is noise, not a market — interpolate_area_dsi returns None
-# so the verdict falls back to the interim absolute threshold rather than declining
-# a good offer against a ~1-sample bar. TUNABLE product param.
-MIN_MARKET_POINTS = 3
-
 # Temporal weighting (spec §1). The IDW weight folds a TIME distance in alongside the
 # spatial H3-ring distance, so same-time-same-place offers dominate while distant-in-time
 # offers still contribute (down-weighted, never excluded — SOFT, so sparse weekend/
@@ -52,8 +45,7 @@ WITH cc AS (
            EXTRACT(hour FROM now() AT TIME ZONE 'America/Chicago')::int       AS qhour,
            (EXTRACT(dow FROM now() AT TIME ZONE 'America/Chicago')::int IN (0, 6)) AS qweekend
 )
-SELECT sum(s.dsi_v1 * s.w) / NULLIF(sum(s.w), 0) AS area_dsi,
-       count(*) AS n
+SELECT sum(s.dsi_v1 * s.w) / NULLIF(sum(s.w), 0) AS area_dsi
 FROM (
     SELECT co.dsi_v1,
         1.0 / (
@@ -96,20 +88,10 @@ def interpolate_area_dsi(cur, lat, lng):
                                         AREA_DSI_DAYTYPE_PENALTY, k_rings))
             row = cur.fetchone()
             # RealDictCursor -> dict-like; fall back to positional for tuple cursors.
-            if row is not None:
-                area_dsi = row["area_dsi"] if hasattr(row, "keys") else row[0]
-                n = (row["n"] if hasattr(row, "keys") else row[1]) or 0
-            else:
-                area_dsi, n = None, 0
-            # §thin-market gate (2026-06-16): a bar built on fewer than
-            # MIN_MARKET_POINTS valid offers is noise, not a market. Treat as
-            # insufficient -> widen once; if the wide disk is also sparse, return
-            # None so _dsi_verdict falls back to the interim absolute threshold
-            # instead of declining a good offer against a ~1-sample bar (offer
-            # 11402 Buffalo Speedway 2026-06-15: personal 28.4 vs a 29.4 n=1 bar).
-            if area_dsi is not None and n >= MIN_MARKET_POINTS:
-                return float(area_dsi)
-            # empty OR thin disk: widen and retry (loop continues).
+            val = (row["area_dsi"] if hasattr(row, "keys") else row[0]) if row else None
+            if val is not None:
+                return float(val)
+            # None == empty disk at this radius: widen and retry (loop continues).
         except Exception as e:
             log.warning("[area_dsi] interpolation failed (k=%s): %s", k_rings, e)
             return None

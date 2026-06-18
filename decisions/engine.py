@@ -192,6 +192,41 @@ def run_decision_engine(cur, conn, uid, params):
 # Threshold below which the radar-less fallback declines (spec §4 interim).
 DSI_FALLBACK_THRESHOLD = 22.0
 
+# §thin-market gate (2026-06-18). The verdict trusts the local-market DSI bar
+# ONLY when the TIGHT radar radius (app_private.get_price_radar, ~1km) has at
+# least this many points. interpolate_area_dsi's 5-k-ring (~6km) disk is ~always
+# >=3 in dense markets, so thinness must be judged on the tight count (== the
+# logged radarPointCount). Thin -> bar nulled -> fall back to the absolute
+# threshold rather than decline a good offer against a ~1-sample bar (06-17:
+# declines 22.9<23.6 and 24.8<25.7 against radarPointCount=1 bars).
+MIN_MARKET_POINTS = 3
+
+
+def _radar_point_count(cur, lat, lng):
+    """Tight-radius (~1km) community point count from get_price_radar — the same
+    count router logs as radarPointCount. 0 on missing coords / any failure
+    (fail-open to the no-market fallback; never break the decision)."""
+    if lat is None or lng is None:
+        return 0
+    try:
+        cur.execute("SELECT point_count FROM app_private.get_price_radar(%s, %s)", (lat, lng))
+        row = cur.fetchone()
+        if not row:
+            return 0
+        pc = row["point_count"] if hasattr(row, "keys") else row[0]
+        return int(pc or 0)
+    except Exception:
+        return 0
+
+
+def _gate_market_dsi(local_market_dsi, tight_point_count):
+    """Return the local-market DSI bar only when the tight radar has
+    >= MIN_MARKET_POINTS points; else None (caller falls back to the absolute
+    threshold instead of comparing against a ~1-sample bar)."""
+    if local_market_dsi is None or (tight_point_count or 0) < MIN_MARKET_POINTS:
+        return None
+    return local_market_dsi
+
 
 # Three driver-selectable decision modes (UserPreferences -> settings.decision_mode):
 DSI_MODE_TRADITIONAL   = "TRADITIONAL"        # $/hr & $/mi only (SQL verdict; DSI hidden)
@@ -268,7 +303,14 @@ def _apply_dsi_decision(cur, uid, ep, basic_result):
     if dpm is None:
         dpm = basic_result.get("dollarsPerMile")
     personal_dsi = compute_personal_dsi(ehr, dpm, s.get("cost_per_mile"))
-    local_market_dsi = interpolate_area_dsi(cur, ep.get("current_lat"), ep.get("current_lng"))
+    _lat, _lng = ep.get("current_lat"), ep.get("current_lng")
+    # §thin-market gate (2026-06-18): trust the local-market bar only when the
+    # tight radar (get_price_radar ~1km) has >= MIN_MARKET_POINTS points; the 6km
+    # interpolate disk is ~always dense, so judge thinness on the tight count.
+    local_market_dsi = _gate_market_dsi(
+        interpolate_area_dsi(cur, _lat, _lng),
+        _radar_point_count(cur, _lat, _lng),
+    )
     return _dsi_verdict(personal_dsi, local_market_dsi,
                         s.get("decision_mode") or DSI_MODE_TRADITIONAL, basic_result)
 
