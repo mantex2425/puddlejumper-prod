@@ -9,7 +9,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 # --- Configuration ---
 PROJECT_ID = "puddle-jumper-477316"
 LOCATION = "us-central1"
-DB_HOST = "10.128.0.2"
+DB_HOST = "10.128.0.3"
 SECRET_ID = "DB_PASSWORD"
 
 def get_secret(secret_id, project_id):

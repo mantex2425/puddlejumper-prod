@@ -2,7 +2,7 @@
 # Run after a drive session to see Auto Nail It accuracy
 # Usage: bash tonight_accuracy.sh
 
-psql -h 10.128.0.2 -U postgres -d puddlejumper << 'SQL'
+psql -h 10.128.0.3 -U postgres -d puddlejumper << 'SQL'
 SELECT
     'Pickup' AS nail_type,
     COUNT(*) AS total,

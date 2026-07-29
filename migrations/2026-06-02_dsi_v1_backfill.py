@@ -53,7 +53,7 @@ SELECT_SQL = """
 
 def _conn():
     return psycopg2.connect(
-        host="10.128.0.2", dbname="puddlejumper", user="postgres",
+        host="10.128.0.3", dbname="puddlejumper", user="postgres",
         port="5432", cursor_factory=RealDictCursor,
     )
 

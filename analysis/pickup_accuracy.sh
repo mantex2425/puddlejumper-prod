@@ -10,5 +10,5 @@ DRV="${1:-UjT1hE9eBXh2q95aSZYOkzDJ8lo1}"   # default: the real driver
 PROJECT="puddle-jumper-477316"
 export PGPASSWORD="${DB_PASSWORD:-$(gcloud secrets versions access latest --secret=DB_PASSWORD --project "$PROJECT")}"
 
-psql -h 10.128.0.2 -U atjb -d puddlejumper -P pager=off \
+psql -h 10.128.0.3 -U atjb -d puddlejumper -P pager=off \
      -v drv="'$DRV'" -f "$(dirname "$0")/pickup_accuracy.sql"

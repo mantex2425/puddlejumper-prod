@@ -24,7 +24,7 @@ WIDE_RADIUS_M = 45
 MAX_CLASSIFY_DIST_M = 50.0
 
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "10.128.0.2"),
+    "host": os.getenv("DB_HOST", "10.128.0.3"),
     "database": os.getenv("DB_NAME", "puddlejumper"),
     "user": os.getenv("DB_USER", "postgres"),
     "password": os.getenv("DB_PASSWORD"),

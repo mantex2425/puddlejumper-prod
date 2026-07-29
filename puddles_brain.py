@@ -42,7 +42,7 @@ puddles_bp = Blueprint('puddles', __name__)
 # --- Constants & Environment ---
 PROJECT_ID = "puddle-jumper-477316"
 LOCATION = "us-central1"
-DB_HOST = os.environ.get("DB_HOST", "10.128.0.2")
+DB_HOST = os.environ.get("DB_HOST", "10.128.0.3")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 DB_URI = f"postgresql://atjb:{DB_PASSWORD}@{DB_HOST}:5432/puddlejumper"

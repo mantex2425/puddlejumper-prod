@@ -102,7 +102,7 @@ def _load_db_password() -> str:
 def _load_db_credentials() -> dict:
     """Return kwargs suitable for psycopg2.connect(...)."""
     return {
-        "host": os.environ.get("DB_HOST", "10.128.0.2"),
+        "host": os.environ.get("DB_HOST", "10.128.0.3"),
         "user": os.environ.get("DB_USER", "atjb"),
         "dbname": os.environ.get("DB_NAME", "puddlejumper"),
         "port": os.environ.get("DB_PORT", "5432"),

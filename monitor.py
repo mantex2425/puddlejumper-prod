@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 DRIVER_ID = "UjT1hE9eBXh2q95aSZYOkzDJ8lo1"
-DB_HOST = os.environ.get("DB_HOST", "10.128.0.2")
+DB_HOST = os.environ.get("DB_HOST", "10.128.0.3")
 DB_NAME = os.environ.get("DB_NAME", "puddlejumper")
 DB_USER = os.environ.get("DB_USER", "atjb")
 DB_PASS = os.environ.get("DB_PASSWORD", os.environ.get("DB_PASS", ""))

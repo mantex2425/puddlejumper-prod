@@ -15,7 +15,7 @@ import re
 import sys
 
 DB_CONFIG = {
-    "host":   "10.128.0.2",
+    "host":   "10.128.0.3",
     "user":   "postgres",
     "dbname": "puddlejumper",
 }

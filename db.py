@@ -4,7 +4,7 @@ import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 
 def get_db():
-    db_host = os.getenv("DB_HOST", "34.133.145.22")
+    db_host = os.getenv("DB_HOST", "10.128.0.3")
     print(f"DEBUG: Connecting to DB_HOST: {db_host}")
     print(f"DEBUG: Using DB_USER: {os.getenv('DB_USER')}")
     return psycopg2.connect(
@@ -27,7 +27,7 @@ _readonly_pool = None
 def _get_readonly_pool():
     global _readonly_pool
     if _readonly_pool is None:
-        db_host = os.getenv("DB_HOST", "34.133.145.22")
+        db_host = os.getenv("DB_HOST", "10.128.0.3")
         _readonly_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=2,
             maxconn=5,

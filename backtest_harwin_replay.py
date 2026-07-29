@@ -25,7 +25,7 @@ _spec = importlib.util.spec_from_file_location("nail_manager", "decisions/nail_m
 nm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(nm)
 
-DB_CONFIG = dict(host="10.128.0.2", dbname="puddlejumper", user="postgres")
+DB_CONFIG = dict(host="10.128.0.3", dbname="puddlejumper", user="postgres")
 
 def haversine_m(lat1, lng1, lat2, lng2):
     R = 6371000.0

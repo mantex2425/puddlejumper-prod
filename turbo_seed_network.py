@@ -25,7 +25,7 @@ _bbox = [float(x) for x in ARGS.bbox.split(',')]
 CITY = ARGS.city
 
 DB_CONFIG = {
-    'host': '10.128.0.2',
+    'host': '10.128.0.3',
     'dbname': 'puddlejumper',
     'user': 'postgres',
     'port': 5432,

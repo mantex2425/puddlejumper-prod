@@ -43,7 +43,7 @@ def check_internal_knowledge(query: str):
         from psycopg.rows import dict_row
         
         # Import DB connection from parent scope
-        DB_HOST = os.environ.get("DB_HOST", "10.128.0.2")
+        DB_HOST = os.environ.get("DB_HOST", "10.128.0.3")
         DB_PASSWORD = os.environ.get("DB_PASSWORD")
         DB_URI = f"postgresql://atjb:{DB_PASSWORD}@{DB_HOST}:5432/puddlejumper"
         

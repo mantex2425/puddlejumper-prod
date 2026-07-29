@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, date
 
 DB_CONFIG = {
-    "host":     "10.128.0.2",
+    "host":     "10.128.0.3",
     "user":     "postgres",
     "dbname":   "puddlejumper",
     "cursor_factory": psycopg2.extras.RealDictCursor

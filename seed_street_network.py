@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
 DB_CONFIG = {
-    'host': '10.128.0.2',
+    'host': '10.128.0.3',
     'dbname': 'puddlejumper',
     'user': 'postgres',
     'port': 5432,

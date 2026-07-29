@@ -7,7 +7,7 @@ set -e
 
 SERVICE="https://puddlejumper-api-152974241923.us-central1.run.app"
 DRIVER="UjT1hE9eBXh2q95aSZYOkzDJ8lo1"
-DB="psql -h 10.128.0.2 -U postgres -d puddlejumper"
+DB="psql -h 10.128.0.3 -U postgres -d puddlejumper"
 REPLAY='-H "X-Internal-Replay: puddlejumper-replay-2026" -H "X-Driver-Id: '"$DRIVER"'"'
 
 PASS="✅ PASS"
@@ -172,7 +172,7 @@ LOGS=$(get_log_count)
 check "T09" "Exactly 4 state log entries for solo trip" "$LOGS" "4"
 
 # Step 7: Verify offer_history was updated with Auto Nail It dropoff data
-DROPOFF_WRITTEN=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+DROPOFF_WRITTEN=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t -c "
     SELECT COUNT(*) FROM app_private.offer_history oh
     JOIN app_private.decision_log dl ON oh.decision_log_id = dl.id
     WHERE dl.driver_id = '$DRIVER'
@@ -280,7 +280,7 @@ STATE=$(get_state)
 check "T16" "Setup: IN_TRIP with nailed pickup" "$STATE" "IN_TRIP"
 
 # Backdate state so grace period satisfied — disable timestamp trigger first
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q << 'SQLEOF'
+psql -h 10.128.0.3 -U postgres -d puddlejumper -q << 'SQLEOF'
 ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;
 UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
 ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;
@@ -421,9 +421,9 @@ STATE=$(get_state)
 check "T30" "Watchdog setup: IN_TRIP" "$STATE" "IN_TRIP"
 
 # Backdate state 95 minutes — disable timestamp trigger to prevent overwrite
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '95 minutes' WHERE driver_id = '$DRIVER';" 2>/dev/null
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
+psql -h 10.128.0.3 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
+psql -h 10.128.0.3 -U postgres -d puddlejumper -q -c "UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '95 minutes' WHERE driver_id = '$DRIVER';" 2>/dev/null
+psql -h 10.128.0.3 -U postgres -d puddlejumper -q -c "ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;" 2>/dev/null
 
 # Trigger watchdog — no auth needed, internal endpoint
 curl -s -X POST "$SERVICE/internal/monitor" > /dev/null
@@ -486,7 +486,7 @@ STATE=$(get_state)
 check "T38" "ABORT setup: ENROUTE, pickup not nailed" "$STATE" "ENROUTE"
 
 # Backdate state 90s so grace period satisfied — disable timestamp trigger first
-psql -h 10.128.0.2 -U postgres -d puddlejumper -q << 'SQLEOF'
+psql -h 10.128.0.3 -U postgres -d puddlejumper -q << 'SQLEOF'
 ALTER TABLE app_private.driver_trip_state DISABLE TRIGGER tr_set_state_timestamp;
 UPDATE app_private.driver_trip_state SET state_updated_at = NOW() - INTERVAL '90 seconds' WHERE driver_id = 'UjT1hE9eBXh2q95aSZYOkzDJ8lo1';
 ALTER TABLE app_private.driver_trip_state ENABLE TRIGGER tr_set_state_timestamp;
@@ -528,7 +528,7 @@ STATE=$(get_state)
 check "T41" "Manual reset from STACKED → UNCOMMITTED" "$STATE" "UNCOMMITTED"
 
 # Verify coords cleared after reset
-COORDS=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t \
+COORDS=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t \
     -c "SELECT pickup_lat FROM app_private.driver_trip_state WHERE driver_id = '$DRIVER';" 2>/dev/null | tr -d ' ')
 check "T42" "Coords cleared after manual reset" "$COORDS" ""
 
@@ -759,7 +759,7 @@ STATE=$(get_state)
 check "T50d" "Departure 400m at speed → Watchdog B fires → STACKED atomic swap → ENROUTE" "$STATE" "ENROUTE"
 
 # Verify primary offer audit record has dropoff written (Stolen Identity fix)
-AUDIT=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+AUDIT=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t -c "
     SELECT COUNT(*)
     FROM app_private.offer_history oh
     JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
@@ -771,12 +771,12 @@ AUDIT=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
 check "T50e" "Primary offer audit record has dropoff written (not poisoned)" "$AUDIT" "1"
 
 # Verify current_offer_id updated to secondary offer after atomic swap
-CURRENT_OFFER=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+CURRENT_OFFER=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t -c "
     SELECT current_offer_id
     FROM app_private.driver_trip_state
     WHERE driver_id = '$DRIVER';
 " 2>/dev/null | tr -d ' ')
-PRIMARY_OFFER=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+PRIMARY_OFFER=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t -c "
     SELECT oh.decision_log_id
     FROM app_private.offer_history oh
     JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id
@@ -825,7 +825,7 @@ STATE=$(get_state)
 check "T60c" "New offer while STACKED → secondary cancelled → IN_TRIP on primary" "$STATE" "IN_TRIP"
 
 # Verify primary offer is still active (dropoff not yet confirmed)
-PRIMARY_ACTIVE=$(psql -h 10.128.0.2 -U postgres -d puddlejumper -t -c "
+PRIMARY_ACTIVE=$(psql -h 10.128.0.3 -U postgres -d puddlejumper -t -c "
     SELECT COUNT(*)
     FROM app_private.offer_history oh
     JOIN app_private.decision_log dl ON dl.id = oh.decision_log_id

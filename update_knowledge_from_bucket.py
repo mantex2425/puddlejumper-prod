@@ -8,7 +8,7 @@ PROJECT_ID = "puddle-jumper-477316"
 BUCKET_NAME = "puddles-knowledge-base"
 PREFIX = "kotlin_src/" 
 SECRET_ID = "DB_PASSWORD"
-DB_HOST = "10.128.0.2"
+DB_HOST = "10.128.0.3"
 
 def get_secret(secret_id, project_id):
     client = secretmanager.SecretManagerServiceClient()
