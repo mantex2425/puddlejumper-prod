@@ -143,14 +143,24 @@ def run_decision_engine(cur, conn, uid, params):
             ep["p_lat"] = None
             ep["p_lng"] = None
 
-    # ── SQL decision engine ───────────────────────────────────────────
-    _t_sql = time.time()
-    cur.execute("""
-        SELECT * FROM app_private.decision_engine_v2(
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s
+    # ── engine selection ──────────────────────────────────────────────
+    # Per-driver, read from settings, so a mid-drive rollback is one UPDATE
+    # and needs no redeploy:
+    #   UPDATE app_private.driver_settings_new
+    #      SET settings = settings - 'engine_version' WHERE driver_id = '<uid>';
+    try:
+        cur.execute(
+            "SELECT COALESCE(settings->>'engine_version', 'v2') AS ev "
+            "FROM app_private.driver_settings_new WHERE driver_id = %s",
+            (uid,),
         )
-    """, (
+        _ev_row = cur.fetchone()
+        engine_version = (_ev_row["ev"] if _ev_row else None) or "v2"
+    except Exception as _ev_err:
+        logging.warning(f"[ENGINE] version lookup failed, using v2: {_ev_err}")
+        engine_version = "v2"
+
+    _sql_args = (
         uid,
         ep["p_lat"], ep["p_lng"],
         ep["d_lat"], ep["d_lng"],
@@ -160,36 +170,98 @@ def run_decision_engine(cur, conn, uid, params):
         ep["towards_market_id"],
         ep["current_lat"], ep["current_lng"],
         ep["towards_backtrack_tolerance"], ep["is_puddle_jump"],
-    ))
-    row = cur.fetchone()
-    logging.info(f"[TIMER] Decision engine SQL: {(time.time()-_t_sql)*1000:.0f}ms")
-    if not row:
-        raise ValueError("Decision engine returned no result")
+    )
 
-    basic_result = {
-        "verdict":          row["verdict"],
-        "reason":           row["reason"],
-        "netPay":           float(row["net_pay"]          or 0),
-        "hourlyRate":       float(row["hourly_rate"]      or 0),
-        "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
-        "deadheadMiles":    float(row["deadhead_miles"]   or 0),
-        "deadheadCost":     float(row["deadhead_cost"]    or 0),
-        "arrivalDetected":  row["arrival_detected"],
-        "switchToMode":     row["switch_to_mode"],
-        "switchToMarketId": row["switch_to_market_id"],
-        "thresholdSource":  row["threshold_source"],
-    }
+    # ── SQL decision engine ───────────────────────────────────────────
+    _t_sql = time.time()
+    basic_result = None
 
-    # ── DSI verdict override (spec §6) — per-driver opt-in, SQL engine UNTOUCHED ──
-    # decision_engine_v2 above produced the verdict + rates. When the driver has opted
-    # into Drive Score Index decisions (driver_settings_new.settings.dsi_decision_enabled),
-    # OVERRIDE the verdict with the §6 comparison (Personal DSI >= Local Market DSI),
-    # preserving the SQL verdict as legacyVerdict. Flag OFF (the default) = traditional
-    # $/hr & $/mi, unchanged. Best-effort: any failure keeps the SQL verdict.
-    try:
-        basic_result.update(_apply_dsi_decision(cur, uid, ep, basic_result))
-    except Exception as _dsi_err:
-        logging.warning(f"[DSI] override skipped (SQL verdict kept): {_dsi_err}")
+    if engine_version == "v3":
+        # v3 consolidates rates + DSI + verdict into ONE path, so it needs no
+        # _apply_dsi_decision override — that override layer is precisely what
+        # produced the three-way DSI split v3 exists to remove.
+        #
+        # SAVEPOINT: a failing v3 call would otherwise abort the transaction and
+        # take the v2 fallback down with it. Better a v2 verdict than no frog.
+        cur.execute("SAVEPOINT sp_engine_v3")
+        try:
+            cur.execute("""
+                SELECT * FROM app_private.decision_engine_v3(
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+            """, _sql_args)
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("decision_engine_v3 returned no result")
+            cur.execute("RELEASE SAVEPOINT sp_engine_v3")
+
+            _v3_trace = row.get("trace_data") or {}
+            basic_result = {
+                "verdict":          row["verdict"],
+                "reason":           row["reason"],
+                # v3 never subtracts a return cost from the payout — the unpaid
+                # leg lives in the denominator — so net == gross by construction.
+                "netPay":           float(ep["fare"] or 0),
+                "hourlyRate":       float(row["hourly_rate"]      or 0),
+                "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
+                "dsi":              float(row["dsi"]) if row["dsi"] is not None else None,
+                "deadheadMiles":    float(row["return_miles"]     or 0),
+                "deadheadCost":     0.0,   # no longer a cost; it is denominator
+                "arrivalDetected":  bool(_v3_trace.get("arrivalDetected") or False),
+                "switchToMode":     None,  # auto-switch removed (ruling 2026-08-18)
+                "switchToMarketId": None,
+                "thresholdSource":  row["threshold_source"],
+                "engineVersion":    "v3",
+            }
+        except Exception as _v3_err:
+            logging.error(f"[ENGINE] v3 FAILED — falling back to v2: {_v3_err}")
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_engine_v3")
+            except Exception:
+                pass
+            basic_result = None
+
+    if basic_result is None:
+        cur.execute("""
+            SELECT * FROM app_private.decision_engine_v2(
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+        """, _sql_args)
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("Decision engine returned no result")
+
+        basic_result = {
+            "verdict":          row["verdict"],
+            "reason":           row["reason"],
+            "netPay":           float(row["net_pay"]          or 0),
+            "hourlyRate":       float(row["hourly_rate"]      or 0),
+            "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
+            "deadheadMiles":    float(row["deadhead_miles"]   or 0),
+            "deadheadCost":     float(row["deadhead_cost"]    or 0),
+            "arrivalDetected":  row["arrival_detected"],
+            "switchToMode":     row["switch_to_mode"],
+            "switchToMarketId": row["switch_to_market_id"],
+            "thresholdSource":  row["threshold_source"],
+            "engineVersion":    "v2",
+        }
+
+        # ── DSI verdict override (spec §6) — v2 path ONLY ──
+        # When the driver has opted into Drive Score Index decisions, OVERRIDE the
+        # verdict with the §6 comparison, preserving the SQL verdict as legacyVerdict.
+        # Flag OFF (the default) = traditional $/hr & $/mi, unchanged. Best-effort:
+        # any failure keeps the SQL verdict.
+        try:
+            basic_result.update(_apply_dsi_decision(cur, uid, ep, basic_result))
+        except Exception as _dsi_err:
+            logging.warning(f"[DSI] override skipped (SQL verdict kept): {_dsi_err}")
+
+    logging.info(
+        f"[TIMER] Decision engine SQL ({basic_result['engineVersion']}): "
+        f"{(time.time()-_t_sql)*1000:.0f}ms"
+    )
 
     # Stash raw trace for log_decision (piggybacks on ep dict)
     ep["_raw_trace"]      = row.get("trace_data") or {}
