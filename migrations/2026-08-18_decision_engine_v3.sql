@@ -90,6 +90,13 @@ DECLARE
     K_MIN_IMPLIED_MPH     CONSTANT numeric := 15.0;   -- clamp floor
     K_MAX_IMPLIED_MPH     CONSTANT numeric := 55.0;   -- clamp ceiling
     K_DEFAULT_IMPLIED_MPH CONSTANT numeric := 30.0;   -- trip time missing
+    -- DISPLAY ONLY. Solved once against the clean corpus so the median genuine
+    -- offer's index reproduces its familiar 'weighted' value. Never read by the
+    -- verdict. Overridable via settings.dsi_display_scale (server-delivered).
+    -- Solved 2026-08-19 on 2,321 genuine offers (fixtures excluded): median
+    -- weighted 24.51 / median net-hourly 8.33 = 2.942, so the median offer's
+    -- index reproduces its familiar weighted value. Frozen.
+    K_DISPLAY_SCALE       CONSTANT numeric := 2.942;
 
     v_settings            jsonb;
     v_active_market       jsonb;
@@ -119,8 +126,16 @@ DECLARE
     v_committed_mph       numeric;
     v_hourly_rate         numeric;
     v_dollars_per_mile    numeric;
-    v_dsi                 numeric;
+    v_dsi                 numeric;   -- the value RETURNED, per formula
     v_dsi_formula         text;
+    -- The two numbers, deliberately separate variables (see section 0 of the
+    -- 2026-08-19 work order). v_score is what the verdict reads; v_dsi_index is
+    -- assigned AFTER the verdict and is never read by it.
+    v_net_hourly_usd      numeric;   -- honest: real $/hr after vehicle cost
+    v_dsi_weighted        numeric;   -- legacy index, always computed for audit
+    v_dsi_index           numeric;   -- cosmetic: DISPLAY_SCALE x net_hourly_usd
+    v_display_scale       numeric;
+    v_score               numeric;   -- the verdict metric
 
     -- mileage floor
     v_mf_config           jsonb;
@@ -189,19 +204,47 @@ BEGIN
     -- over-rewards fast, long-pickup offers -- a $11.14 offer with a 16.8 mi
     -- pickup scored 2nd best of 7 on 2026-08-18 while netting $5.97/hr, 5th of 7.
     -- net_hourly uses the offer's OWN implied speed and needs no constant.
+    --   indexed    : verdict on net_hourly_usd; DISPLAY-ONLY rescale for the UI
     v_dsi_formula := COALESCE(v_settings->>'dsi_formula', 'weighted');
 
-    -- Driver-set DSI threshold (spec 5). Default derives from the legacy
-    -- floors so v3 starts at exactly v2's strictness:
-    --   22.0 + 12 * (1.67 - 0.725) = 33.34
-    v_dsi_threshold := COALESCE(
-        (v_settings->>'dsi_threshold')::numeric,
-        COALESCE((v_settings->>'min_effective_hourly_rate')::numeric, 22.0)
-          + K_DSI_MILE_WEIGHT * (
-              COALESCE((v_settings->>'min_effective_dollar_per_mile')::numeric, 1.67)
-              - K_IRS_RATE_PER_MILE
-            )
-    );
+    -- DISPLAY_SCALE lifts honest $/hr onto the number range drivers already
+    -- trust. It is UX only. It appears nowhere in the verdict path, which is
+    -- why it provably cannot move a decision.
+    v_display_scale := COALESCE((v_settings->>'dsi_display_scale')::numeric,
+                                K_DISPLAY_SCALE);
+
+    -- Driver-set threshold. Its UNITS depend on the formula, so the fallback
+    -- must too -- otherwise the mile weight would leak into a verdict it has no
+    -- business touching (invariant 5).
+    --
+    --   weighted            -> threshold is in index points. Derived default
+    --                          reproduces v2 strictness: 22.0 + 12*(1.67-0.725).
+    --   net_hourly/indexed  -> threshold is in DOLLARS PER HOUR. There is no
+    --                          honest way to derive that from the legacy floors,
+    --                          and per the 2026-08-19 work order the threshold is
+    --                          Andrew's deliberate choice. So it is REQUIRED, and
+    --                          a missing one fails CLOSED rather than inventing a
+    --                          bar out of a constant from the other formula.
+    v_dsi_threshold := (v_settings->>'dsi_threshold')::numeric;
+
+    IF v_dsi_threshold IS NULL THEN
+        IF v_dsi_formula = 'weighted' THEN
+            v_dsi_threshold :=
+                COALESCE((v_settings->>'min_effective_hourly_rate')::numeric, 22.0)
+                + K_DSI_MILE_WEIGHT * (
+                    COALESCE((v_settings->>'min_effective_dollar_per_mile')::numeric, 1.67)
+                    - K_IRS_RATE_PER_MILE
+                  );
+        ELSE
+            RETURN QUERY SELECT 'DECLINE'::text,
+                format('dsi_formula=%s requires an explicit dsi_threshold in $/hr', v_dsi_formula)::text,
+                NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
+                'threshold_not_set'::text,
+                jsonb_build_object('dsiFormula', v_dsi_formula,
+                                   'error', 'dsi_threshold missing');
+            RETURN;
+        END IF;
+    END IF;
 
     IF v_active_market IS NOT NULL THEN
         SELECT array_agg(elem) INTO v_local_green_zones
@@ -441,16 +484,34 @@ BEGIN
     -- ======================================================================
     v_committed_mph := v_committed_miles / NULLIF(v_committed_minutes / 60.0, 0);
 
-    IF v_hourly_rate IS NULL OR v_dollars_per_mile IS NULL THEN
-        v_dsi := NULL;
-    ELSIF v_dsi_formula = 'net_hourly' THEN
-        -- Real dollars per hour after the vehicle takes its cut. Speed comes
-        -- from the offer itself, so a city crawl and a highway run are costed
-        -- correctly with no tuning constant.
-        v_dsi := v_hourly_rate - v_committed_mph * v_cost_per_mile;
+    -- ---- (A) THE HONEST NUMBER -- computed from primitives, always ----------
+    -- net_hourly_usd = ehr - mph*cost = mph*(dpm - cost). Real $/hr in pocket
+    -- after vehicle cost. Auditable by hand off the card. Correct at 12 mph and
+    -- at 44 mph. No free constant: the speed comes from the offer itself.
+    -- NULL-STRICT: any missing primitive yields no score and no verdict.
+    IF v_hourly_rate IS NULL OR v_dollars_per_mile IS NULL
+       OR v_committed_mph IS NULL OR v_cost_per_mile IS NULL THEN
+        v_net_hourly_usd := NULL;
+        v_dsi_weighted   := NULL;
     ELSE
-        v_dsi := v_hourly_rate + K_DSI_MILE_WEIGHT * (v_dollars_per_mile - v_cost_per_mile);
+        v_net_hourly_usd := v_hourly_rate - v_committed_mph * v_cost_per_mile;
+        -- legacy index, computed regardless of active formula so history stays
+        -- comparable and nothing is computed then thrown away
+        v_dsi_weighted   := v_hourly_rate
+                            + K_DSI_MILE_WEIGHT * (v_dollars_per_mile - v_cost_per_mile);
     END IF;
+
+    -- ---- the verdict metric -------------------------------------------------
+    -- 'net_hourly' and 'indexed' are the SAME economics; they differ only in
+    -- what gets displayed. So both score on net_hourly_usd, and at matched
+    -- thresholds they must return identical verdicts.
+    IF v_dsi_formula = 'weighted' THEN
+        v_score := v_dsi_weighted;
+    ELSE
+        v_score := v_net_hourly_usd;
+    END IF;
+    v_dsi := v_score;   -- provisional; 'indexed' overrides the RETURNED value
+                        -- below, AFTER the verdict has been decided
 
     -- ======================================================================
     -- 10. MILEAGE FLOOR -- a safety floor, not part of the score. Long trips
@@ -556,10 +617,47 @@ BEGIN
     END IF;
 
     -- ======================================================================
-    -- 13. TRACE
+    -- 12b. DISPLAY INDEX -- computed AFTER the verdict, on purpose.
+    -- ======================================================================
+    -- Everything above this line decided the outcome. Nothing below it can.
+    -- dsi_index is a single positive constant times the honest $/hr, so it is
+    -- strictly increasing through the origin: same sign, same rank, zero at
+    -- break-even, by construction. The verdict never reads it.
+    v_dsi_index := v_display_scale * v_net_hourly_usd;
+
+    -- The RETURNED value depends only on presentation preference.
+    IF v_dsi_formula = 'indexed' THEN
+        v_dsi := v_dsi_index;
+    END IF;
+    -- ('weighted' and 'net_hourly' keep v_dsi = v_score, set before the verdict.)
+
+    -- ======================================================================
+    -- 13. TRACE -- every primitive persisted on EVERY decision, whichever
+    --     formula is active, so any past decision stays auditable from the log
+    --     and history remains comparable across a formula change.
     -- ======================================================================
     v_trace := jsonb_build_object(
         'engine',              'v3',
+        'fare',                gross_payout_in,
+        'pickupMi',            round(v_eff_pickup_miles, 2),
+        'pickupMin',           COALESCE(pickup_minutes_in, 0),
+        'tripMi',              round(v_eff_trip_miles, 2),
+        'tripMin',             COALESCE(trip_minutes_in, 0),
+        'deadheadMi',          round(v_return_miles, 2),
+        'deadheadMin',         round(v_return_minutes, 1),
+        'totalMi',             round(v_committed_miles, 2),
+        'totalMin',            round(v_committed_minutes, 1),
+        'dpm',                 round(v_dollars_per_mile, 4),
+        'ehr',                 round(v_hourly_rate, 2),
+        'mph',                 round(v_committed_mph, 2),
+        'costPerMileUsed',     v_cost_per_mile,
+        'netHourlyUsd',        round(v_net_hourly_usd, 2),
+        'dsiWeighted',         round(v_dsi_weighted, 2),
+        'dsiIndex',            round(v_dsi_index, 2),
+        'displayScale',        v_display_scale,
+        'scoreUsedForVerdict', round(v_score, 2),
+        'thresholdUsed',       round(v_dsi_threshold, 2)
+    ) || jsonb_build_object(
         'pickupMiles',         round(v_eff_pickup_miles, 2),
         'tripMiles',           round(v_eff_trip_miles, 2),
         'returnMiles',         round(v_return_miles, 2),
