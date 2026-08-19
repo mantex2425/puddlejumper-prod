@@ -116,9 +116,11 @@ DECLARE
 
     v_committed_miles     numeric;
     v_committed_minutes   numeric;
+    v_committed_mph       numeric;
     v_hourly_rate         numeric;
     v_dollars_per_mile    numeric;
     v_dsi                 numeric;
+    v_dsi_formula         text;
 
     -- mileage floor
     v_mf_config           jsonb;
@@ -176,6 +178,18 @@ BEGIN
     v_max_pickup_miles := COALESCE((v_settings->>'max_pickup_miles')::numeric, 25.0);
     v_deadhead_percent := COALESCE((v_settings->>'deadhead_percent')::numeric, 1.0);
     v_red_zones        := v_settings->'redZones';
+
+    -- DSI formula. 'weighted' is the legacy shape and remains the default, so
+    -- nothing changes unless a driver explicitly opts in.
+    --   weighted   : hourly + MILE_WEIGHT * (dpm - cost)   -- unitless index
+    --   net_hourly : hourly - mph * cost                   -- real $/hr after
+    --                (identically  mph * (dpm - cost))        vehicle cost
+    -- The weighted form charges miles as though driving MILE_WEIGHT (12) mph.
+    -- At real road speeds (28-44 mph observed) that under-charges mileage and
+    -- over-rewards fast, long-pickup offers -- a $11.14 offer with a 16.8 mi
+    -- pickup scored 2nd best of 7 on 2026-08-18 while netting $5.97/hr, 5th of 7.
+    -- net_hourly uses the offer's OWN implied speed and needs no constant.
+    v_dsi_formula := COALESCE(v_settings->>'dsi_formula', 'weighted');
 
     -- Driver-set DSI threshold (spec 5). Default derives from the legacy
     -- floors so v3 starts at exactly v2's strictness:
@@ -425,8 +439,15 @@ BEGIN
     -- ======================================================================
     -- 9. DSI, ONCE (I2) -- NULL-STRICT: a missing rate yields no score.
     -- ======================================================================
+    v_committed_mph := v_committed_miles / NULLIF(v_committed_minutes / 60.0, 0);
+
     IF v_hourly_rate IS NULL OR v_dollars_per_mile IS NULL THEN
         v_dsi := NULL;
+    ELSIF v_dsi_formula = 'net_hourly' THEN
+        -- Real dollars per hour after the vehicle takes its cut. Speed comes
+        -- from the offer itself, so a city crawl and a highway run are costed
+        -- correctly with no tuning constant.
+        v_dsi := v_hourly_rate - v_committed_mph * v_cost_per_mile;
     ELSE
         v_dsi := v_hourly_rate + K_DSI_MILE_WEIGHT * (v_dollars_per_mile - v_cost_per_mile);
     END IF;
@@ -546,6 +567,8 @@ BEGIN
         'returnSource',        v_return_source,
         'committedMiles',      round(v_committed_miles, 2),
         'committedMinutes',    round(v_committed_minutes, 1),
+        'committedMph',        round(v_committed_mph, 1),
+        'dsiFormula',          v_dsi_formula,
         'impliedMph',          round(v_implied_mph, 1),
         'impliedMphClamped',   (v_implied_mph IN (K_MIN_IMPLIED_MPH, K_MAX_IMPLIED_MPH)),
         'grossPayout',         gross_payout_in,
