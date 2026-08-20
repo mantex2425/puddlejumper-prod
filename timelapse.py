@@ -2,6 +2,9 @@ from flask import Blueprint, jsonify, request
 from db import get_db
 from utils import verify_and_get_user_id, require_firebase_auth
 
+# NOTE 2026-08-20: these queries group by pickup_h3 (where the rider
+# is), NOT driver_h3 (where the driver was sitting). They agree only
+# 4.3% of the time. pickup_h3 is what generalises across drivers.
 timelapse_bp = Blueprint('timelapse', __name__)
 
 @require_firebase_auth
@@ -38,18 +41,18 @@ def get_timelapse_frame():
 
         cur.execute(f"""
             SELECT 
-                driver_h3 as h3_index,
+                pickup_h3 as h3_index,
                 count(*) as samples,
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as ai_hourly,
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as ai_mileage
             FROM app_private.offer_history
-            WHERE driver_h3 IS NOT NULL
+            WHERE pickup_h3 IS NOT NULL
               AND is_validated = true
               AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
               AND dollars_per_mile > 0 AND dollars_per_mile < 10
               {day_clause}
               {hour_clause}
-            GROUP BY driver_h3
+            GROUP BY pickup_h3
             HAVING count(*) >= %s
             ORDER BY count(*) DESC
         """, params + [min_samples])
@@ -80,18 +83,18 @@ def get_timelapse_frame():
                 round(avg(ai_hourly)::numeric, 2) as avg_hourly,
                 round(avg(ai_mileage)::numeric, 2) as avg_mileage
             FROM (
-                SELECT driver_h3,
+                SELECT pickup_h3,
                     count(*) as samples,
                     percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric as ai_hourly,
                     percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric as ai_mileage
                 FROM app_private.offer_history
-                WHERE driver_h3 IS NOT NULL
+                WHERE pickup_h3 IS NOT NULL
                   AND is_validated = true
                   AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
                   AND dollars_per_mile > 0 AND dollars_per_mile < 10
                   {day_clause}
                   {hour_clause}
-                GROUP BY driver_h3
+                GROUP BY pickup_h3
                 HAVING count(*) >= %s
             ) sub
         """, params + [min_samples])
@@ -148,7 +151,7 @@ def get_time_grid():
                 round(avg(dollars_per_mile)::numeric, 2) as avg_mileage,
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as median_mileage
             FROM app_private.offer_history
-            WHERE driver_h3 IS NOT NULL
+            WHERE pickup_h3 IS NOT NULL
               AND is_validated = true
               AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
               AND dollars_per_mile > 0 AND dollars_per_mile < 10
