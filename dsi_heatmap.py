@@ -49,8 +49,13 @@ surface AS (
     WHERE co.dsi_v1 IS NOT NULL
       AND co.effective_hourly_rate > 0
       AND co.dollars_per_mile > 0
-      AND h3_grid_distance(co.pickup_h3::h3index, (SELECT center FROM params))
-            <= %(display_k)s + %(idw_k)s
+      -- NOT h3_grid_distance: it raises (h3 err 1) on far cells, so it would
+      -- 500 on exactly the second-market data it is meant to exclude. Great-
+      -- circle distance on the hex centre is defined at any separation.
+      AND app_private.distance_miles(
+              app_private.h3_to_lat(co.pickup_h3),
+              app_private.h3_to_lng(co.pickup_h3),
+              %(lat)s, %(lng)s) <= %(reach_miles)s
 ),
 interp AS (
     -- space-TIME IDW per display cell (cells with no nearby surface point drop out -> unrendered)
@@ -127,6 +132,9 @@ def get_heatmap():
         cur.execute(_HEATMAP_SQL, {
             "lat": lat, "lng": lng, "display_k": display_k,
             "idw_k": IDW_K, "time_w": TIME_W, "daytype_pen": DAYTYPE_PEN,
+            # res-8 cells sit ~0.572 mi apart centre-to-centre; round up and add
+            # a mile so the circle fully contains the hex disk being rendered.
+            "reach_miles": (display_k + IDW_K) * 0.6 + 1.0,
         })
         row = cur.fetchone()
         return jsonify(row["geojson"] if row else
