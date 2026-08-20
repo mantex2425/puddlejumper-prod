@@ -38,8 +38,8 @@ def get_coords_from_hex(cur, hex_code):
 # ROUTES
 # ======================================================================
 
-@require_firebase_auth
 @decisions_bp.route("/history", methods=["GET"])
+@require_firebase_auth
 def get_decision_history():
     try:
         uid = verify_and_get_user_id(request)
@@ -78,8 +78,8 @@ def get_decision_history():
         if 'conn' in locals(): conn.close()
 
 
-@require_firebase_auth
 @decisions_bp.route("/simulate-suite", methods=["POST"])
+@require_firebase_auth
 def simulate_test_suite():
     try:
         uid = verify_and_get_user_id(request)
@@ -280,8 +280,8 @@ def parse_request(p, uid):
 # ======================================================================
 # ROUTE -- /decisions/  (orchestrator only, no business logic)
 # ======================================================================
-@require_firebase_auth
 @decisions_bp.route("/", methods=["POST"], strict_slashes=False)
+@require_firebase_auth
 def make_decision():
     import time
     _t0 = time.time()
@@ -524,8 +524,8 @@ def validate_offer(fare, trip_miles, trip_minutes, pickup_miles, pickup_minutes,
     
     return is_valid, flags
 
-@require_firebase_auth
 @decisions_bp.route("/harvest", methods=["POST"])
+@require_firebase_auth
 def harvest_offer():
     """
     Fire-and-forget endpoint to store anonymous offer data for crowdsourced pricing database.
@@ -691,8 +691,8 @@ def harvest_offer():
     finally:
         cur.close()
         conn.close()
-@require_firebase_auth
 @decisions_bp.route("/optimize", methods=["GET"])
+@require_firebase_auth
 def get_optimization_recommendations():
     """
     Returns threshold optimization recommendations based on historical decision data.
@@ -781,8 +781,8 @@ def get_optimization_recommendations():
     finally:
         if 'conn' in locals(): conn.close()
 
-@require_firebase_auth
 @decisions_bp.route("/optimize/pareto", methods=["GET"])
+@require_firebase_auth
 def get_pareto_frontier():
     """
     Returns Pareto-optimal threshold combinations - the meaningful tradeoffs
@@ -924,8 +924,8 @@ def get_pareto_frontier():
 # GET /api/v1/decisions/market-rate
 # Returns current market rate for a given lat/lng (and optional dow/hour)
 # ======================================================================
-@require_firebase_auth
 @decisions_bp.route("/market-rate", methods=["GET"])
+@require_firebase_auth
 def get_market_rate():
     try:
         driver_id = verify_and_get_user_id(request)

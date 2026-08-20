@@ -28,8 +28,8 @@ zones_lookup_bp = Blueprint("zones_lookup", __name__)
 # ---------------------------------------------------------------------
 # GET /api/v1/zones/lookup
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_lookup_bp.route('/api/v1/zones/lookup', methods=['GET'])
+@require_firebase_auth
 def lookup_city_h3_key():
 
     # 1. AUTH
@@ -64,8 +64,8 @@ def lookup_city_h3_key():
 # ---------------------------------------------------------------------
 # GET /api/v1/states/<state_id>/cities
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_lookup_bp.route("/api/v1/states/<state_id>/cities", methods=["GET"])
+@require_firebase_auth
 def get_state_cities(state_id):
 
     # AUTH
@@ -128,8 +128,8 @@ def get_state_cities(state_id):
 # ---------------------------------------------------------------------
 # GET /api/v1/neighborhoods
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_lookup_bp.route("/api/v1/neighborhoods", methods=["GET"])
+@require_firebase_auth
 def get_neighborhoods():
 
     conn = None

@@ -87,8 +87,8 @@ def _find_market_by_id(markets: List[Dict[str, Any]], target_id: str) -> Tuple[O
 # Routes
 # ----------------------------------------------------------------------
 
-@require_firebase_auth
 @markets_bp.route("/markets-with-active", methods=["GET"])
+@require_firebase_auth
 def get_markets_with_active():
     """
     Gets all markets (which now have stored UUIDs) and identifies 
@@ -139,8 +139,8 @@ def get_markets_with_active():
             conn.close()
 
 
-@require_firebase_auth
 @markets_bp.route("/markets", methods=["POST"])
+@require_firebase_auth
 def create_market():
     """Create a new market, assign a persistent UUID, and set as active."""
     conn = get_db()
@@ -197,8 +197,8 @@ def create_market():
             conn.close()
 
 
-@require_firebase_auth
 @markets_bp.route("/markets/<string:market_id>/rename", methods=["PUT"])
+@require_firebase_auth
 def rename_market(market_id):
     """Renames a market identified by its UUID."""
     uid = verify_and_get_user_id(request)
@@ -246,8 +246,8 @@ def rename_market(market_id):
             conn.close()
 
 
-@require_firebase_auth
 @markets_bp.route("/markets/<string:market_id>", methods=["DELETE"])
+@require_firebase_auth
 def delete_market(market_id):
     """Delete an existing market by UUID."""
     uid = verify_and_get_user_id(request)
@@ -285,8 +285,8 @@ def delete_market(market_id):
             conn.close()
 
 
-@require_firebase_auth
 @markets_bp.route("/markets/<string:market_id>", methods=["PUT"])
+@require_firebase_auth
 def update_market_details(market_id):
     """Update market details (focalPoint, greenZones) by UUID."""
     uid = verify_and_get_user_id(request)
@@ -327,8 +327,8 @@ def update_market_details(market_id):
 # Legacy Route Support
 # ----------------------------------------------------------------------
 
-@require_firebase_auth
 @markets_bp.route("/markets", methods=["GET"])
+@require_firebase_auth
 def get_markets_legacy():
     """Legacy endpoint: Get all markets."""
     conn = get_db()
@@ -341,8 +341,8 @@ def get_markets_legacy():
     finally:
         if 'conn' in locals(): conn.close()
 
-@require_firebase_auth
 @markets_bp.route("/proximity-check", methods=["POST"])
+@require_firebase_auth
 def check_proximity():
       try:
           uid = verify_and_get_user_id(request)

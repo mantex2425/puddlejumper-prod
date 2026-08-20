@@ -18,8 +18,8 @@ active_market_bp = Blueprint("active_market", __name__)
 # --------------------------------------------------------------
 # GET /api/v1/active-market
 # --------------------------------------------------------------
-@require_firebase_auth
 @active_market_bp.route("/api/v1/active-market", methods=["GET"])
+@require_firebase_auth
 def get_active_market():
     """Get the active market ID"""
     try:
@@ -51,8 +51,8 @@ def get_active_market():
 # --------------------------------------------------------------
 # POST /api/v1/active-market
 # --------------------------------------------------------------
-@require_firebase_auth
 @active_market_bp.route("/api/v1/active-market", methods=["POST"])
+@require_firebase_auth
 def set_active_market():
     """Set the active market using the Market ID hash."""
     conn = None # Initialize conn outside try block

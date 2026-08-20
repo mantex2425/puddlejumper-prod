@@ -7,8 +7,8 @@ from utils import verify_and_get_user_id, require_firebase_auth
 # 4.3% of the time. pickup_h3 is what generalises across drivers.
 timelapse_bp = Blueprint('timelapse', __name__)
 
-@require_firebase_auth
 @timelapse_bp.route('/timelapse', methods=['GET'])
+@require_firebase_auth
 def get_timelapse_frame():
     try:
         uid = verify_and_get_user_id(request)
@@ -122,8 +122,8 @@ def get_timelapse_frame():
 # Endpoint: GET /api/v1/timelapse/grid?min_samples=2
 # ============================================================
 
-@require_firebase_auth
 @timelapse_bp.route('/timelapse/grid', methods=['GET'])
+@require_firebase_auth
 def get_time_grid():
     """
     Returns a 7x24 aggregated grid of offer pricing data.

@@ -29,8 +29,8 @@ print("### LOADED zones_geo.py FROM:", __file__)
 # ---------------------------------------------------------------------
 # GET /api/v1/zones/geometry
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_geo_bp.route('/zones/geometry', methods=['GET'])
+@require_firebase_auth
 def get_zones_geometry():
     uid = g.user.get("uid")
     if not uid:
@@ -144,8 +144,8 @@ def get_zones_geometry():
 # ---------------------------------------------------------------------
 # POST /api/v1/zones/hexes_to_polygons
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_geo_bp.route('/zones/hexes_to_polygons', methods=['POST'])
+@require_firebase_auth
 def hexes_to_polygons():
     uid = verify_and_get_user_id(request)
     if not uid:
@@ -206,8 +206,8 @@ def hexes_to_polygons():
 # ---------------------------------------------------------------------
 # GET /api/v1/zones/market_grid
 # ---------------------------------------------------------------------
-@require_firebase_auth
 @zones_geo_bp.route('/zones/market_grid', methods=['GET'])
+@require_firebase_auth
 def get_market_grid():
     uid = g.user.get("uid")
     if not uid:

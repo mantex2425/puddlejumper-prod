@@ -338,8 +338,8 @@ def get_my_metros():
 # ---------------------------------------------------------
 # Endpoint: Create/Upsert Metroplex from Google Places
 # ---------------------------------------------------------
-@require_firebase_auth
 @bp.route("/metro", methods=["POST"])
+@require_firebase_auth
 def create_metro():
     try:
         verify_and_get_user_id(request)

@@ -22,8 +22,8 @@ def generate_referral_code(length=8):
 # ROUTE: Apply a Referral Code
 # ======================================================================
 
-@require_firebase_auth
 @referrals_bp.route('/apply', methods=['POST'])
+@require_firebase_auth
 def apply_referral():
     try:
         uid = verify_and_get_user_id(request)
@@ -80,8 +80,8 @@ def apply_referral():
 # ROUTE: Get or Create My Referral Code
 # ======================================================================
 
-@require_firebase_auth
 @referrals_bp.route('/my-code', methods=['GET'])
+@require_firebase_auth
 def get_my_code():
     try:
         uid = verify_and_get_user_id(request)
@@ -139,8 +139,8 @@ def get_my_code():
 # ROUTE: Get My Referral Status / Stats
 # ======================================================================
 
-@require_firebase_auth
 @referrals_bp.route('/status', methods=['GET'])
+@require_firebase_auth
 def get_referral_status():
     try:
         uid = verify_and_get_user_id(request)

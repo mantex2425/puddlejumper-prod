@@ -27,8 +27,8 @@ _NEW_DRIVER_DEFAULTS = {
     "shifts": [],
 }
 
-@require_firebase_auth
 @auth_bp.route("/init", methods=["POST"])
+@require_firebase_auth
 def initialize_user():
     """
     Endpoint run immediately after client Firebase sign-in.
