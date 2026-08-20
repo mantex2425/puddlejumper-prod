@@ -36,10 +36,7 @@ from superpower_geo import superpower_geo_bp
 from decisions import decisions_bp
 from dsi_heatmap import dsi_heatmap_bp
 from driver_status import driver_status_bp
-from driver_heartbeat import driver_heartbeat_bp
 from test_endpoints import test_endpoints_bp
-from pickup_confirm import pickup_confirm_bp
-from dropoff_confirm import dropoff_confirm_bp
 from monitor import run_monitor
 from chat_ai import chat_ai_bp
 from puddles_brain import puddles_bp
@@ -61,10 +58,7 @@ app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
 app.register_blueprint(dsi_heatmap_bp, url_prefix='/api/v1/dsi')
 app.register_blueprint(driver_status_bp, url_prefix='/api/v1')
-app.register_blueprint(driver_heartbeat_bp, url_prefix='/api/v1')
 app.register_blueprint(test_endpoints_bp, url_prefix='/api/v1')
-app.register_blueprint(pickup_confirm_bp, url_prefix='/api/v1')
-app.register_blueprint(dropoff_confirm_bp, url_prefix='/api/v1')
 app.register_blueprint(driver_debug_bp, url_prefix='/api/v1')
 
 @app.route('/internal/monitor', methods=['POST'])
@@ -273,7 +267,6 @@ def contest_label():
     from utils import verify_and_get_user_id
     import logging
     from datetime import datetime, timezone
-    import event_ledger
 
     get_firebase_app()
 
@@ -303,48 +296,10 @@ def contest_label():
                 RETURNING label_id
             """, (uid, label, label_dt))
             row = cur.fetchone()
-            # event-ledger dual-write: a ground_truth_tap event carrying the at-tap
-            # context contest_labels structurally lacks (the live queue + bound offer) —
-            # §VIII Passive lane, DISTINCT event_type (human truth, NOT a system detection).
-            # Savepoint-guarded + best-effort: a ledger failure must NEVER lose the tap
-            # (the contest_labels INSERT precedes the savepoint). event_time = the DEVICE
-            # tap-time so the row lands on the timeline where the human marked the PUDO.
-            try:
-                cur.execute("SAVEPOINT tap_ledger")
-                _seed = event_ledger.read_ledger_seed(cur, uid)
-                cur.execute(
-                    "SELECT current_offer_id FROM app_private.driver_trip_state WHERE driver_id = %s",
-                    (uid,),
-                )
-                _dts = cur.fetchone()
-                # latest telemetry (odometer + position) at the tap — the ground-truth
-                # anchor that makes "was a band reap premature vs where I actually was" a
-                # pure ledger read (reap_odo vs tap_odo), no heartbeat_log join needed.
-                cur.execute(
-                    "SELECT cumulative_miles, lat, lng FROM app_private.heartbeat_log "
-                    "WHERE driver_id = %s ORDER BY logged_at DESC LIMIT 1",
-                    (uid,),
-                )
-                _hb = cur.fetchone()
-                event_ledger.emit_event(
-                    cur, uid,
-                    {"event_type": "ground_truth_tap",
-                     "offer_id": (_dts or {}).get("current_offer_id"),
-                     "queue_snapshot": {"ids": (_seed or {}).get("last_queue_snapshot_ids", [])},
-                     "payload": {"label": label, "label_time_ms": label_time_ms,
-                                 "label_id": row["label_id"]}},
-                    event_time=label_dt,
-                    cumulative_miles=(_hb or {}).get("cumulative_miles"),
-                    lat=(_hb or {}).get("lat"),
-                    lng=(_hb or {}).get("lng"),
-                )
-                cur.execute("RELEASE SAVEPOINT tap_ledger")
-            except Exception as _le:
-                try:
-                    cur.execute("ROLLBACK TO SAVEPOINT tap_ledger")
-                except Exception:
-                    pass
-                logging.warning(f"[CONTEST/LABEL] ledger emit skipped (swallowed): {_le}")
+            # 2026-08-20: the event-ledger dual-write is REMOVED with the PUDO
+            # stack. It emitted a ground_truth_tap event joining driver_trip_state
+            # and heartbeat_log -- both part of the detection apparatus 2.0 drops.
+            # The contest_labels INSERT above is retained; it stands alone.
             conn.commit()
             logging.info(f"[CONTEST/LABEL] {uid[:8]}... {label} @ {label_dt}")
             return jsonify({"label_id": row["label_id"], "status": "ok"}), 200
