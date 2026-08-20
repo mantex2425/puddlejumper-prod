@@ -206,6 +206,15 @@ def run_decision_engine(cur, conn, uid, params):
                 "hourlyRate":       float(row["hourly_rate"]      or 0),
                 "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
                 "dsi":              float(row["dsi"]) if row["dsi"] is not None else None,
+                # The number the DEVICE renders. It is the exact value the
+                # verdict was made on -- no client-side recomputation, no
+                # second formula. See DsiConstants deletion (2026-08-19).
+                "netHourlyUsd":     float(row["net_hourly_usd"]) if row["net_hourly_usd"] is not None else None,
+                # None on ACCEPT. On DECLINE: "threshold" (score below bar),
+                # "gate:<name>" (hard gate fired ahead of scoring), or
+                # "config:<name>"/"null_strict". The device shows the reason
+                # for a gate decline rather than a bare red glow.
+                "declineClass":     row["decline_class"],
                 "deadheadMiles":    float(row["return_miles"]     or 0),
                 "deadheadCost":     0.0,   # no longer a cost; it is denominator
                 "arrivalDetected":  bool(_v3_trace.get("arrivalDetected") or False),

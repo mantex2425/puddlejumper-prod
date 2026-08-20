@@ -210,11 +210,25 @@ def save_preferences():
         data["driver_id"] = uid
         conn = get_db()
         with conn.cursor() as cur:
+            # MERGE, never replace (2026-08-20).
+            #
+            # This previously did `SET settings = EXCLUDED.settings`, which
+            # overwrote the WHOLE blob with whatever the client posted. The
+            # Android UserPreferences model does not carry engine_version,
+            # dsi_formula or dsi_threshold, so any save from the phone silently
+            # deleted them -- reverting the driver to decision_engine_v2 and the
+            # weighted formula mid-shift, with no error surfaced anywhere.
+            #
+            # `||` is a shallow jsonb merge: posted keys win, keys the client has
+            # never heard of survive. Server-owned settings are therefore safe
+            # from a client that predates them. Cost: a key can no longer be
+            # DELETED via this endpoint, which for settings is the right default.
             cur.execute("""
                 INSERT INTO app_private.driver_settings_new (driver_id, settings)
                 VALUES (%s, %s::jsonb)
                 ON CONFLICT (driver_id) DO UPDATE
-                    SET settings = EXCLUDED.settings, last_updated = now()
+                    SET settings = app_private.driver_settings_new.settings || EXCLUDED.settings,
+                        last_updated = now()
             """, (uid, json.dumps(data)))
             conn.commit()
             
