@@ -37,13 +37,10 @@ from decisions import decisions_bp
 from dsi_heatmap import dsi_heatmap_bp
 from test_endpoints import test_endpoints_bp
 from monitor import run_monitor
-from chat_ai import chat_ai_bp
-from puddles_brain import puddles_bp
 from account import account_bp
 from referrals import referrals_bp
 from crash_reports import crash_reports_bp
 from timelapse import timelapse_bp
-from market_intelligence import market_intelligence_bp
 from driver_debug import driver_debug_bp
 
 app.register_blueprint(markets_bp)
@@ -53,7 +50,6 @@ app.register_blueprint(geo_bp, url_prefix="/api/v1")
 app.register_blueprint(zones_geo_bp, url_prefix="/api/v1")
 app.register_blueprint(active_market_bp, url_prefix="")
 app.register_blueprint(auth_bp)
-app.register_blueprint(chat_ai_bp, url_prefix='/api/v1')
 app.register_blueprint(decisions_bp, url_prefix='/api/v1/decisions')
 app.register_blueprint(dsi_heatmap_bp, url_prefix='/api/v1/dsi')
 app.register_blueprint(test_endpoints_bp, url_prefix='/api/v1')
@@ -65,17 +61,11 @@ def monitor_endpoint():
     run_monitor()
     return 'OK', 200
 app.register_blueprint(superpower_geo_bp, url_prefix="/api/v1")
-app.register_blueprint(puddles_bp, url_prefix="/api/v1")
 app.register_blueprint(account_bp, url_prefix='/api/v1/account')
 app.register_blueprint(referrals_bp, url_prefix='/api/v1/referrals')
 app.register_blueprint(crash_reports_bp)
 app.register_blueprint(timelapse_bp, url_prefix="/api/v1")
-app.register_blueprint(market_intelligence_bp, url_prefix="/api")
 
-
-# Force puddles_brain to fully initialize at startup
-from puddles_brain import app_brain
-_ = app_brain  # Reference to trigger full module load
 
 # --------------------------------------------------------------
 # 3. Global Auth Middleware (Optimized)
