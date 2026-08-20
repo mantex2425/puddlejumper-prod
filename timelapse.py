@@ -19,6 +19,21 @@ def get_timelapse_frame():
     hour = request.args.get('hour', type=int)      # optional: 0-23
     min_samples = request.args.get('min_samples', 2, type=int)
 
+    # Spatial scope. offer_history carries no market/metroplex column, so bound
+    # the aggregate by real distance from the caller.
+    #
+    # NOT h3_grid_distance: that is a local grid walk and RAISES (h3 error 1)
+    # once two cells are far apart -- verified Houston -> Dallas -- so it would
+    # blow up on exactly the multi-city data it is meant to exclude.
+    # distance_miles is a great-circle metric, defined at any separation.
+    #
+    # Omitting lat/lng keeps the old nationwide behaviour for older clients and
+    # is reported back as scoped=false so the caller knows not to trust it.
+    lat = request.args.get('lat', type=float)
+    lng = request.args.get('lng', type=float)
+    radius_mi = min(max(request.args.get('radiusMiles', 40, type=int), 1), 300)
+    scoped = lat is not None and lng is not None
+
     if day is not None and (day < 0 or day > 6):
         return jsonify({"error": "day must be 0-6"}), 400
     if hour is not None and (hour < 0 or hour > 23):
@@ -155,10 +170,15 @@ def get_time_grid():
               AND is_validated = true
               AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
               AND dollars_per_mile > 0 AND dollars_per_mile < 10
+              {scope_clause}
             GROUP BY day_of_week, hour_of_day
             HAVING count(*) >= %s
             ORDER BY day_of_week, hour_of_day
-        """, (min_samples,))
+        """.format(scope_clause=(
+            "AND pickup_lat IS NOT NULL AND pickup_lng IS NOT NULL "
+            "AND app_private.distance_miles(pickup_lat, pickup_lng, %s, %s) <= %s"
+            if scoped else ""
+        )), (([lat, lng, radius_mi] if scoped else []) + [min_samples]))
 
         rows = cur.fetchall()
 
@@ -191,6 +211,8 @@ def get_time_grid():
         return jsonify({
             "status": "ok",
             "cells": cells,
+            "scoped": scoped,
+            "scopeRadiusMiles": radius_mi if scoped else None,
             "summary": {
                 "cellCount": coverage,
                 "totalSlots": 168,
