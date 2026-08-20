@@ -145,20 +145,27 @@ def run_decision_engine(cur, conn, uid, params):
 
     # ── engine selection ──────────────────────────────────────────────
     # Per-driver, read from settings, so a mid-drive rollback is one UPDATE
-    # and needs no redeploy:
+    # and needs no redeploy. v3 is the DEFAULT (2026-08-20): a new driver's
+    # settings blob is '{}', and defaulting to v2 silently gave every new
+    # account the engine v3 replaced -- double-charged return leg, market rate
+    # overriding the driver's floor, inert pulse. Rollback is now an explicit
+    # opt-out:
     #   UPDATE app_private.driver_settings_new
-    #      SET settings = settings - 'engine_version' WHERE driver_id = '<uid>';
+    #      SET settings = settings || '{"engine_version":"v2"}'::jsonb
+    #    WHERE driver_id = '<uid>';
     try:
         cur.execute(
-            "SELECT COALESCE(settings->>'engine_version', 'v2') AS ev "
+            "SELECT COALESCE(settings->>'engine_version', 'v3') AS ev "
             "FROM app_private.driver_settings_new WHERE driver_id = %s",
             (uid,),
         )
         _ev_row = cur.fetchone()
-        engine_version = (_ev_row["ev"] if _ev_row else None) or "v2"
+        # No settings row at all (brand-new account) also means v3.
+        engine_version = (_ev_row["ev"] if _ev_row else None) or "v3"
     except Exception as _ev_err:
-        logging.warning(f"[ENGINE] version lookup failed, using v2: {_ev_err}")
-        engine_version = "v2"
+        # A lookup failure must not silently downgrade the engine.
+        logging.warning(f"[ENGINE] version lookup failed, using v3: {_ev_err}")
+        engine_version = "v3"
 
     # TOWARDS removed 2026-08-20: directional filtering on random offers yielded
     # a 15% accept rate (theoretical ceiling ~37% for a +/-66 deg cone against
