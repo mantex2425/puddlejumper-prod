@@ -1,84 +1,6 @@
--- ============================================================================
--- app_private.decision_engine_v3
--- ----------------------------------------------------------------------------
--- PuddleJumper 2.0 consolidated decision engine.
---
--- Supersedes decision_engine_v2. Ships ALONGSIDE v2 (v2 is not dropped) so
--- verdicts can be diffed against the 669k-row decision history before cutover.
---
--- WHY v3 EXISTS -- three defects in v2, all fixed here by construction:
---
---   1. DSI was computed in three places with three different rate bases:
---        router.py:657   compute_dsi_v1(card rates)          -> trip-only
---        logger.py:456   compute_dsi_v1(engine rates)        -> full-leg
---        engine.py       compute_personal_dsi(fallback)      -> full-leg
---      The verdict then compared a full-leg Personal DSI against a trip-only
---      Local Market DSI. Apples to oranges, biased toward over-declining.
---      v3 computes rates ONCE and derives DSI ONLY from those rates.
---
---   2. The return leg was charged TWICE -- its minutes/miles inflated both
---      denominators AND its imputed cost was subtracted from the numerator
---      (v_net_pay := gross - v_calculated_cost). v3 puts it in the denominator
---      only, where an unpaid drive actually belongs.
---
---   3. Pulse was inert: line 478 short-circuited on the UNRAISED bar before
---      the pulse-raised threshold was consulted, so any offer good enough to
---      trigger pulse was accepted anyway. v3 applies it to the threshold with
---      no short-circuit and no guard.
---
--- THREE INVARIANTS -- every one of the above is a violation of one of these:
---   I1. Rates are computed EXACTLY ONCE, from the committed leg.
---   I2. DSI is derived ONLY from those rates. Never recomputed, never a second
---       DSI from a different basis.
---   I3. Unpaid segments live in the DENOMINATOR. Never also in the numerator.
---
--- REMOVED FROM v2 (ratified 2026-08-18):
---   * market-rate thresholds (get_market_rate / Price Radar) -> driver threshold
---   * arrival detection + switch_to_mode / switch_to_market_id  (A6)
---   * shifts (time-of-day threshold sets)
---   * calculation_method (per_hour / per_mile / both) -- DSI fuses both
---   * deadhead_basis -- a denominator model needs no either/or
---   * towardsEfficiencyThreshold setting (was dead: overwritten by the ladder)
---   * the separate overshoot block -- now just a non-zero return leg
---
--- RETAINED: mileageFloorConfig, the TOWARDS distance-scaled efficiency ladder,
---   max_pickup_miles gate, red-zone hard decline, GPS x1.3 distance fallback,
---   the 20-mile return fallback, deadhead_percent, x1.4 return circuity.
--- ============================================================================
-
-CREATE OR REPLACE FUNCTION app_private.decision_engine_v3(
-    user_id_in                  text,
-    pickup_lat_in               numeric,
-    pickup_lng_in               numeric,
-    dropoff_lat_in              numeric,
-    dropoff_lng_in              numeric,
-    gross_payout_in             numeric,
-    trip_miles_in               numeric,
-    trip_minutes_in             numeric,
-    pickup_minutes_in           numeric DEFAULT 0,
-    pickup_miles_in             numeric DEFAULT 0,
-    market_id_in                text    DEFAULT NULL,
-    towards_active              boolean DEFAULT false,
-    towards_target_lat          numeric DEFAULT NULL,
-    towards_target_lng          numeric DEFAULT NULL,
-    towards_market_id           text    DEFAULT NULL,
-    current_lat_in              numeric DEFAULT NULL,
-    current_lng_in              numeric DEFAULT NULL,
-    towards_backtrack_tolerance numeric DEFAULT 3.0,
-    is_puddle_jump_mode         boolean DEFAULT true
-)
-RETURNS TABLE(
-    verdict          text,
-    reason           text,
-    hourly_rate      numeric,
-    dollars_per_mile numeric,
-    dsi              numeric,
-    return_miles     numeric,
-    return_minutes   numeric,
-    threshold_source text,
-    trace_data       jsonb
-)
-LANGUAGE plpgsql
+CREATE OR REPLACE FUNCTION app_private.decision_engine_v3(user_id_in text, pickup_lat_in numeric, pickup_lng_in numeric, dropoff_lat_in numeric, dropoff_lng_in numeric, gross_payout_in numeric, trip_miles_in numeric, trip_minutes_in numeric, pickup_minutes_in numeric DEFAULT 0, pickup_miles_in numeric DEFAULT 0, market_id_in text DEFAULT NULL::text, current_lat_in numeric DEFAULT NULL::numeric, current_lng_in numeric DEFAULT NULL::numeric, is_puddle_jump_mode boolean DEFAULT true)
+ RETURNS TABLE(verdict text, reason text, hourly_rate numeric, dollars_per_mile numeric, dsi numeric, net_hourly_usd numeric, decline_class text, return_miles numeric, return_minutes numeric, threshold_source text, trace_data jsonb)
+ LANGUAGE plpgsql
 AS $function$
 DECLARE
     -- ---- tunables (named, never magic literals) ----------------------------
@@ -90,13 +12,18 @@ DECLARE
     K_MIN_IMPLIED_MPH     CONSTANT numeric := 15.0;   -- clamp floor
     K_MAX_IMPLIED_MPH     CONSTANT numeric := 55.0;   -- clamp ceiling
     K_DEFAULT_IMPLIED_MPH CONSTANT numeric := 30.0;   -- trip time missing
-    -- DISPLAY ONLY. Solved once against the clean corpus so the median genuine
-    -- offer's index reproduces its familiar 'weighted' value. Never read by the
-    -- verdict. Overridable via settings.dsi_display_scale (server-delivered).
-    -- Solved 2026-08-19 on 2,321 genuine offers (fixtures excluded): median
-    -- weighted 24.51 / median net-hourly 8.33 = 2.942, so the median offer's
-    -- index reproduces its familiar weighted value. Frozen.
-    K_DISPLAY_SCALE       CONSTANT numeric := 2.942;
+    -- DISPLAY SCALE. 1.0 means the driver sees real dollars per hour -- the
+    -- SAME number the verdict used. No transform, nothing to explain away.
+    --
+    -- RECOVERABLE BRANDED-INDEX CONSTANT: 2.942
+    --   Solved 2026-08-19 on 2,321 genuine offers (fixtures excluded) as
+    --   median weighted 24.51 / median net-hourly 8.33, so the median offer's
+    --   index reproduces the familiar 'weighted' number. To ship a branded
+    --   index instead of dollars, set settings.dsi_display_scale = 2.942.
+    --   One config change, no re-derivation. Also recorded in the methodology
+    --   doc appendix and as an inert settings key (see below).
+    K_DISPLAY_SCALE       CONSTANT numeric := 1.0;
+    K_BRANDED_INDEX_SCALE CONSTANT numeric := 2.942;  -- inert; documented above
 
     v_settings            jsonb;
     v_active_market       jsonb;
@@ -136,6 +63,7 @@ DECLARE
     v_dsi_index           numeric;   -- cosmetic: DISPLAY_SCALE x net_hourly_usd
     v_display_scale       numeric;
     v_score               numeric;   -- the verdict metric
+    v_decline_class       text;
 
     -- mileage floor
     v_mf_config           jsonb;
@@ -150,23 +78,6 @@ DECLARE
     -- pulse
     v_pulse_multiplier    numeric := 1.0;
 
-    -- towards
-    v_towards_market      jsonb;
-    v_towards_green_zones text[];
-    v_target_lat          numeric;
-    v_target_lng          numeric;
-    v_target_hex          text;
-    v_has_target          boolean := FALSE;
-    v_current_to_target   numeric;
-    v_pickup_to_target    numeric;
-    v_dropoff_to_target   numeric;
-    v_backtrack_miles     numeric;
-    v_net_progress        numeric;
-    v_efficiency          numeric;
-    v_efficiency_required numeric;
-    v_arrival_detected    boolean := FALSE;
-    v_target_disk         h3index[];
-
     v_nearest_hex         text;
     v_verdict             text;
     v_reason              text;
@@ -180,7 +91,8 @@ BEGIN
 
     IF v_settings IS NULL THEN
         RETURN QUERY SELECT 'DECLINE'::text, 'No driver settings found'::text,
-            NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
+            NULL::numeric, NULL::numeric, NULL::numeric,
+            NULL::numeric, 'config:no_settings'::text, 0::numeric, 0::numeric,
             'no_settings'::text, '{}'::jsonb;
         RETURN;
     END IF;
@@ -238,7 +150,8 @@ BEGIN
         ELSE
             RETURN QUERY SELECT 'DECLINE'::text,
                 format('dsi_formula=%s requires an explicit dsi_threshold in $/hr', v_dsi_formula)::text,
-                NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
+                NULL::numeric, NULL::numeric, NULL::numeric,
+                NULL::numeric, 'config:threshold_not_set'::text, 0::numeric, 0::numeric,
                 'threshold_not_set'::text,
                 jsonb_build_object('dsiFormula', v_dsi_formula,
                                    'error', 'dsi_threshold missing');
@@ -265,7 +178,8 @@ BEGIN
             WHERE r.hex IN (v_pickup_hex, v_dropoff_hex)
         ) THEN
             RETURN QUERY SELECT 'DECLINE'::text, 'Red Zone'::text,
-                NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
+                NULL::numeric, NULL::numeric, NULL::numeric,
+                NULL::numeric, 'gate:red_zone'::text, 0::numeric, 0::numeric,
                 'red_zone'::text,
                 jsonb_build_object('pickupHex', v_pickup_hex, 'dropoffHex', v_dropoff_hex);
             RETURN;
@@ -306,7 +220,8 @@ BEGIN
         RETURN QUERY SELECT 'DECLINE'::text,
             format('Pickup too far: %s mi (max %s mi)',
                    round(v_eff_pickup_miles, 1), round(v_max_pickup_miles, 1))::text,
-            NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
+            NULL::numeric, NULL::numeric, NULL::numeric,
+            NULL::numeric, 'gate:max_pickup'::text, 0::numeric, 0::numeric,
             'max_pickup'::text,
             jsonb_build_object(
                 'effectivePickupMiles', round(v_eff_pickup_miles, 2),
@@ -333,12 +248,8 @@ BEGIN
     --      FREESTYLE            -> 0 (no obligation to come back)
     --      dropoff in green     -> 0 (already somewhere good)
     --      PUDDLE_JUMP else     -> distance to nearest green hex x circuity
-    --      TOWARDS overshoot    -> handled in the TOWARDS branch below
     -- ======================================================================
-    IF towards_active THEN
-        v_return_miles  := 0;   -- set in the TOWARDS branch
-        v_return_source := 'towards_pending';
-    ELSIF NOT is_puddle_jump_mode THEN
+    IF NOT is_puddle_jump_mode THEN
         v_return_miles  := 0;
         v_return_source := 'freestyle';
     ELSIF v_local_green_zones IS NOT NULL AND v_dropoff_hex = ANY(v_local_green_zones) THEN
@@ -367,98 +278,6 @@ BEGIN
             v_return_source := 'fallback_exception';
         END;
         v_return_miles := v_return_miles * v_deadhead_percent;
-    END IF;
-
-    -- ======================================================================
-    -- 6. TOWARDS -- directional evaluation. Sets the return leg on overshoot,
-    --    then falls through to the single rate calc like every other mode.
-    -- ======================================================================
-    IF towards_active THEN
-        -- Dynamic target: nearest green hex of the destination market,
-        -- else the app-supplied point. (Arrival detection removed -- A6.)
-        IF towards_market_id IS NOT NULL AND current_lat_in IS NOT NULL THEN
-            SELECT elem INTO v_towards_market
-            FROM jsonb_array_elements(v_settings->'markets') elem
-            WHERE (elem->>'id') = towards_market_id LIMIT 1;
-
-            IF v_towards_market IS NOT NULL THEN
-                SELECT array_agg(gz) INTO v_towards_green_zones
-                FROM jsonb_array_elements_text(v_towards_market->'greenZones') gz;
-
-                IF v_towards_green_zones IS NOT NULL
-                   AND array_length(v_towards_green_zones, 1) > 0 THEN
-                    BEGIN
-                        SELECT g_hex,
-                               app_private.h3_to_lat(g_hex),
-                               app_private.h3_to_lng(g_hex)
-                        INTO v_target_hex, v_target_lat, v_target_lng
-                        FROM unnest(v_towards_green_zones) g_hex
-                        ORDER BY app_private.distance_miles(
-                            current_lat_in, current_lng_in,
-                            app_private.h3_to_lat(g_hex),
-                            app_private.h3_to_lng(g_hex))
-                        LIMIT 1;
-                        v_has_target := v_target_lat IS NOT NULL;
-                    EXCEPTION WHEN OTHERS THEN
-                        v_has_target := FALSE;
-                    END;
-                END IF;
-            END IF;
-        END IF;
-
-        IF NOT v_has_target AND towards_target_lat IS NOT NULL THEN
-            v_target_lat := towards_target_lat;
-            v_target_lng := towards_target_lng;
-            v_target_hex := 'app_supplied';
-            v_has_target := TRUE;
-        END IF;
-
-        IF NOT v_has_target THEN
-            RETURN QUERY SELECT 'DECLINE'::text,
-                'Towards active but no target could be resolved'::text,
-                NULL::numeric, NULL::numeric, NULL::numeric, 0::numeric, 0::numeric,
-                'towards_no_target'::text, '{}'::jsonb;
-            RETURN;
-        END IF;
-
-        v_current_to_target := app_private.distance_miles(
-            current_lat_in, current_lng_in, v_target_lat, v_target_lng);
-        v_pickup_to_target  := app_private.distance_miles(
-            pickup_lat_in, pickup_lng_in, v_target_lat, v_target_lng);
-        v_dropoff_to_target := app_private.distance_miles(
-            dropoff_lat_in, dropoff_lng_in, v_target_lat, v_target_lng);
-
-        v_backtrack_miles := v_pickup_to_target - v_current_to_target;
-        v_net_progress    := v_current_to_target - v_dropoff_to_target;
-
-        -- ARRIVAL DETECTION (ruling 2026-08-18: the detection was sound; only
-        -- the auto-switching was broken). Landing in the destination is the
-        -- point of the mode, so it short-circuits the directional tests.
-        -- What is NOT restored: switch_to_mode / switch_to_market_id.
-        IF v_towards_green_zones IS NOT NULL
-           AND v_dropoff_hex = ANY(v_towards_green_zones) THEN
-            v_arrival_detected := TRUE;
-        ELSIF v_target_lat IS NOT NULL THEN
-            BEGIN
-                SELECT array_agg(hex) INTO v_target_disk
-                FROM h3_grid_disk(
-                    app_private.coords_to_h3(v_target_lat, v_target_lng)::h3index, 1) hex;
-                IF v_dropoff_hex::h3index = ANY(v_target_disk) THEN
-                    v_arrival_detected := TRUE;
-                END IF;
-            EXCEPTION WHEN OTHERS THEN
-                v_arrival_detected := FALSE;
-            END;
-        END IF;
-
-        -- Overshoot IS a return leg: the drive back from past the target.
-        IF v_dropoff_to_target > 0.5 AND v_gps_trip_dist > v_pickup_to_target THEN
-            v_return_miles  := v_dropoff_to_target * K_RETURN_CIRCUITY * v_deadhead_percent;
-            v_return_source := 'towards_overshoot';
-        ELSE
-            v_return_miles  := 0;
-            v_return_source := 'towards_no_overshoot';
-        END IF;
     END IF;
 
     -- ======================================================================
@@ -549,50 +368,6 @@ BEGIN
         v_reason  := 'Incomplete offer data';
         v_threshold_source := 'null_strict';
 
-    ELSIF towards_active THEN
-        -- Distance-scaled efficiency ladder: the further out you are, the
-        -- less each hop must gain. (Replaces the dead towardsEfficiencyThreshold.)
-        v_efficiency := CASE WHEN v_committed_miles > 0
-                             THEN v_net_progress / v_committed_miles ELSE 1.0 END;
-        v_efficiency_required := CASE
-            WHEN v_current_to_target >= 200 THEN 0.15
-            WHEN v_current_to_target >= 100 THEN 0.20
-            WHEN v_current_to_target >= 50  THEN 0.30
-            WHEN v_current_to_target >= 20  THEN 0.35
-            WHEN v_current_to_target >= 10  THEN 0.40
-            WHEN v_current_to_target >= 5   THEN 0.50
-            ELSE 0.65
-        END;
-        v_threshold_source := 'towards';
-
-        IF v_arrival_detected THEN
-            -- Arriving IS the objective. Accepted regardless of DSI: the ride
-            -- takes you where you were driving anyway.
-            v_verdict := 'ACCEPT';
-            v_reason  := format('Arrived in target (%s mi progress)', round(v_net_progress, 1));
-        ELSIF v_net_progress <= 0 THEN
-            v_verdict := 'DECLINE';
-            v_reason  := format('Moves away from target ($%s/hr, $%s/mi)',
-                                round(v_hourly_rate, 2), round(v_dollars_per_mile, 2));
-        ELSIF v_backtrack_miles > towards_backtrack_tolerance THEN
-            v_verdict := 'DECLINE';
-            v_reason  := format('Backtrack %s mi exceeds tolerance %s mi',
-                                round(v_backtrack_miles, 1), round(towards_backtrack_tolerance, 1));
-        ELSIF v_efficiency < v_efficiency_required THEN
-            v_verdict := 'DECLINE';
-            v_reason  := format('Inefficient: %s%% vs %s%% required at %s mi out',
-                                round(v_efficiency * 100, 0),
-                                round(v_efficiency_required * 100, 0),
-                                round(v_current_to_target, 1));
-        ELSIF v_dsi < v_dsi_threshold THEN
-            v_verdict := 'DECLINE';
-            v_reason  := format('Towards, but DSI %s below %s',
-                                round(v_dsi, 1), round(v_dsi_threshold, 1));
-        ELSE
-            v_verdict := 'ACCEPT';
-            v_reason  := format('%s mi progress toward target', round(v_net_progress, 1));
-        END IF;
-
     ELSE
         -- PUDDLE_JUMP and FREESTYLE share the identical rule. They differ by
         -- exactly one thing: whether the return leg is in the committed leg.
@@ -615,6 +390,14 @@ BEGIN
             END;
         END IF;
     END IF;
+
+    -- Classify a decline so the device can render the right thing: a hard
+    -- gate gets its reason shown, a threshold miss just shows the number.
+    v_decline_class := CASE
+        WHEN v_verdict = 'ACCEPT'            THEN NULL
+        WHEN v_threshold_source = 'null_strict' THEN 'null_strict'
+        ELSE 'threshold'
+    END;
 
     -- ======================================================================
     -- 12b. DISPLAY INDEX -- computed AFTER the verdict, on purpose.
@@ -686,20 +469,15 @@ BEGIN
         'ocrTripMiles',        trip_miles_in,
         'pickupHex',           v_pickup_hex,
         'dropoffHex',          v_dropoff_hex,
-        'nearestGreenHex',     v_nearest_hex,
-        'towardsActive',       towards_active,
-        'towardsTargetHex',    v_target_hex,
-        'arrivalDetected',     v_arrival_detected,
-        'netProgress',         round(v_net_progress, 2),
-        'backtrackMiles',      round(v_backtrack_miles, 2),
-        'efficiency',          round(v_efficiency, 3),
-        'efficiencyRequired',  v_efficiency_required
+        'nearestGreenHex',     v_nearest_hex
     );
 
     RETURN QUERY SELECT
         v_verdict, v_reason,
         round(v_hourly_rate, 2), round(v_dollars_per_mile, 2), round(v_dsi, 2),
+        round(v_net_hourly_usd, 2), v_decline_class,
         round(v_return_miles, 1), round(v_return_minutes, 1),
         v_threshold_source, v_trace;
 END;
-$function$;
+$function$
+;

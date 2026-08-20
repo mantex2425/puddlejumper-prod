@@ -160,16 +160,19 @@ def run_decision_engine(cur, conn, uid, params):
         logging.warning(f"[ENGINE] version lookup failed, using v2: {_ev_err}")
         engine_version = "v2"
 
+    # TOWARDS removed 2026-08-20: directional filtering on random offers yielded
+    # a 15% accept rate (theoretical ceiling ~37% for a +/-66 deg cone against
+    # uniformly distributed bearings), and pricing the position instead scored
+    # every offer negative. Getting somewhere by end of shift is a shift-level
+    # constraint; this engine decides per offer and has no vocabulary for it.
     _sql_args = (
         uid,
         ep["p_lat"], ep["p_lng"],
         ep["d_lat"], ep["d_lng"],
         ep["fare"], ep["trip_miles"], ep["trip_min"],
         ep["pickup_min"], ep["pickup_miles"], ep["market_id"],
-        ep["towards_active"], ep["towards_target_lat"], ep["towards_target_lng"],
-        ep["towards_market_id"],
         ep["current_lat"], ep["current_lng"],
-        ep["towards_backtrack_tolerance"], ep["is_puddle_jump"],
+        ep["is_puddle_jump"],
     )
 
     # ── SQL decision engine ───────────────────────────────────────────
@@ -187,8 +190,8 @@ def run_decision_engine(cur, conn, uid, params):
         try:
             cur.execute("""
                 SELECT * FROM app_private.decision_engine_v3(
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s
                 )
             """, _sql_args)
             row = cur.fetchone()
@@ -232,12 +235,24 @@ def run_decision_engine(cur, conn, uid, params):
             basic_result = None
 
     if basic_result is None:
+        # v2 retains the old 19-arg signature (kept for diffing against history)
+        _v2_args = (
+            uid,
+            ep["p_lat"], ep["p_lng"],
+            ep["d_lat"], ep["d_lng"],
+            ep["fare"], ep["trip_miles"], ep["trip_min"],
+            ep["pickup_min"], ep["pickup_miles"], ep["market_id"],
+            ep.get("towards_active", False), ep.get("towards_target_lat"),
+            ep.get("towards_target_lng"), ep.get("towards_market_id"),
+            ep["current_lat"], ep["current_lng"],
+            ep.get("towards_backtrack_tolerance", 3.0), ep["is_puddle_jump"],
+        )
         cur.execute("""
             SELECT * FROM app_private.decision_engine_v2(
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s
             )
-        """, _sql_args)
+        """, _v2_args)
         row = cur.fetchone()
         if not row:
             raise ValueError("Decision engine returned no result")
