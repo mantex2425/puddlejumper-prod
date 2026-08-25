@@ -266,6 +266,9 @@ def parse_request(p, uid):
         "is_puddle_jump": is_puddle_jump,
         "towards_backtrack_tolerance": towards_backtrack_tolerance,
         "ocr_confidence": ocr_confidence,
+        # Raw ML Kit text per YOLO crop, pre-parse. Small, and the only way an
+        # OCR misread can be diagnosed after the fact -- logcat rotates.
+        "raw_ocr": p.get("rawOcr") if isinstance(p.get("rawOcr"), dict) else None,
         "pickup_address": pickup_address, "dropoff_address": dropoff_address,
         "ride_type": ride_type, "is_surge": is_surge,
         "is_priority": is_priority, "is_reserve": is_reserve,

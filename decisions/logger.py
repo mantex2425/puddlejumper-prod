@@ -40,6 +40,10 @@ def log_decision(cur, conn, uid, params, ep, result):
         "gps_age_sec":      ep["gps_age_sec"],
         "cumulative_miles": ep["cumulative_miles"],
         "offer_id":         ep.get("offer_id"),
+        # Exactly what ML Kit read, per crop, before parsing. Stored so an OCR
+        # misread is a query rather than a reconstruction (see 2026-08-24,
+        # "US$10.11" recorded as $1.10 and undiagnosable the next morning).
+        "raw_ocr":          ep.get("raw_ocr"),
     })
 
     cur.execute("""
