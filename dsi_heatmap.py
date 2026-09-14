@@ -1,14 +1,21 @@
 """dsi_heatmap.py — Drive Score Index heatmap endpoint.
 
-GET /api/v1/dsi/heatmap?lat=&lng=&k=  ->  GeoJSON FeatureCollection of res-8 H3 cells
-around (lat,lng), each carrying the time-aware, §6-filtered IDW Drive Score Index and a
-RELATIVE color tier. Tiers are percentiles of the CURRENT local spread (purple = top
-quartile here-and-now, green, orange, yellow = bottom), so "purple" means best-around-
-here-right-now rather than an absolute number — Tue-afternoon purple and Sat-night purple
-are different DSI values (spec §1).
+GET /api/v1/dsi/heatmap?lat=&lng=&radiusMiles=  ->  GeoJSON FeatureCollection of the
+res-8 H3 cells in the driver's metro that ACTUALLY have scored offers, each carrying a
+time-weighted Drive Score Index, how many offers back it, and a RELATIVE colour tier.
+Tiers are percentiles of the current spread across the metro (purple = top quartile
+here-and-now, green, orange, yellow = bottom), so purple means best-around-here-right-
+now rather than a fixed DSI value.
 
-OBSERVATIONAL: read-only, never affects a verdict. Sibling of area_dsi.py (the single
-point readout under the frog); this is the same space-time IDW run over a grid of cells.
+CHANGED 2026-09-14. This used to render a fixed hexagonal disk of cells (k rings,
+default 8) centred on the driver and FILL every cell in it by spatial IDW from offers
+up to 6 rings away - so most coloured hexes had never had an offer picked up in them,
+nothing beyond the disk was shown, and a driver could not tell a reading from a guess.
+It now returns every real scored cell within radiusMiles, with no spatial fill; the
+time weighting (TIME_W, DAYTYPE_PEN) is unchanged. `k` is still accepted and ignored so
+older clients keep working.
+
+OBSERVATIONAL: read-only, never affects a verdict.
 """
 import logging
 
@@ -16,101 +23,104 @@ from flask import Blueprint, request, jsonify
 from psycopg2.extras import RealDictCursor
 
 from db import get_db
+from offer_copies import not_a_copy
 from utils import verify_and_get_user_id
 
 log = logging.getLogger(__name__)
 dsi_heatmap_bp = Blueprint("dsi_heatmap", __name__)
 
-# res-8 rings to render (zoom). k=8 ~ 17 km across. Capped for query cost.
-DISPLAY_K_DEFAULT = 8
-DISPLAY_K_MAX = 16
-# How far each display cell reaches for surface points (per-cell IDW radius).
-IDW_K = 6
+# How far from the driver to include scored cells. A metro, not a neighbourhood.
+RADIUS_MILES_DEFAULT = 50
+RADIUS_MILES_MAX = 150
 # Temporal weighting — identical knobs to area_dsi.py (spec §1; tunable).
 TIME_W = 0.4
 DAYTYPE_PEN = 6.0
 
 _HEATMAP_SQL = """
 WITH params AS (
-    SELECT app_private.safe_h3(%(lat)s, %(lng)s)::h3index AS center,
-           EXTRACT(hour FROM now() AT TIME ZONE 'America/Chicago')::int       AS qhour,
+    SELECT EXTRACT(hour FROM now() AT TIME ZONE 'America/Chicago')::int       AS qhour,
            (EXTRACT(dow FROM now() AT TIME ZONE 'America/Chicago')::int IN (0, 6)) AS qweekend
 ),
-display_cells AS (
-    SELECT h3_grid_disk((SELECT center FROM params), %(display_k)s) AS cell
-),
 surface AS (
-    -- §6 read-filter: drop capture-error junk (ehr/dpm <= 0), keep negative dsi.
-    -- Bounded to the render area + IDW reach so we don't scan the whole surface.
-    SELECT co.pickup_h3::h3index AS scell, co.dsi_v1,
+    -- Every scored offer in the driver's metro. §6 read-filter unchanged: drop
+    -- capture-error junk (ehr/dpm <= 0), keep negative dsi.
+    SELECT co.pickup_h3::h3index AS cell, co.dsi_v1,
            EXTRACT(hour FROM co.created_at AT TIME ZONE 'America/Chicago')::int       AS oh,
            (EXTRACT(dow FROM co.created_at AT TIME ZONE 'America/Chicago')::int IN (0, 6)) AS owe
     FROM public.community_offers co
     WHERE co.dsi_v1 IS NOT NULL
+""" + not_a_copy("co", "public.community_offers") + """
+      AND co.pickup_h3 IS NOT NULL
       AND co.effective_hourly_rate > 0
       AND co.dollars_per_mile > 0
-      -- NOT h3_grid_distance: it raises (h3 err 1) on far cells, so it would
-      -- 500 on exactly the second-market data it is meant to exclude. Great-
-      -- circle distance on the hex centre is defined at any separation.
+      -- NOT h3_grid_distance: it raises (h3 err 1) on far cells.
       AND app_private.distance_miles(
               app_private.h3_to_lat(co.pickup_h3),
               app_private.h3_to_lng(co.pickup_h3),
-              %(lat)s, %(lng)s) <= %(reach_miles)s
+              %(lat)s, %(lng)s) <= %(radius_miles)s
 ),
-interp AS (
-    -- space-TIME IDW per display cell (cells with no nearby surface point drop out -> unrendered)
-    SELECT d.cell,
+cells AS (
+    -- One row per hex that ACTUALLY has scored offers. Time-weighted exactly as
+    -- before (nearer hour and same weekday/weekend type count for more), so the
+    -- colours still mean "for now" - but with no spatial fill between cells.
+    SELECT s.cell,
            sum(s.dsi_v1 * w.weight) / NULLIF(sum(w.weight), 0) AS dsi,
            count(*) AS pts
-    FROM display_cells d
+    FROM surface s
     CROSS JOIN params p
-    JOIN surface s ON h3_grid_distance(s.scell, d.cell) <= %(idw_k)s
     CROSS JOIN LATERAL (
         SELECT 1.0 / (
-            h3_grid_distance(s.scell, d.cell)
-            + %(time_w)s * (
+            1.0 + %(time_w)s * (
                 LEAST(abs(s.oh - p.qhour), 24 - abs(s.oh - p.qhour))
                 + CASE WHEN s.owe <> p.qweekend THEN %(daytype_pen)s ELSE 0 END)
-            + 1.0
         ) AS weight
     ) w
-    GROUP BY d.cell
+    GROUP BY s.cell
 ),
 tiers AS (
-    -- RELATIVE breakpoints from the current local spread (not absolute DSI)
+    -- RELATIVE breakpoints from the current spread across the metro
     SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY dsi) AS p25,
            percentile_cont(0.50) WITHIN GROUP (ORDER BY dsi) AS p50,
            percentile_cont(0.75) WITHIN GROUP (ORDER BY dsi) AS p75
-    FROM interp WHERE dsi IS NOT NULL
+    FROM cells WHERE dsi IS NOT NULL
 )
 SELECT json_build_object(
     'type', 'FeatureCollection',
     'center', json_build_object('lat', %(lat)s, 'lng', %(lng)s),
-    'cell_count', (SELECT count(*) FROM interp WHERE dsi IS NOT NULL),
+    'radius_miles', %(radius_miles)s,
+    'cell_count', (SELECT count(*) FROM cells WHERE dsi IS NOT NULL),
+    'total_points', (SELECT COALESCE(sum(pts), 0) FROM cells WHERE dsi IS NOT NULL),
+    'bounds', (SELECT json_build_object(
+        'min_lat', min(app_private.h3_to_lat(cell::text)), 'max_lat', max(app_private.h3_to_lat(cell::text)),
+        'min_lng', min(app_private.h3_to_lng(cell::text)), 'max_lng', max(app_private.h3_to_lng(cell::text)))
+        FROM cells WHERE dsi IS NOT NULL),
     'breakpoints', (SELECT json_build_object(
         'p25', round(p25::numeric, 1), 'p50', round(p50::numeric, 1),
         'p75', round(p75::numeric, 1)) FROM tiers),
     'features', COALESCE(json_agg(json_build_object(
         'type', 'Feature',
-        'geometry', ST_AsGeoJSON(h3_cell_to_boundary(i.cell)::geometry)::json,
+        'geometry', ST_AsGeoJSON(h3_cell_to_boundary(c.cell)::geometry)::json,
         'properties', json_build_object(
-            'h3', i.cell::text,
-            'dsi', round(i.dsi::numeric, 1),
-            'points', i.pts,
-            'tier', CASE WHEN i.dsi >= t.p75 THEN 'purple'
-                         WHEN i.dsi >= t.p50 THEN 'green'
-                         WHEN i.dsi >= t.p25 THEN 'orange'
+            'h3', c.cell::text,
+            'dsi', round(c.dsi::numeric, 1),
+            'points', c.pts,
+            'confidence', CASE WHEN c.pts >= 5 THEN 'high'
+                               WHEN c.pts >= 2 THEN 'medium'
+                               ELSE 'low' END,
+            'tier', CASE WHEN c.dsi >= t.p75 THEN 'purple'
+                         WHEN c.dsi >= t.p50 THEN 'green'
+                         WHEN c.dsi >= t.p25 THEN 'orange'
                          ELSE 'yellow' END
         )
-    )) FILTER (WHERE i.dsi IS NOT NULL), '[]'::json)
+    )) FILTER (WHERE c.dsi IS NOT NULL), '[]'::json)
 ) AS geojson
-FROM interp i CROSS JOIN tiers t;
+FROM cells c CROSS JOIN tiers t;
 """
 
 
 @dsi_heatmap_bp.route("/heatmap", methods=["GET"])
 def get_heatmap():
-    """DSI heatmap GeoJSON around (lat, lng). Observational; best-effort."""
+    """Every scored DSI cell within radiusMiles of (lat, lng). Observational; best-effort."""
     try:
         verify_and_get_user_id(request)
     except Exception:
@@ -122,19 +132,17 @@ def get_heatmap():
     except (KeyError, ValueError, TypeError):
         return jsonify({"error": "lat and lng query params required (floats)"}), 400
     try:
-        display_k = min(max(int(request.args.get("k", DISPLAY_K_DEFAULT)), 1), DISPLAY_K_MAX)
+        radius_miles = min(max(float(request.args.get("radiusMiles", RADIUS_MILES_DEFAULT)), 1.0),
+                           float(RADIUS_MILES_MAX))
     except (ValueError, TypeError):
-        display_k = DISPLAY_K_DEFAULT
+        radius_miles = float(RADIUS_MILES_DEFAULT)
 
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(_HEATMAP_SQL, {
-            "lat": lat, "lng": lng, "display_k": display_k,
-            "idw_k": IDW_K, "time_w": TIME_W, "daytype_pen": DAYTYPE_PEN,
-            # res-8 cells sit ~0.572 mi apart centre-to-centre; round up and add
-            # a mile so the circle fully contains the hex disk being rendered.
-            "reach_miles": (display_k + IDW_K) * 0.6 + 1.0,
+            "lat": lat, "lng": lng, "radius_miles": radius_miles,
+            "time_w": TIME_W, "daytype_pen": DAYTYPE_PEN,
         })
         row = cur.fetchone()
         return jsonify(row["geojson"] if row else

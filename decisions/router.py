@@ -924,6 +924,65 @@ def get_pareto_frontier():
     finally:
         if 'conn' in locals(): conn.close()
 # ======================================================================
+# GET /api/v1/decisions/bar-tuner?days=30
+# Replays the driver's own recent offers under a range of DSI bars.
+# Logic and model: decisions/bar_tuner.py.
+# ======================================================================
+@decisions_bp.route("/bar-tuner", methods=["GET"])
+@require_firebase_auth
+def get_bar_tuner():
+    from .bar_tuner import tuner
+    conn = cur = None
+    try:
+        driver_id = verify_and_get_user_id(request)
+        days = min(max(request.args.get("days", 30, type=int), 7), 90)
+
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT (settings->>'cost_per_mile')::numeric AS cost_per_mile,
+                   (settings->>'dsi_threshold')::numeric AS dsi_threshold
+            FROM app_private.driver_settings_new WHERE driver_id = %s
+        """, (driver_id,))
+        s = cur.fetchone() or {}
+
+        cur.execute("""
+            SELECT extract(epoch FROM created_at)::bigint          AS t,
+                   (trace_data->>'grossPayout')::float             AS fare,
+                   (trace_data->>'committedMiles')::float          AS miles,
+                   (trace_data->>'committedMinutes')::float        AS minutes,
+                   (trace_data->>'costPerMileUsed')::float         AS cost_used
+            FROM app_private.decision_log
+            WHERE driver_id = %s
+              AND created_at > now() - make_interval(days => %s)
+              AND trace_data ? 'committedMinutes'
+              AND (trace_data->>'committedMinutes')::float > 0
+              AND (trace_data->>'grossPayout')::float > 0
+            ORDER BY created_at
+        """, (driver_id, days))
+        rows = cur.fetchall()
+
+        # Price every offer at the driver's CURRENT cost. If none is set, use the
+        # cost the engine most recently applied, so the tuner and the verdicts agree.
+        cost = s.get("cost_per_mile")
+        if cost is None:
+            cost = next((r["cost_used"] for r in reversed(rows) if r["cost_used"]), None)
+        cost = float(cost) if cost is not None else 0.30
+        bar = float(s["dsi_threshold"]) if s.get("dsi_threshold") is not None else None
+
+        offers = [{"t": r["t"], "fare": r["fare"], "miles": r["miles"] or 0.0,
+                   "minutes": r["minutes"]} for r in rows]
+        body = tuner(offers, cost, bar)
+        body["days"] = days
+        return jsonify(body)
+    except Exception:
+        logging.exception("bar-tuner endpoint error")
+        return jsonify({"error": "bar tuner unavailable"}), 500
+    finally:
+        if cur is not None: cur.close()
+        if conn is not None: conn.close()
+
+# ======================================================================
 # GET /api/v1/decisions/market-rate
 # Returns current market rate for a given lat/lng (and optional dow/hour)
 # ======================================================================

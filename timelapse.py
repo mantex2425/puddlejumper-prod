@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 from db import get_db
+from offer_copies import not_a_copy
 from utils import verify_and_get_user_id, require_firebase_auth
 
 # NOTE 2026-08-20: these queries group by pickup_h3 (where the rider
@@ -152,6 +153,16 @@ def get_time_grid():
 
     min_samples = request.args.get('min_samples', 2, type=int)
 
+    # Spatial scope, parsed exactly as get_timelapse() does above. The scoped
+    # SQL below was added to this handler without these four names, so every
+    # request raised NameError: name 'scoped' is not defined and returned 500 -
+    # the Time Grid screen showed "Time grid API failed: 500 Internal Server
+    # Error" whatever data existed (found 2026-09-14; 145 of 168 slots had data).
+    lat = request.args.get('lat', type=float)
+    lng = request.args.get('lng', type=float)
+    radius_mi = min(max(request.args.get('radiusMiles', 40, type=int), 1), 300)
+    scoped = lat is not None and lng is not None
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -165,12 +176,13 @@ def get_time_grid():
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY effective_hourly_rate)::numeric, 2) as median_hourly,
                 round(avg(dollars_per_mile)::numeric, 2) as avg_mileage,
                 round(percentile_cont(0.50) WITHIN GROUP (ORDER BY dollars_per_mile)::numeric, 2) as median_mileage
-            FROM app_private.offer_history
+            FROM app_private.offer_history c
             WHERE pickup_h3 IS NOT NULL
               AND is_validated = true
               AND effective_hourly_rate > 0 AND effective_hourly_rate < 150
               AND dollars_per_mile > 0 AND dollars_per_mile < 10
               {scope_clause}
+              {copy_clause}
             GROUP BY day_of_week, hour_of_day
             HAVING count(*) >= %s
             ORDER BY day_of_week, hour_of_day
@@ -178,7 +190,7 @@ def get_time_grid():
             "AND pickup_lat IS NOT NULL AND pickup_lng IS NOT NULL "
             "AND app_private.distance_miles(pickup_lat, pickup_lng, %s, %s) <= %s"
             if scoped else ""
-        )), (([lat, lng, radius_mi] if scoped else []) + [min_samples]))
+        ), copy_clause=not_a_copy("c", "app_private.offer_history")), (([lat, lng, radius_mi] if scoped else []) + [min_samples]))
 
         rows = cur.fetchall()
 
