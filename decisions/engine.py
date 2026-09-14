@@ -231,6 +231,11 @@ def run_decision_engine(cur, conn, uid, params):
                 "switchToMode":     None,  # auto-switch removed (ruling 2026-08-18)
                 "switchToMarketId": None,
                 "thresholdSource":  row["threshold_source"],
+                # The driver's bar and the formula it was tested with, so the device
+                # can say "below your $14.00/hr bar" without a second source of truth.
+                # Both come from the same engine call as the verdict (trace_data).
+                "dsiThreshold":     float(_v3_trace["thresholdUsed"]) if _v3_trace.get("thresholdUsed") is not None else None,
+                "dsiFormula":       _v3_trace.get("dsiFormula"),
                 "engineVersion":    "v3",
             }
         except Exception as _v3_err:
