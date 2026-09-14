@@ -11,7 +11,8 @@ number rises for ever as the bar rises, because it ignores the waiting between
 rides. What a driver actually banks is dollars per hour ONLINE. So each shift is
 replayed in time order: if the driver is free and the offer clears the bar, it
 is taken and they are busy for its committed minutes; offers arriving while busy
-are skipped. Offer arrival times are the real ones, so no arrival-rate model is
+are skipped, EXCEPT in the last QUEUE_SECONDS of a trip, when Uber queues the next
+offer and it starts at dropoff. Offer arrival times are the real ones, so no arrival-rate model is
 assumed. Measured on one driver's 30 days (2026-09-14): per-busy-hour climbed
 from $17.50 at a $10 bar to $47.83 at $22, while per-online-hour was flat around
 $12-13 up to $17 and fell after -- the flat line is the true answer.
@@ -34,11 +35,22 @@ move as the car moves), and one was an exact copy 16 min later. dedupe() keeps t
 first of each. Identical cheap fares days apart were checked and are genuinely
 different trips (different pickups in the OCR), so the exact-copy window is short.
 
+QUEUED OFFERS. Uber starts sending the next offer as a trip nears its end, and the
+driver can accept it. Measured 2026-09-14 on the same 30 days: the offer stream
+goes silent for 101 gaps over 10 minutes (the rides actually driven; in 90 of them
+the offer just before the silence cleared the $14 bar), and the next offer arrived
+a median 0.3 min after that ride's committed minutes ran out. With no queue window
+the replay skipped those offers and gave 95 rides at $14; with 3 minutes it gives
+101, matching the rides visible in the stream (5 minutes gave 108). A queued offer
+can only be accepted once, so a burst of offers during one trip still yields one
+ride.
+
 Only the bar is modelled. Declines for other reasons (maximum pickup distance, red
 zones) are not replayed.
 """
 from __future__ import annotations
 
+QUEUE_SECONDS = 3 * 60              # an offer this close to the current trip's end can be accepted
 SHIFT_GAP_SECONDS = 60 * 60          # a gap longer than this between offers starts a new shift
 # "Best bar" is chosen on dollars per online hour averaged over bars within this
 # many dollars either side. Unsmoothed, the replay is spiky: on 2026-09-14 a single
@@ -113,11 +125,12 @@ def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
             clears = n >= bar
             if clears:
                 passing += 1
-            if clears and o["t"] >= busy_until:
+            if clears and o["t"] >= busy_until - QUEUE_SECONDS:
+                starts = max(o["t"], busy_until)   # a queued offer starts at dropoff
                 rides += 1
                 net += o["fare"] - o["miles"] * cost_per_mile
                 busy_s += o["minutes"] * 60
-                busy_until = o["t"] + o["minutes"] * 60
+                busy_until = starts + o["minutes"] * 60
                 end = max(end, busy_until)
             end = max(end, o["t"])
         online_s += end - start

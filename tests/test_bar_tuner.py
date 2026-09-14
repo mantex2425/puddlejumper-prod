@@ -1,7 +1,7 @@
 """Unit tests for decisions/bar_tuner.py. Pure functions: no DB, no Flask."""
 from decisions.bar_tuner import (
     BARS, DUP_EXACT_SECONDS, DUP_NEAR_SECONDS, MIN_OFFERS, MIN_SHIFTS,
-    SHIFT_GAP_SECONDS, SMOOTH_WINDOW,
+    QUEUE_SECONDS, SHIFT_GAP_SECONDS, SMOOTH_WINDOW,
     dedupe, net_hourly, replay, split_shifts, tuner,
 )
 
@@ -93,6 +93,29 @@ def test_offers_arriving_while_busy_are_skipped():
     r = replay(shifts, 0.18, 10.0)
     assert r["rides"] == 2
     assert r["passPct"] == 100  # all three CLEAR the bar; only two can be driven
+
+
+def test_an_offer_in_the_last_minutes_of_a_trip_is_queued_and_starts_at_dropoff():
+    # Ride 1: t=0, 30 min, ends at 1800. Ride 2 offered 2 min before dropoff.
+    good = dict(fare=20.0, miles=5.0, minutes=30)
+    shifts = split_shifts([offer(0, **good), offer(1800 - 120, **good)])
+    r = replay(shifts, 0.18, 10.0)
+    assert r["rides"] == 2
+    assert r["onlineHours"] == 1.0     # 0 -> 1800 -> 3600: ride 2 starts at dropoff
+    assert r["busyHours"] == 1.0
+
+
+def test_an_offer_earlier_than_the_queue_window_is_still_skipped():
+    good = dict(fare=20.0, miles=5.0, minutes=30)
+    shifts = split_shifts([offer(0, **good), offer(1800 - QUEUE_SECONDS - 1, **good)])
+    assert replay(shifts, 0.18, 10.0)["rides"] == 1
+
+
+def test_a_burst_of_queued_offers_still_gives_one_ride_per_trip():
+    good = dict(fare=20.0, miles=5.0, minutes=30)
+    burst = [offer(1800 - 150, **good), offer(1800 - 100, **good), offer(1800 - 50, **good)]
+    r = replay(split_shifts([offer(0, **good)] + burst), 0.18, 10.0)
+    assert r["rides"] == 2
 
 
 def test_a_higher_bar_never_takes_more_rides_than_a_lower_one_from_idle():
