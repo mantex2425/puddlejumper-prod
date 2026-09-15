@@ -236,6 +236,15 @@ def run_decision_engine(cur, conn, uid, params):
                 # Both come from the same engine call as the verdict (trace_data).
                 "dsiThreshold":     float(_v3_trace["thresholdUsed"]) if _v3_trace.get("thresholdUsed") is not None else None,
                 "dsiFormula":       _v3_trace.get("dsiFormula"),
+                # What the driver SEES (2026-09-15): the offer's gross $/hr (floored),
+                # the gross this trip needed to clear the bar (rounded up), whether the
+                # "needs" line is worth showing (gap >= 50c), and whether a threshold
+                # decline was a rate miss or the modeled return leg. Display only; the
+                # verdict above is DSI.
+                "grossHourlyUsd":       float(_v3_trace["grossHourlyShown"]) if _v3_trace.get("grossHourlyShown") is not None else None,
+                "neededGrossHourlyUsd": float(_v3_trace["neededGrossHourly"]) if _v3_trace.get("neededGrossHourly") is not None else None,
+                "needsShown":           bool(_v3_trace.get("needsShown") or False),
+                "declineCause":         _v3_trace.get("declineCause"),
                 "engineVersion":    "v3",
             }
         except Exception as _v3_err:
