@@ -111,10 +111,21 @@ def split_shifts(offers: list[dict]) -> list[list[dict]]:
     return shifts
 
 
+def _percentile(sorted_xs: list[float], p: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list (0 <= p <= 1)."""
+    if len(sorted_xs) == 1:
+        return sorted_xs[0]
+    k = (len(sorted_xs) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_xs) - 1)
+    return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (k - lo)
+
+
 def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
     """Replay every shift at one bar. See module docstring for the model."""
     offers_total = passing = rides = 0
     net = busy_s = online_s = 0.0
+    pass_gross: list[float] = []   # on-screen gross $/hr of every offer that clears the bar
     for shift in shifts:
         busy_until = float("-inf")
         start = shift[0]["t"]
@@ -127,6 +138,7 @@ def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
             clears = n >= bar
             if clears:
                 passing += 1
+                pass_gross.append(o["fare"] / (o["minutes"] / 60.0))
             if clears and o["t"] >= busy_until - QUEUE_SECONDS:
                 starts = max(o["t"], busy_until)   # a queued offer starts at dropoff
                 rides += 1
@@ -148,17 +160,14 @@ def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
         "onlineHours": round(online_h, 1),
         "perOnlineHour": round(net / online_h, 2) if online_h > 0 else 0.0,
         "perBusyHour": round(net / busy_h, 2) if busy_h > 0 else 0.0,
+        # What offers that clear this bar showed on screen (gross $/hr, the frog's number).
+        # The median, not the mean: a few very large fares pull the mean up ($24.11 vs a
+        # $21.46 median at $14 on 2026-09-15). Shown as "rides that pass this bar have paid
+        # about $21/hr on screen" -- what passing work looks like, not the pass floor.
+        "passCount": passing,
+        "passGrossMedian": round(_percentile(sorted(pass_gross), 0.5), 2) if pass_gross else None,
+        "passGrossP25": round(_percentile(sorted(pass_gross), 0.25), 2) if pass_gross else None,
     }
-
-
-def _percentile(sorted_xs: list[float], p: float) -> float:
-    """Linear-interpolated percentile of an already-sorted list (0 <= p <= 1)."""
-    if len(sorted_xs) == 1:
-        return sorted_xs[0]
-    k = (len(sorted_xs) - 1) * p
-    lo = int(k)
-    hi = min(lo + 1, len(sorted_xs) - 1)
-    return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (k - lo)
 
 
 def needed_adder(offers: list[dict], cost_per_mile: float) -> dict | None:
@@ -166,9 +175,9 @@ def needed_adder(offers: list[dict], cost_per_mile: float) -> dict | None:
 
     An offer clears the bar exactly when gross $/hr >= bar + cost * committed mph, the
     same test the engine makes and the frog's "needs $X" line shows. The second term
-    depends on the trip, not the bar, so its spread across the driver's own offers turns
-    any bar into "offers usually need $17-20/hr on screen": the app adds the bar to these
-    percentiles as the slider moves. Uses committed miles and minutes, which include the
+    depends on the trip, not the bar, so bar + its 25th percentile is the on-screen rate
+    at which short, slow trips can just pass ("some short, slow trips can pass near
+    $17/hr"). It is a FLOOR, not a target; the headline is passGrossMedian per row. Uses committed miles and minutes, which include the
     modeled return leg whenever the engine included it.
     """
     xs = sorted(cost_per_mile * o["miles"] / (o["minutes"] / 60.0)

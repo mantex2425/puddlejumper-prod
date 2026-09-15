@@ -244,3 +244,25 @@ def test_tuner_adds_the_range_without_changing_the_replay():
 def test_no_offers_means_no_range():
     assert needed_adder([], 0.18) is None
     assert tuner([], 0.18, 14.0)["neededAdder"] is None
+
+
+def test_rows_report_what_passing_offers_showed_on_screen():
+    # Three offers, all 60 min. Gross $/hr = fare. At a $10 bar with 2 mi each ($0.36 cost),
+    # net = fare - 0.36: 9 fails, 20 and 30 clear -> median gross of passing offers 25.
+    offers = [offer(0, 9.0, 2, 60), offer(4000, 20.0, 2, 60), offer(8000, 30.0, 2, 60)]
+    r = replay(split_shifts(offers), 0.18, 10.0)
+    assert r["passCount"] == 2
+    assert r["passGrossMedian"] == 25.0
+    assert r["passGrossP25"] == 22.5
+
+
+def test_no_passing_offers_means_no_gross_median():
+    r = replay(split_shifts([offer(0, 1.0, 5, 60)]), 0.18, 10.0)
+    assert r["passCount"] == 0 and r["passGrossMedian"] is None
+
+
+def test_gross_median_uses_committed_minutes_as_given():
+    # Same fare, longer committed time (e.g. a modeled return) -> lower on-screen gross.
+    short = replay(split_shifts([offer(0, 30.0, 2, 30)]), 0.18, 5.0)["passGrossMedian"]
+    long_ = replay(split_shifts([offer(0, 30.0, 2, 45)]), 0.18, 5.0)["passGrossMedian"]
+    assert long_ < short
