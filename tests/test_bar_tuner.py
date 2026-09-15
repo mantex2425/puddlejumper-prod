@@ -2,7 +2,7 @@
 from decisions.bar_tuner import (
     BARS, DUP_EXACT_SECONDS, DUP_NEAR_SECONDS, MIN_OFFERS, MIN_SHIFTS,
     QUEUE_SECONDS, SHIFT_GAP_SECONDS, SMOOTH_WINDOW,
-    dedupe, net_hourly, replay, split_shifts, tuner,
+    NEEDED_RANGE_MIN_OFFERS, dedupe, needed_adder, net_hourly, replay, split_shifts, tuner,
 )
 
 
@@ -199,3 +199,48 @@ def test_a_one_bar_spike_does_not_become_the_best_bar(monkeypatch):
     monkeypatch.setattr(bt, "replay", fake_replay)
     body = bt.tuner(many_shifts(), 0.18, 14.0)
     assert body["bestBar"] != 17.0
+
+
+# --- on-screen translation -------------------------------------------------
+
+def test_needed_adder_is_cost_times_committed_speed():
+    # 30 mi in 60 min at $0.18 -> 5.40; 10 mi in 60 min -> 1.80; 20 mi in 30 min -> 7.20
+    offers = [offer(0, 20, 30, 60), offer(600, 20, 10, 60), offer(1200, 20, 20, 30)]
+    a = needed_adder(offers, 0.18)
+    assert a["count"] == 3
+    assert a["p50"] == 5.4
+    assert a["p25"] == 3.6 and a["p75"] == 6.3   # linear interpolation
+
+
+def test_needed_adder_uses_the_drivers_own_cost():
+    offers = [offer(0, 20, 30, 60)]
+    assert needed_adder(offers, 0.23)["p50"] == round(0.23 * 30, 4)
+
+
+def test_needed_adder_uses_committed_minutes_including_any_return_leg():
+    # The engine's committed minutes already include a modeled return; the adder must
+    # use them as given, not recompute a shorter trip.
+    with_return = needed_adder([offer(0, 20, 12, 40)], 0.18)["p50"]
+    without = needed_adder([offer(0, 20, 12, 30)], 0.18)["p50"]
+    assert with_return < without
+
+
+def test_offer_clears_bar_exactly_when_gross_reaches_bar_plus_adder():
+    fare, miles, minutes, cost, bar = 16.0, 9.0, 40.0, 0.18, 14.0
+    gross = fare / (minutes / 60)
+    adder = cost * miles / (minutes / 60)
+    assert (net_hourly(fare, miles, minutes, cost) >= bar) == (gross >= bar + adder)
+
+
+def test_tuner_adds_the_range_without_changing_the_replay():
+    offers = many_shifts()
+    body = tuner(offers, 0.18, 14.0)
+    assert body["neededRangeMinOffers"] == NEEDED_RANGE_MIN_OFFERS == 20
+    assert body["neededAdder"]["count"] == len(dedupe(offers))
+    rows_again = tuner(offers, 0.18, 14.0)["rows"]
+    assert body["rows"] == rows_again and body["bestBar"] == tuner(offers, 0.18, 14.0)["bestBar"]
+
+
+def test_no_offers_means_no_range():
+    assert needed_adder([], 0.18) is None
+    assert tuner([], 0.18, 14.0)["neededAdder"] is None

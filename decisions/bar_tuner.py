@@ -63,6 +63,8 @@ DUP_NEAR_MILES = 1.0
 DUP_NEAR_MINUTES = 2.0
 DUP_EXACT_SECONDS = 60 * 60          # identical fare, miles and minutes within this = one offer
 MIN_OFFERS = 30
+# Below this many offers the app shows only the median on-screen need, not a range.
+NEEDED_RANGE_MIN_OFFERS = 20
 MIN_SHIFTS = 3
 
 
@@ -149,6 +151,38 @@ def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
     }
 
 
+def _percentile(sorted_xs: list[float], p: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list (0 <= p <= 1)."""
+    if len(sorted_xs) == 1:
+        return sorted_xs[0]
+    k = (len(sorted_xs) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_xs) - 1)
+    return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (k - lo)
+
+
+def needed_adder(offers: list[dict], cost_per_mile: float) -> dict | None:
+    """What each offer adds on top of the bar to get the gross $/hr it needs on screen.
+
+    An offer clears the bar exactly when gross $/hr >= bar + cost * committed mph, the
+    same test the engine makes and the frog's "needs $X" line shows. The second term
+    depends on the trip, not the bar, so its spread across the driver's own offers turns
+    any bar into "offers usually need $17-20/hr on screen": the app adds the bar to these
+    percentiles as the slider moves. Uses committed miles and minutes, which include the
+    modeled return leg whenever the engine included it.
+    """
+    xs = sorted(cost_per_mile * o["miles"] / (o["minutes"] / 60.0)
+                for o in offers if o.get("minutes") and o["minutes"] > 0)
+    if not xs:
+        return None
+    return {
+        "p25": round(_percentile(xs, 0.25), 4),
+        "p50": round(_percentile(xs, 0.50), 4),
+        "p75": round(_percentile(xs, 0.75), 4),
+        "count": len(xs),
+    }
+
+
 def tuner(offers: list[dict], cost_per_mile: float, current_bar: float | None,
           bars: list[float] = BARS) -> dict:
     """The full response body: one replayed row per bar, plus context."""
@@ -176,4 +210,6 @@ def tuner(offers: list[dict], cost_per_mile: float, current_bar: float | None,
         "minShifts": MIN_SHIFTS,
         "bestBar": best,
         "rows": rows,
+        "neededAdder": needed_adder(offers, cost_per_mile),
+        "neededRangeMinOffers": NEEDED_RANGE_MIN_OFFERS,
     }
