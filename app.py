@@ -146,7 +146,11 @@ def get_preferences():
                     "setup_completed": False,
                     "car_type": "gas",
                     "calculation_method": "both",
-                    "cost_per_mile": 0.67,
+                    # Same product defaults as auth._NEW_DRIVER_DEFAULTS (2026-09-15).
+                    "engine_version": "v3",
+                    "dsi_formula": "net_hourly",
+                    "dsi_threshold": 12.0,
+                    "cost_per_mile": 0.23,
                     "cost_per_hour": 12.0,
                     "revenue_per_hour": 10.0,
                     "revenue_per_mile": 1.00,

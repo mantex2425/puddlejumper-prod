@@ -6,11 +6,23 @@ import json as _json
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
 
 # Smart defaults for new drivers
+#
+# PRODUCT DEFAULTS, approved by Andrew 2026-09-15 -- deliberate, not one driver's tuning:
+#   dsi_formula   net_hourly: DSI is net dollars per hour; the weighted index is retired.
+#   dsi_threshold 12.0 $/hr: the peak of net per online hour when a month of real
+#                 Houston offers is replayed at $0.23/mi (65% of offers pass).
+#   cost_per_mile 0.23: AAA Your Driving Costs 2025, medium sedan operating cost
+#                 (fuel 11.13c + maintenance, repair & tires 11.91c). Marginal cost only;
+#                 the setup wizard replaces it with the driver's own fuel figure.
+# Was cost_per_mile 0.67 (roughly the IRS fully-loaded rate), which declines most offers.
 _NEW_DRIVER_DEFAULTS = {
     "setup_completed": False,
     "car_type": "gas",
     "calculation_method": "both",
-    "cost_per_mile": 0.67,
+    "engine_version": "v3",
+    "dsi_formula": "net_hourly",
+    "dsi_threshold": 12.0,
+    "cost_per_mile": 0.23,
     "cost_per_hour": 12.0,
     "revenue_per_hour": 10.0,
     "revenue_per_mile": 1.00,
