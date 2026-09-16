@@ -22,6 +22,8 @@ _NEW_DRIVER_DEFAULTS = {
     "engine_version": "v3",
     "dsi_formula": "net_hourly",
     "dsi_threshold": 12.0,
+    # Minimum on-screen gross $/hr, checked after DSI (2026-09-16). 0 turns it off.
+    "min_gross_hourly": 18.0,
     "cost_per_mile": 0.23,
     "cost_per_hour": 12.0,
     "revenue_per_hour": 10.0,

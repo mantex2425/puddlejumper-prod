@@ -150,6 +150,7 @@ def get_preferences():
                     "engine_version": "v3",
                     "dsi_formula": "net_hourly",
                     "dsi_threshold": 12.0,
+                    "min_gross_hourly": 18.0,
                     "cost_per_mile": 0.23,
                     "cost_per_hour": 12.0,
                     "revenue_per_hour": 10.0,

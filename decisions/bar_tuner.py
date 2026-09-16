@@ -50,6 +50,8 @@ zones) are not replayed.
 """
 from __future__ import annotations
 
+import math
+
 QUEUE_SECONDS = 3 * 60              # an offer this close to the current trip's end can be accepted
 SHIFT_GAP_SECONDS = 60 * 60          # a gap longer than this between offers starts a new shift
 # "Best bar" is chosen on dollars per online hour averaged over bars within this
@@ -63,6 +65,9 @@ DUP_NEAR_MILES = 1.0
 DUP_NEAR_MINUTES = 2.0
 DUP_EXACT_SECONDS = 60 * 60          # identical fare, miles and minutes within this = one offer
 MIN_OFFERS = 30
+# The engine's minimum on-screen gross $/hr when a driver has not set one (2026-09-16).
+# Must match K_DEFAULT_MIN_GROSS in decision_engine_v3 and the new-driver defaults.
+DEFAULT_MIN_GROSS_HOURLY = 18.0
 # Below this many offers the app shows only the median on-screen need, not a range.
 NEEDED_RANGE_MIN_OFFERS = 20
 MIN_SHIFTS = 3
@@ -121,8 +126,17 @@ def _percentile(sorted_xs: list[float], p: float) -> float:
     return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (k - lo)
 
 
-def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
-    """Replay every shift at one bar. See module docstring for the model."""
+def shown_gross(fare: float, minutes: float) -> float:
+    """The offer's gross $/hr as the driver sees it: the engine's floor(round(ehr, 6), cents)."""
+    return math.floor(round(fare / (minutes / 60.0), 6) * 100) / 100
+
+
+def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float, gross_floor: float = 0.0) -> dict:
+    """Replay every shift at one bar. See module docstring for the model.
+
+    An offer passes only if it clears the DSI bar AND shows at least [gross_floor] $/hr on
+    screen, the same two checks the engine makes (2026-09-16). 0 turns the minimum off.
+    """
     offers_total = passing = rides = 0
     net = busy_s = online_s = 0.0
     pass_gross: list[float] = []   # on-screen gross $/hr of every offer that clears the bar
@@ -135,7 +149,7 @@ def replay(shifts: list[list[dict]], cost_per_mile: float, bar: float) -> dict:
             n = net_hourly(o["fare"], o["miles"], o["minutes"], cost_per_mile)
             if n is None:
                 continue
-            clears = n >= bar
+            clears = n >= bar and (gross_floor <= 0 or shown_gross(o["fare"], o["minutes"]) >= gross_floor)
             if clears:
                 passing += 1
                 pass_gross.append(o["fare"] / (o["minutes"] / 60.0))
@@ -193,13 +207,13 @@ def needed_adder(offers: list[dict], cost_per_mile: float) -> dict | None:
 
 
 def tuner(offers: list[dict], cost_per_mile: float, current_bar: float | None,
-          bars: list[float] = BARS) -> dict:
+          bars: list[float] = BARS, gross_floor: float = 0.0) -> dict:
     """The full response body: one replayed row per bar, plus context."""
     received = len(offers)
     offers = dedupe(offers)
     shifts = split_shifts(offers)
     enough = len(offers) >= MIN_OFFERS and len(shifts) >= MIN_SHIFTS
-    rows = [replay(shifts, cost_per_mile, b) for b in bars] if enough else []
+    rows = [replay(shifts, cost_per_mile, b, gross_floor) for b in bars] if enough else []
     for r in rows:
         near = [x["perOnlineHour"] for x in rows if abs(x["bar"] - r["bar"]) <= SMOOTH_WINDOW + 1e-9]
         r["perOnlineHourSmoothed"] = round(sum(near) / len(near), 2)
@@ -221,4 +235,5 @@ def tuner(offers: list[dict], cost_per_mile: float, current_bar: float | None,
         "rows": rows,
         "neededAdder": needed_adder(offers, cost_per_mile),
         "neededRangeMinOffers": NEEDED_RANGE_MIN_OFFERS,
+        "grossFloor": gross_floor,
     }

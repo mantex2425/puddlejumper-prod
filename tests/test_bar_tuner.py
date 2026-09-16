@@ -2,7 +2,8 @@
 from decisions.bar_tuner import (
     BARS, DUP_EXACT_SECONDS, DUP_NEAR_SECONDS, MIN_OFFERS, MIN_SHIFTS,
     QUEUE_SECONDS, SHIFT_GAP_SECONDS, SMOOTH_WINDOW,
-    NEEDED_RANGE_MIN_OFFERS, dedupe, needed_adder, net_hourly, replay, split_shifts, tuner,
+    DEFAULT_MIN_GROSS_HOURLY, NEEDED_RANGE_MIN_OFFERS, dedupe, needed_adder, net_hourly, replay,
+    shown_gross, split_shifts, tuner,
 )
 
 
@@ -192,7 +193,7 @@ def test_smoothing_averages_the_bars_within_the_window():
 def test_a_one_bar_spike_does_not_become_the_best_bar(monkeypatch):
     # Flat $12 everywhere except a lone $15 at $17 - the shape seen in real data.
     import decisions.bar_tuner as bt
-    def fake_replay(shifts, cost, bar):
+    def fake_replay(shifts, cost, bar, gross_floor=0.0):
         return {"bar": bar, "passPct": 50, "rides": 10, "net": 100.0, "busyHours": 5.0,
                 "onlineHours": 8.0, "perOnlineHour": 15.0 if bar == 17.0 else 12.0,
                 "perBusyHour": 20.0}
@@ -266,3 +267,39 @@ def test_gross_median_uses_committed_minutes_as_given():
     short = replay(split_shifts([offer(0, 30.0, 2, 30)]), 0.18, 5.0)["passGrossMedian"]
     long_ = replay(split_shifts([offer(0, 30.0, 2, 45)]), 0.18, 5.0)["passGrossMedian"]
     assert long_ < short
+
+
+# --- minimum on-screen gross (2026-09-16) ----------------------------------
+
+def test_default_minimum_is_eighteen():
+    assert DEFAULT_MIN_GROSS_HOURLY == 18.0
+
+
+def test_shown_gross_matches_the_engine_including_the_exact_eighteen_case():
+    assert shown_gross(3.30, 11) == 18.0          # not 17.99 from division noise
+    assert shown_gross(6.01, 22) == 16.39
+    assert shown_gross(5.60, 19) == 17.68
+
+
+def test_floor_declines_an_offer_that_clears_the_bar_but_shows_too_little():
+    # Sep 15 15:18: $6.01, 4.8 mi, 22 min -> net 14.03 clears $14; gross 16.39 < 18.
+    shifts = split_shifts([offer(0, 6.01, 4.8, 22)])
+    assert replay(shifts, 0.18, 14.0)["rides"] == 1
+    assert replay(shifts, 0.18, 14.0, gross_floor=18.0)["rides"] == 0
+
+
+def test_offer_exactly_at_the_floor_passes():
+    assert replay(split_shifts([offer(0, 3.30, 2.5, 11)]), 0.18, 14.0, gross_floor=18.0)["rides"] == 1
+
+
+def test_floor_zero_is_off_and_leaves_results_unchanged():
+    offers = many_shifts()
+    assert tuner(offers, 0.18, 14.0)["rows"] == tuner(offers, 0.18, 14.0, gross_floor=0.0)["rows"]
+
+
+def test_tuner_reports_the_floor_and_passing_gross_respects_it():
+    body = tuner(many_shifts(), 0.18, 14.0, gross_floor=40.0)
+    assert body["grossFloor"] == 40.0
+    for r in body["rows"]:
+        if r["passGrossMedian"] is not None:
+            assert r["passGrossP25"] >= 40.0

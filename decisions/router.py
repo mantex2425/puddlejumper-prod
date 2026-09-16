@@ -941,7 +941,8 @@ def get_bar_tuner():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
             SELECT (settings->>'cost_per_mile')::numeric AS cost_per_mile,
-                   (settings->>'dsi_threshold')::numeric AS dsi_threshold
+                   (settings->>'dsi_threshold')::numeric AS dsi_threshold,
+                   (settings->>'min_gross_hourly')::numeric AS min_gross_hourly
             FROM app_private.driver_settings_new WHERE driver_id = %s
         """, (driver_id,))
         s = cur.fetchone() or {}
@@ -972,7 +973,11 @@ def get_bar_tuner():
 
         offers = [{"t": r["t"], "fare": r["fare"], "miles": r["miles"] or 0.0,
                    "minutes": r["minutes"]} for r in rows]
-        body = tuner(offers, cost, bar)
+        # The same minimum on-screen gross the engine applies (default when unset, 0 = off).
+        from .bar_tuner import DEFAULT_MIN_GROSS_HOURLY
+        floor = s.get("min_gross_hourly")
+        floor = max(float(floor), 0.0) if floor is not None else DEFAULT_MIN_GROSS_HOURLY
+        body = tuner(offers, cost, bar, gross_floor=floor)
         body["days"] = days
         return jsonify(body)
     except Exception:
