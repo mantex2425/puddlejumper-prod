@@ -10,7 +10,7 @@ def run_decision_engine(cur, conn, uid, params):
     Arc band correction + geocode hallucination guard + SQL decision engine.
     Returns (basic_result dict, arc_band_trace dict, effective_params dict).
     effective_params is params with corrected/nulled coordinates applied.
-    Raises ValueError on SQL engine failure — orchestrator returns 500.
+    A v3 failure returns engine_error_result() (a visible decline), not an exception.
     """
     import time
     from math import radians, cos, sin, asin, sqrt
@@ -143,30 +143,6 @@ def run_decision_engine(cur, conn, uid, params):
             ep["p_lat"] = None
             ep["p_lng"] = None
 
-    # ── engine selection ──────────────────────────────────────────────
-    # Per-driver, read from settings, so a mid-drive rollback is one UPDATE
-    # and needs no redeploy. v3 is the DEFAULT (2026-08-20): a new driver's
-    # settings blob is '{}', and defaulting to v2 silently gave every new
-    # account the engine v3 replaced -- double-charged return leg, market rate
-    # overriding the driver's floor, inert pulse. Rollback is now an explicit
-    # opt-out:
-    #   UPDATE app_private.driver_settings_new
-    #      SET settings = settings || '{"engine_version":"v2"}'::jsonb
-    #    WHERE driver_id = '<uid>';
-    try:
-        cur.execute(
-            "SELECT COALESCE(settings->>'engine_version', 'v3') AS ev "
-            "FROM app_private.driver_settings_new WHERE driver_id = %s",
-            (uid,),
-        )
-        _ev_row = cur.fetchone()
-        # No settings row at all (brand-new account) also means v3.
-        engine_version = (_ev_row["ev"] if _ev_row else None) or "v3"
-    except Exception as _ev_err:
-        # A lookup failure must not silently downgrade the engine.
-        logging.warning(f"[ENGINE] version lookup failed, using v3: {_ev_err}")
-        engine_version = "v3"
-
     # TOWARDS removed 2026-08-20: directional filtering on random offers yielded
     # a 15% accept rate (theoretical ceiling ~37% for a +/-66 deg cone against
     # uniformly distributed bearings), and pricing the position instead scored
@@ -186,122 +162,77 @@ def run_decision_engine(cur, conn, uid, params):
     _t_sql = time.time()
     basic_result = None
 
-    if engine_version == "v3":
-        # v3 consolidates rates + DSI + verdict into ONE path, so it needs no
-        # _apply_dsi_decision override — that override layer is precisely what
-        # produced the three-way DSI split v3 exists to remove.
-        #
-        # SAVEPOINT: a failing v3 call would otherwise abort the transaction and
-        # take the v2 fallback down with it. Better a v2 verdict than no frog.
-        cur.execute("SAVEPOINT sp_engine_v3")
-        try:
-            cur.execute("""
-                SELECT * FROM app_private.decision_engine_v3(
-                    %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s
-                )
-            """, _sql_args)
-            row = cur.fetchone()
-            if not row:
-                raise ValueError("decision_engine_v3 returned no result")
-            cur.execute("RELEASE SAVEPOINT sp_engine_v3")
-
-            _v3_trace = row.get("trace_data") or {}
-            basic_result = {
-                "verdict":          row["verdict"],
-                "reason":           row["reason"],
-                # v3 never subtracts a return cost from the payout — the unpaid
-                # leg lives in the denominator — so net == gross by construction.
-                "netPay":           float(ep["fare"] or 0),
-                "hourlyRate":       float(row["hourly_rate"]      or 0),
-                "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
-                "dsi":              float(row["dsi"]) if row["dsi"] is not None else None,
-                # The number the DEVICE renders. It is the exact value the
-                # verdict was made on -- no client-side recomputation, no
-                # second formula. See DsiConstants deletion (2026-08-19).
-                "netHourlyUsd":     float(row["net_hourly_usd"]) if row["net_hourly_usd"] is not None else None,
-                # None on ACCEPT. On DECLINE: "threshold" (score below bar),
-                # "gate:<name>" (hard gate fired ahead of scoring), or
-                # "config:<name>"/"null_strict". The device shows the reason
-                # for a gate decline rather than a bare red glow.
-                "declineClass":     row["decline_class"],
-                "deadheadMiles":    float(row["return_miles"]     or 0),
-                "deadheadCost":     0.0,   # no longer a cost; it is denominator
-                "arrivalDetected":  bool(_v3_trace.get("arrivalDetected") or False),
-                "switchToMode":     None,  # auto-switch removed (ruling 2026-08-18)
-                "switchToMarketId": None,
-                "thresholdSource":  row["threshold_source"],
-                # The driver's bar and the formula it was tested with, so the device
-                # can say "below your $14.00/hr bar" without a second source of truth.
-                # Both come from the same engine call as the verdict (trace_data).
-                "dsiThreshold":     float(_v3_trace["thresholdUsed"]) if _v3_trace.get("thresholdUsed") is not None else None,
-                "dsiFormula":       _v3_trace.get("dsiFormula"),
-                # What the driver SEES (2026-09-15): the offer's gross $/hr (floored),
-                # the gross this trip needed to clear the bar (rounded up), whether the
-                # "needs" line is worth showing (gap >= 50c), and whether a threshold
-                # decline was a rate miss or the modeled return leg. Display only; the
-                # verdict above is DSI.
-                "grossHourlyUsd":       float(_v3_trace["grossHourlyShown"]) if _v3_trace.get("grossHourlyShown") is not None else None,
-                "neededGrossHourlyUsd": float(_v3_trace["neededGrossHourly"]) if _v3_trace.get("neededGrossHourly") is not None else None,
-                "needsShown":           bool(_v3_trace.get("needsShown") or False),
-                "declineCause":         _v3_trace.get("declineCause"),
-                "engineVersion":    "v3",
-            }
-        except Exception as _v3_err:
-            logging.error(f"[ENGINE] v3 FAILED — falling back to v2: {_v3_err}")
-            try:
-                cur.execute("ROLLBACK TO SAVEPOINT sp_engine_v3")
-            except Exception:
-                pass
-            basic_result = None
-
-    if basic_result is None:
-        # v2 retains the old 19-arg signature (kept for diffing against history)
-        _v2_args = (
-            uid,
-            ep["p_lat"], ep["p_lng"],
-            ep["d_lat"], ep["d_lng"],
-            ep["fare"], ep["trip_miles"], ep["trip_min"],
-            ep["pickup_min"], ep["pickup_miles"], ep["market_id"],
-            ep.get("towards_active", False), ep.get("towards_target_lat"),
-            ep.get("towards_target_lng"), ep.get("towards_market_id"),
-            ep["current_lat"], ep["current_lng"],
-            ep.get("towards_backtrack_tolerance", 3.0), ep["is_puddle_jump"],
-        )
+    # decision_engine_v3 is the ONLY engine (2026-09-16). v2, its per-driver rollback
+    # switch in driver settings and its silent fallback are gone: if v3 errored,
+    # v2 answered by different rules (weighted index, market-rate override, no minimum
+    # on-screen gross) with no sign on the device that anything was wrong. A v3 failure
+    # now declines VISIBLY -- "Can't score offer" -- and logs an error.
+    #
+    # SAVEPOINT: a failing v3 call aborts the transaction; rolling back to it keeps the
+    # connection usable so the decision (and the failure) can still be logged.
+    row = None
+    cur.execute("SAVEPOINT sp_engine_v3")
+    try:
         cur.execute("""
-            SELECT * FROM app_private.decision_engine_v2(
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s
+            SELECT * FROM app_private.decision_engine_v3(
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
             )
-        """, _v2_args)
+        """, _sql_args)
         row = cur.fetchone()
         if not row:
-            raise ValueError("Decision engine returned no result")
+            raise ValueError("decision_engine_v3 returned no result")
+        cur.execute("RELEASE SAVEPOINT sp_engine_v3")
 
+        _v3_trace = row.get("trace_data") or {}
         basic_result = {
             "verdict":          row["verdict"],
             "reason":           row["reason"],
-            "netPay":           float(row["net_pay"]          or 0),
+            # v3 never subtracts a return cost from the payout — the unpaid
+            # leg lives in the denominator — so net == gross by construction.
+            "netPay":           float(ep["fare"] or 0),
             "hourlyRate":       float(row["hourly_rate"]      or 0),
             "dollarsPerMile":   float(row["dollars_per_mile"] or 0),
-            "deadheadMiles":    float(row["deadhead_miles"]   or 0),
-            "deadheadCost":     float(row["deadhead_cost"]    or 0),
-            "arrivalDetected":  row["arrival_detected"],
-            "switchToMode":     row["switch_to_mode"],
-            "switchToMarketId": row["switch_to_market_id"],
+            "dsi":              float(row["dsi"]) if row["dsi"] is not None else None,
+            # The number the DEVICE renders. It is the exact value the
+            # verdict was made on -- no client-side recomputation, no
+            # second formula. See DsiConstants deletion (2026-08-19).
+            "netHourlyUsd":     float(row["net_hourly_usd"]) if row["net_hourly_usd"] is not None else None,
+            # None on ACCEPT. On DECLINE: "threshold" (score below bar),
+            # "gate:<name>" (hard gate fired ahead of scoring), or
+            # "config:<name>"/"null_strict". The device shows the reason
+            # for a gate decline rather than a bare red glow.
+            "declineClass":     row["decline_class"],
+            "deadheadMiles":    float(row["return_miles"]     or 0),
+            "deadheadCost":     0.0,   # no longer a cost; it is denominator
+            "arrivalDetected":  bool(_v3_trace.get("arrivalDetected") or False),
+            "switchToMode":     None,  # auto-switch removed (ruling 2026-08-18)
+            "switchToMarketId": None,
             "thresholdSource":  row["threshold_source"],
-            "engineVersion":    "v2",
+            # The driver's bar and the formula it was tested with, so the device
+            # can say "below your $14.00/hr bar" without a second source of truth.
+            # Both come from the same engine call as the verdict (trace_data).
+            "dsiThreshold":     float(_v3_trace["thresholdUsed"]) if _v3_trace.get("thresholdUsed") is not None else None,
+            "dsiFormula":       _v3_trace.get("dsiFormula"),
+            # What the driver SEES (2026-09-15): the offer's gross $/hr (floored),
+            # the gross this trip needed to clear the bar (rounded up), whether the
+            # "needs" line is worth showing (gap >= 50c), and whether a threshold
+            # decline was a rate miss or the modeled return leg. Display only; the
+            # verdict above is DSI.
+            "grossHourlyUsd":       float(_v3_trace["grossHourlyShown"]) if _v3_trace.get("grossHourlyShown") is not None else None,
+            "neededGrossHourlyUsd": float(_v3_trace["neededGrossHourly"]) if _v3_trace.get("neededGrossHourly") is not None else None,
+            "needsShown":           bool(_v3_trace.get("needsShown") or False),
+            "declineCause":         _v3_trace.get("declineCause"),
+            "engineVersion":    "v3",
         }
-
-        # ── DSI verdict override (spec §6) — v2 path ONLY ──
-        # When the driver has opted into Drive Score Index decisions, OVERRIDE the
-        # verdict with the §6 comparison, preserving the SQL verdict as legacyVerdict.
-        # Flag OFF (the default) = traditional $/hr & $/mi, unchanged. Best-effort:
-        # any failure keeps the SQL verdict.
+    except Exception as _v3_err:
+        logging.error(f"[ENGINE] v3 FAILED — declining as unscorable: {_v3_err}")
         try:
-            basic_result.update(_apply_dsi_decision(cur, uid, ep, basic_result))
-        except Exception as _dsi_err:
-            logging.warning(f"[DSI] override skipped (SQL verdict kept): {_dsi_err}")
+            cur.execute("ROLLBACK TO SAVEPOINT sp_engine_v3")
+        except Exception:
+            pass
+        row = None
+        basic_result = engine_error_result(ep.get("fare"))
 
     logging.info(
         f"[TIMER] Decision engine SQL ({basic_result['engineVersion']}): "
@@ -309,137 +240,46 @@ def run_decision_engine(cur, conn, uid, params):
     )
 
     # Stash raw trace for log_decision (piggybacks on ep dict)
-    ep["_raw_trace"]      = row.get("trace_data") or {}
+    ep["_raw_trace"]      = (row.get("trace_data") if row else None) or {}
     ep["_arc_band_trace"] = arc_band_trace
 
     return basic_result, arc_band_trace, ep
 
 
 # ======================================================================
-# DSI (Drive Score Index) verdict override — spec §6
+# v3 failure -> a visible, honest decline
 # ======================================================================
-# Threshold below which the radar-less fallback declines (spec §4 interim).
-DSI_FALLBACK_THRESHOLD = 22.0
-
-# §thin-market gate (2026-06-18). The verdict trusts the local-market DSI bar
-# ONLY when the TIGHT radar radius (app_private.get_price_radar, ~1km) has at
-# least this many points. interpolate_area_dsi's 5-k-ring (~6km) disk is ~always
-# >=3 in dense markets, so thinness must be judged on the tight count (== the
-# logged radarPointCount). Thin -> bar nulled -> fall back to the absolute
-# threshold rather than decline a good offer against a ~1-sample bar (06-17:
-# declines 22.9<23.6 and 24.8<25.7 against radarPointCount=1 bars).
-MIN_MARKET_POINTS = 3
+ENGINE_ERROR_REASON = "Can't score offer"
 
 
-def _radar_point_count(cur, lat, lng):
-    """Tight-radius (~1km) community point count from get_price_radar — the same
-    count router logs as radarPointCount. 0 on missing coords / any failure
-    (fail-open to the no-market fallback; never break the decision)."""
-    if lat is None or lng is None:
-        return 0
-    try:
-        cur.execute("SELECT point_count FROM app_private.get_price_radar(%s, %s)", (lat, lng))
-        row = cur.fetchone()
-        if not row:
-            return 0
-        pc = row["point_count"] if hasattr(row, "keys") else row[0]
-        return int(pc or 0)
-    except Exception:
-        return 0
+def engine_error_result(fare):
+    """The decision returned when decision_engine_v3 errors or returns nothing.
 
-
-def _gate_market_dsi(local_market_dsi, tight_point_count):
-    """Return the local-market DSI bar only when the tight radar has
-    >= MIN_MARKET_POINTS points; else None (caller falls back to the absolute
-    threshold instead of comparing against a ~1-sample bar)."""
-    if local_market_dsi is None or (tight_point_count or 0) < MIN_MARKET_POINTS:
-        return None
-    return local_market_dsi
-
-
-# Three driver-selectable decision modes (UserPreferences -> settings.decision_mode):
-DSI_MODE_TRADITIONAL   = "TRADITIONAL"        # $/hr & $/mi only (SQL verdict; DSI hidden)
-DSI_MODE_OBSERVATIONAL = "DSI_OBSERVATIONAL"  # SQL verdict, but DSI numbers shown
-DSI_MODE_ACTIVE        = "DSI_ACTIVE"          # DSI makes the call
-
-
-def _dsi_verdict(personal_dsi, local_market_dsi, decision_mode, sql_result):
-    """Pure §6 decision logic (no I/O — unit-testable).
-
-    `decision_mode` is the driver's choice: TRADITIONAL, DSI_OBSERVATIONAL, or DSI_ACTIVE.
-    ALWAYS returns DSI telemetry (personalDsi / localMarketDsi / legacyVerdict /
-    decisionMode) so the client can show the numbers in OBSERVATIONAL/ACTIVE and the
-    backend can measure DSI vs the SQL engine in every mode. Overrides verdict/reason ONLY
-    in DSI_ACTIVE (and only when personal_dsi is computable):
-        Personal DSI >= Local Market DSI -> ACCEPT, else DECLINE.
-    No local-market data -> graceful fallback to the §4 interim absolute threshold.
-
-    SWITCH-MODE COHERENCE: a DSI ACCEPT means "take THIS ride", so it CLEARS any
-    switchToMode / switchToMarketId the SQL engine attached to its (now-overridden)
-    decline — otherwise the client would see "accept + go switch markets". A DSI DECLINE
-    leaves the SQL's reposition advice intact (decline + reposition is coherent).
+    DECLINE, because nothing was scored and accepting blind is worse. Classed
+    'config:engine_error' so the device shows the reason ("Can't score offer")
+    instead of a money figure, and carries no rates, so nothing on screen or in
+    the Bar Tuner can mistake it for a real verdict. Pure, so it is testable.
     """
-    out = {
-        "personalDsi":    round(personal_dsi, 1) if personal_dsi is not None else None,
-        "localMarketDsi": round(local_market_dsi, 1) if local_market_dsi is not None else None,
-        "legacyVerdict":  sql_result.get("verdict"),
-        "decisionMode":   decision_mode,
+    return {
+        "verdict":              "DECLINE",
+        "reason":               ENGINE_ERROR_REASON,
+        "netPay":               float(fare or 0),
+        "hourlyRate":           0.0,
+        "dollarsPerMile":       0.0,
+        "dsi":                  None,
+        "netHourlyUsd":         None,
+        "declineClass":         "config:engine_error",
+        "deadheadMiles":        0.0,
+        "deadheadCost":         0.0,
+        "arrivalDetected":      False,
+        "switchToMode":         None,
+        "switchToMarketId":     None,
+        "thresholdSource":      "engine_error",
+        "dsiThreshold":         None,
+        "dsiFormula":           None,
+        "grossHourlyUsd":       None,
+        "neededGrossHourlyUsd": None,
+        "needsShown":           False,
+        "declineCause":         None,
+        "engineVersion":        "v3",
     }
-    # Only DSI_ACTIVE overrides the verdict; TRADITIONAL and DSI_OBSERVATIONAL keep the SQL
-    # verdict (telemetry above still flows, so the client can display it / we can measure).
-    if decision_mode != DSI_MODE_ACTIVE or personal_dsi is None:
-        return out
-
-    if local_market_dsi is not None:
-        accept = personal_dsi >= local_market_dsi
-        out["reason"] = (f"Drive Score {personal_dsi:.1f} "
-                         f"{'>=' if accept else '<'} local market {local_market_dsi:.1f}")
-    else:
-        accept = personal_dsi >= DSI_FALLBACK_THRESHOLD
-        out["reason"] = (f"Drive Score {personal_dsi:.1f} vs threshold "
-                         f"{DSI_FALLBACK_THRESHOLD:.0f} (no local market data)")
-    out["verdict"] = "ACCEPT" if accept else "DECLINE"
-    if accept:
-        # take THIS ride -> suppress any market/mode switch tied to the SQL's decline
-        out["switchToMode"] = None
-        out["switchToMarketId"] = None
-    return out
-
-
-def _apply_dsi_decision(cur, uid, ep, basic_result):
-    """Read the driver's cost_per_mile + decision_mode, compute Personal DSI (card rates +
-    driver cost) and Local Market DSI (time-aware community radar at the driver's location),
-    then apply _dsi_verdict. Never touches the SQL decision engine. cost_per_mile is READ
-    from settings (NULL-strict downstream — never assumed); decision_mode defaults to
-    TRADITIONAL when unset."""
-    from dsi import compute_personal_dsi
-    from area_dsi import interpolate_area_dsi
-    cur.execute(
-        """SELECT (settings->>'cost_per_mile')::float      AS cost_per_mile,
-                  COALESCE(settings->>'decision_mode', %s)  AS decision_mode
-           FROM app_private.driver_settings_new WHERE driver_id = %s""",
-        (DSI_MODE_TRADITIONAL, uid),
-    )
-    s = cur.fetchone() or {}
-    # The /decisions request does NOT carry the Uber card rates (only the community harvest
-    # path does). The SQL engine's computed hourlyRate/dollarsPerMile are always present and
-    # match the community surface (both ~ fare/time gross), so fall back to them when the card
-    # rates are absent — otherwise Personal DSI is silently null and DSI_ACTIVE no-ops.
-    ehr = ep.get("effective_hourly_rate")
-    if ehr is None:
-        ehr = basic_result.get("hourlyRate")
-    dpm = ep.get("dollars_per_mile")
-    if dpm is None:
-        dpm = basic_result.get("dollarsPerMile")
-    personal_dsi = compute_personal_dsi(ehr, dpm, s.get("cost_per_mile"))
-    _lat, _lng = ep.get("current_lat"), ep.get("current_lng")
-    # §thin-market gate (2026-06-18): trust the local-market bar only when the
-    # tight radar (get_price_radar ~1km) has >= MIN_MARKET_POINTS points; the 6km
-    # interpolate disk is ~always dense, so judge thinness on the tight count.
-    local_market_dsi = _gate_market_dsi(
-        interpolate_area_dsi(cur, _lat, _lng),
-        _radar_point_count(cur, _lat, _lng),
-    )
-    return _dsi_verdict(personal_dsi, local_market_dsi,
-                        s.get("decision_mode") or DSI_MODE_TRADITIONAL, basic_result)
-

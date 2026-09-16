@@ -2,7 +2,6 @@ from concurrent.futures import ThreadPoolExecutor
 # backend/decisions.py
 # VERSION: 8.0 - Added ocr_confidence storage
 import os
-import random
 import json
 import traceback
 import logging
@@ -20,19 +19,6 @@ from utils import verify_and_get_user_id, require_firebase_auth
 load_dotenv()
 decisions_bp = Blueprint('decisions', __name__)
 executor = ThreadPoolExecutor(max_workers=4)
-
-# ======================================================================
-# HELPER: Get Coordinates from Hex via SQL
-# ======================================================================
-def get_coords_from_hex(cur, hex_code):
-    cur.execute("""
-        SELECT 
-            app_private.h3_to_lat(%s) AS lat,
-            app_private.h3_to_lng(%s) AS lng
-    """, (hex_code, hex_code))
-    row = cur.fetchone()
-    if not row: return None
-    return {"lat": float(row['lat']), "lng": float(row['lng'])}
 
 # ======================================================================
 # ROUTES
@@ -78,87 +64,6 @@ def get_decision_history():
         if 'conn' in locals(): conn.close()
 
 
-@decisions_bp.route("/simulate-suite", methods=["POST"])
-@require_firebase_auth
-def simulate_test_suite():
-    try:
-        uid = verify_and_get_user_id(request)
-        p = request.get_json() or {}
-        market_id = p.get("marketId")
-
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        cur.execute("""
-            WITH driver_data AS (SELECT settings FROM app_private.driver_settings_new WHERE driver_id = %s),
-            target_market AS (SELECT elem FROM driver_data, jsonb_array_elements(settings->'markets') elem WHERE elem->>'id' = %s),
-            green_hexes AS (SELECT jsonb_array_elements_text(elem->'greenZones') as hex FROM target_market),
-            red_hexes AS (SELECT jsonb_array_elements_text(settings->'redZones') as hex FROM driver_data)
-            SELECT (SELECT array_agg(hex) FROM green_hexes) as green_list,
-                   (SELECT array_agg(hex) FROM red_hexes) as red_list
-        """, (uid, market_id))
-
-        data = cur.fetchone()
-        green_list = data.get('green_list') or []
-        red_list = data.get('red_list') or []
-        
-        if not green_list:
-            return jsonify({"error": "No Green Zones found."}), 400
-
-        g1_coords = get_coords_from_hex(cur, random.choice(green_list))
-        g2_coords = get_coords_from_hex(cur, random.choice(green_list))
-
-        archetypes = [
-            ("The Perfect Ride", "Green Zone, high pay.", 15.0, 5.0, 12.0, g2_coords),
-            ("The Lowball", "Green Zone, low pay.", 4.50, 5.0, 12.0, g2_coords),
-            ("The Deadhead Trap", "Drops you 25 miles away.", 22.0, 25.0, 35.0, None)
-        ]
-
-        if red_list:
-            r_coords = get_coords_from_hex(cur, random.choice(red_list))
-            archetypes.append(("Safety Hazard", "Ends in your Red Zone.", 25.0, 6.0, 15.0, r_coords))
-
-        suite_results = []
-        for title, desc, fare, miles, minutes, target in archetypes:
-            d_lat = target['lat'] if target else (g1_coords['lat'] + 0.35)
-            d_lng = target['lng'] if target else g1_coords['lng']
-            
-            cur.execute("""
-                SELECT * FROM app_private.decision_engine_v2(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (uid, g1_coords['lat'], g1_coords['lng'], d_lat, d_lng, fare, miles, minutes, 3.0, 1.0, market_id))
-            row = cur.fetchone()
-            
-            suite_results.append({
-                "title": title,
-                "description": desc,
-                "inputValues": {
-                    "marketId": market_id, "lat": g1_coords['lat'], "lng": g1_coords['lng'],
-                    "dropoffLat": d_lat, "dropoffLng": d_lng, "fare": fare,
-                    "tripMiles": miles, "tripMinutes": minutes, "pickupMinutes": 3.0
-                },
-                "result": {
-                    "verdict": row['verdict'],
-                    "reason": row['reason'],
-                    "netPay": float(row['net_pay']),
-                    "hourlyRate": float(row['hourly_rate']),
-                    "deadheadCost": float(row['deadhead_cost'])
-                }
-            })
-
-        return jsonify({"suite": suite_results}), 200
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if 'conn' in locals(): conn.close()
-
-# decisions_pipeline.py
-# Pipeline stage functions for decisions.py refactor.
-# Inserted before make_decision() by patch_decisions.py.
-# VERSION: 9.0 - Pipeline architecture
-
-# ── Pipeline sub-modules ──────────────────────────────────────────────
 from .engine                 import run_decision_engine
 from .logger                 import log_decision, patch_decision_log
 from .triangulation_enricher import enrich_with_triangulation
