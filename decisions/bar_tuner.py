@@ -59,6 +59,11 @@ SHIFT_GAP_SECONDS = 60 * 60          # a gap longer than this between offers sta
 # $17 row read $13.21 between $11.77 at $16 and $12.04 at $18, and would have told
 # a driver to raise their bar on noise.
 SMOOTH_WINDOW = 1.0
+# Bars whose smoothed $/online hour is within this of the top are treated as tied. With a
+# minimum on-screen gross in force the curve is often dead flat below the bar (on 2026-09-16
+# every bar from $8 to $13 replayed to the same 102 rides), and "ties go low" then
+# recommended an $8 bar that changes nothing. Ties now go to the bar nearest the driver's own.
+BEST_TIE_TOLERANCE = 0.05
 BARS = [b / 2 for b in range(16, 61)]  # $8.00 .. $30.00 in $0.50 steps
 DUP_NEAR_SECONDS = 3 * 60             # same fare, near-same miles/minutes within this = one offer
 DUP_NEAR_MILES = 1.0
@@ -219,9 +224,13 @@ def tuner(offers: list[dict], cost_per_mile: float, current_bar: float | None,
         r["perOnlineHourSmoothed"] = round(sum(near) / len(near), 2)
     best = None
     if rows:
-        # Highest SMOOTHED dollars per online hour; ties go to the LOWER bar, which
-        # takes more rides for the same money and so carries less risk.
-        best = max(rows, key=lambda r: (r["perOnlineHourSmoothed"], -r["bar"]))["bar"]
+        # Highest SMOOTHED dollars per online hour. Bars within BEST_TIE_TOLERANCE of the top
+        # are tied; among them prefer the one nearest the driver's current bar (a flat stretch
+        # is no reason to move), then the lower bar.
+        top = max(r["perOnlineHourSmoothed"] for r in rows)
+        tied = [r for r in rows if top - r["perOnlineHourSmoothed"] <= BEST_TIE_TOLERANCE + 1e-9]
+        anchor = current_bar if current_bar is not None else tied[0]["bar"]
+        best = min(tied, key=lambda r: (abs(r["bar"] - anchor), r["bar"]))["bar"]
     return {
         "costPerMile": cost_per_mile,
         "currentBar": current_bar,

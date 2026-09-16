@@ -175,11 +175,25 @@ def test_enough_data_returns_one_row_per_bar_in_order():
     assert body["currentBar"] == 14.0 and body["costPerMile"] == 0.18
 
 
-def test_best_bar_is_the_highest_smoothed_value_and_ties_go_low():
+def test_best_bar_is_within_tolerance_of_the_top_and_nearest_the_current_bar():
     body = tuner(many_shifts(), 0.18, 14.0)
     top = max(r["perOnlineHourSmoothed"] for r in body["rows"])
-    lowest_top = min(r["bar"] for r in body["rows"] if r["perOnlineHourSmoothed"] == top)
-    assert body["bestBar"] == lowest_top
+    tied = [r["bar"] for r in body["rows"] if top - r["perOnlineHourSmoothed"] <= 0.05 + 1e-9]
+    assert body["bestBar"] == min(tied, key=lambda b: (abs(b - 14.0), b))
+
+
+def test_a_flat_stretch_does_not_recommend_the_lowest_bar(monkeypatch):
+    # $8-$13 identical (what an $18 minimum does to real data), $14 a little lower.
+    import decisions.bar_tuner as bt
+    def fake_replay(shifts, cost, bar, gross_floor=0.0):
+        v = 15.14 if bar <= 13.0 else 14.0
+        return {"bar": bar, "passPct": 50, "rides": 10, "net": 100.0, "busyHours": 5.0,
+                "onlineHours": 8.0, "perOnlineHour": v, "perBusyHour": 20.0}
+    monkeypatch.setattr(bt, "replay", fake_replay)
+    # Smoothing averages $1 either side, so $12.50-$13 blend in the lower $14 values; $12 is
+    # the tied bar nearest $14. Before this rule the answer was $8.
+    assert bt.tuner(many_shifts(), 0.18, 14.0)["bestBar"] == 12.0
+    assert bt.tuner(many_shifts(), 0.18, 10.0)["bestBar"] == 10.0     # already on the flat
 
 
 def test_smoothing_averages_the_bars_within_the_window():
