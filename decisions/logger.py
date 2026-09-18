@@ -114,6 +114,9 @@ def log_decision(cur, conn, uid, params, ep, result):
                     WHERE dl.driver_id = %s
                       AND oh.expected_dropoff_arrival_time IS NOT NULL
                       AND oh.actual_pickup_at IS NOT NULL
+                      -- Pooled rows no longer store coordinates (2026-09-18); a row
+                      -- without them cannot build a TargetSpec.
+                      AND oh.dropoff_lat IS NOT NULL AND oh.dropoff_lng IS NOT NULL
                       AND oh.actual_dropoff_at IS NULL
                       AND {LIVE_OFFER_PREDICATE_SQL}
                     ORDER BY oh.created_at DESC
@@ -422,17 +425,21 @@ def log_decision(cur, conn, uid, params, ep, result):
                     EXTRACT(DOW  FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
                     EXTRACT(HOUR FROM NOW() AT TIME ZONE 'America/Chicago')::smallint,
                     %s,
-                    %s, %s, app_private.safe_h3(%s, %s),
-                    %s, %s, app_private.safe_h3(%s, %s), %s,
+                    -- offer_history is pooled and carries no driver column, so it keeps
+                    -- the ~0.5 km H3 cell and never the coordinate itself (2026-09-18).
+                    -- The driver's own coordinates stay in decision_log, which IS keyed
+                    -- to them. Existing rows were cleared in the same change.
+                    NULL, NULL, app_private.safe_h3(%s, %s),
+                    NULL, NULL, app_private.safe_h3(%s, %s), %s,
                     %s, %s,
-                    %s, %s, app_private.safe_h3(%s, %s), %s,
+                    NULL, NULL, app_private.safe_h3(%s, %s), %s,
                     %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s,
                     %s, %s, %s, %s,
                     %s,
                     %s,
-                    %s, %s,
+                    NULL, NULL,
                     %s,
                     %s, %s,
                     %s, %s,
@@ -440,12 +447,11 @@ def log_decision(cur, conn, uid, params, ep, result):
                 )
             """, (
                 decision_log_id,
-                ep["current_lat"], ep["current_lng"],
-                ep["current_lat"], ep["current_lng"],
-                ep["p_lat"], ep["p_lng"], ep["p_lat"], ep["p_lng"],
+                ep["current_lat"], ep["current_lng"],          # driver_h3 only
+                ep["p_lat"], ep["p_lng"],                      # pickup_h3 only
                 ep["pickup_address"],
                 ep["pickup_miles"], ep["pickup_min"],
-                ep["d_lat"], ep["d_lng"], ep["d_lat"], ep["d_lng"],
+                ep["d_lat"], ep["d_lng"],                      # dropoff_h3 only
                 ep["dropoff_address"],
                 ep["trip_miles"], ep["trip_min"],
                 ep["fare"], ep["ride_type"],
@@ -456,7 +462,6 @@ def log_decision(cur, conn, uid, params, ep, result):
                 # Sprint A gate-layer additions:
                 ep.get("cumulative_miles"),                    # leg_start_cumulative_miles_pickup
                 ep.get("cumulative_miles"),                    # miles_at_offer_receipt (same source)
-                ep.get("current_lat"), ep.get("current_lng"),  # lat/lng_at_offer_receipt
                 compute_dsi_v1(_safe_numeric(result.get("hourlyRate")), _safe_numeric(result.get("dollarsPerMile"))),  # dsi_v1 (observational; NULL-strict)
                 expected_pickup_dist,  # expected_odometer (band center == expected_pickup_distance, or NULL)
                 (ODOMETER_STATUS_DEFERRED if expected_pickup_dist is None else ODOMETER_STATUS_ACTIVE),  # §9 deferred-sentinel status

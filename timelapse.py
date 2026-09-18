@@ -67,8 +67,13 @@ def get_time_grid():
             HAVING count(*) >= %s
             ORDER BY day_of_week, hour_of_day
         """.format(scope_clause=(
-            "AND pickup_lat IS NOT NULL AND pickup_lng IS NOT NULL "
-            "AND app_private.distance_miles(pickup_lat, pickup_lng, %s, %s) <= %s"
+            # Scope by the stored H3 cell's centre, not by a stored coordinate:
+            # offer_history is pooled, so it keeps cells only (2026-09-18). point[1]
+            # is the latitude and point[0] the longitude.
+            "AND pickup_h3 IS NOT NULL "
+            "AND app_private.distance_miles("
+            "  (h3_cell_to_latlng(pickup_h3::h3index))[1], "
+            "  (h3_cell_to_latlng(pickup_h3::h3index))[0], %s, %s) <= %s"
             if scoped else ""
         ), copy_clause=not_a_copy("c", "app_private.offer_history")), (([lat, lng, radius_mi] if scoped else []) + [min_samples]))
 
