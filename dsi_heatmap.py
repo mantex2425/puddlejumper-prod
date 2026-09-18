@@ -2,10 +2,22 @@
 
 GET /api/v1/dsi/heatmap?lat=&lng=&radiusMiles=  ->  GeoJSON FeatureCollection of the
 res-8 H3 cells in the driver's metro that ACTUALLY have scored offers, each carrying a
-time-weighted Drive Score Index, how many offers back it, and a RELATIVE colour tier.
-Tiers are percentiles of the current spread across the metro (purple = top quartile
-here-and-now, green, orange, yellow = bottom), so purple means best-around-here-right-
-now rather than a fixed DSI value.
+time-weighted GROSS $/hr (`grossHourly`), how many offers back it, and a RELATIVE colour
+tier. Tiers are percentiles of the current spread across the metro (purple = top quartile
+here-and-now, green, orange, yellow = bottom), so purple means best-around-here-right-now
+rather than a fixed dollar value.
+
+CHANGED 2026-09-18, twice over:
+  * Source is `app_private.offer_history`, not `public.community_offers`. The pooled
+    community rows compute their cell from coordinates the APP sends, and the app stopped
+    sending them on 2026-08-19 ("the server geocodes from addresses"), so safe_h3(NULL,
+    NULL) left 1,510 of 2,161 rows with no cell and the map froze at that date.
+    offer_history takes its cell from the server-side geocode and never stopped.
+  * The weighted value is the offer's gross $/hr, not `dsi_v1`. dsi_v1 is the retired
+    weighted index -- not dollars, and never shown to a driver. Gross $/hr is the same
+    number the frog shows, so a cell now means "offers around here have paid about this".
+    The property is `grossHourly`; the old `dsi` property is gone (clients colour by
+    `tier`, which is unchanged).
 
 CHANGED 2026-09-14. This used to render a fixed hexagonal disk of cells (k rings,
 default 8) centred on the driver and FILL every cell in it by spatial IDW from offers
@@ -44,14 +56,17 @@ WITH params AS (
 surface AS (
     -- Every scored offer in the driver's metro. §6 read-filter unchanged: drop
     -- capture-error junk (ehr/dpm <= 0), keep negative dsi.
-    SELECT co.pickup_h3::h3index AS cell, co.dsi_v1,
+    SELECT co.pickup_h3::h3index AS cell, co.effective_hourly_rate AS gross_hourly,
            EXTRACT(hour FROM co.created_at AT TIME ZONE 'America/Chicago')::int       AS oh,
            (EXTRACT(dow FROM co.created_at AT TIME ZONE 'America/Chicago')::int IN (0, 6)) AS owe
-    FROM public.community_offers co
-    WHERE co.dsi_v1 IS NOT NULL
-""" + not_a_copy("co", "public.community_offers") + """
+    FROM app_private.offer_history co
+    WHERE co.effective_hourly_rate IS NOT NULL
+""" + not_a_copy("co", "app_private.offer_history") + """
       AND co.pickup_h3 IS NOT NULL
       AND co.effective_hourly_rate > 0
+      -- Same sanity band as the Time Grid: above this is a capture error, not a fare.
+      -- Every cell over $60/hr in the first run off real data was a single offer.
+      AND co.effective_hourly_rate < 150
       AND co.dollars_per_mile > 0
       -- NOT h3_grid_distance: it raises (h3 err 1) on far cells.
       AND app_private.distance_miles(
@@ -64,7 +79,7 @@ cells AS (
     -- before (nearer hour and same weekday/weekend type count for more), so the
     -- colours still mean "for now" - but with no spatial fill between cells.
     SELECT s.cell,
-           sum(s.dsi_v1 * w.weight) / NULLIF(sum(w.weight), 0) AS dsi,
+           sum(s.gross_hourly * w.weight) / NULLIF(sum(w.weight), 0) AS dsi,
            count(*) AS pts
     FROM surface s
     CROSS JOIN params p
@@ -102,7 +117,7 @@ SELECT json_build_object(
         'geometry', ST_AsGeoJSON(h3_cell_to_boundary(c.cell)::geometry)::json,
         'properties', json_build_object(
             'h3', c.cell::text,
-            'dsi', round(c.dsi::numeric, 1),
+            'grossHourly', round(c.dsi::numeric, 2),
             'points', c.pts,
             'confidence', CASE WHEN c.pts >= 5 THEN 'high'
                                WHEN c.pts >= 2 THEN 'medium'
