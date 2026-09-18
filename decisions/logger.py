@@ -430,9 +430,12 @@ def log_decision(cur, conn, uid, params, ep, result):
                     -- The driver's own coordinates stay in decision_log, which IS keyed
                     -- to them. Existing rows were cleared in the same change.
                     NULL, NULL, app_private.safe_h3(%s, %s),
-                    NULL, NULL, app_private.safe_h3(%s, %s), %s,
+                    -- ...and no address either: the policy promises the pool holds
+                    -- neither coordinates nor addresses, and nothing reads these
+                    -- (Time Grid and market rate work off the cell). 2026-09-18.
+                    NULL, NULL, app_private.safe_h3(%s, %s), NULL,
                     %s, %s,
-                    NULL, NULL, app_private.safe_h3(%s, %s), %s,
+                    NULL, NULL, app_private.safe_h3(%s, %s), NULL,
                     %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s,
@@ -449,10 +452,8 @@ def log_decision(cur, conn, uid, params, ep, result):
                 decision_log_id,
                 ep["current_lat"], ep["current_lng"],          # driver_h3 only
                 ep["p_lat"], ep["p_lng"],                      # pickup_h3 only
-                ep["pickup_address"],
                 ep["pickup_miles"], ep["pickup_min"],
                 ep["d_lat"], ep["d_lng"],                      # dropoff_h3 only
-                ep["dropoff_address"],
                 ep["trip_miles"], ep["trip_min"],
                 ep["fare"], ep["ride_type"],
                 ep["is_surge"], ep["is_priority"], ep["is_reserve"],
