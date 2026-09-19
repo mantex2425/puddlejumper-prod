@@ -16,7 +16,13 @@ gcloud run deploy puddlejumper-api \
   --vpc-connector puddle-bridge \
   --vpc-egress private-ranges-only \
   --min-instances=0 \
-  --max-instances=1 \
+  # 1 -> 5 on 2026-09-19, before inviting testers. A ceiling, not a reservation: with
+  # min-instances=0 nothing runs (or bills) while nobody is driving, and Cloud Run only
+  # starts a second container when requests actually overlap. At ~1.5s per scoring request
+  # that is about 4 cents a day per thousand offers. One instance with four threads was
+  # fine for one driver; offers arrive in bursts, and a driver who waits four seconds for
+  # a verdict stops trusting it.
+  --max-instances=5 \
   --cpu-throttling
 
 # 3. Force traffic to the new revision.
