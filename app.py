@@ -249,57 +249,9 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5001))
     app.run(host="0.0.0.0", port=port)
 
-@app.route("/contest/label", methods=["POST"])
-def contest_label():
-    """Contest Mode (Rev 00557): driver taps PICKUP/DROPOFF/TRAFFIC/OTHER
-    on the iPhone monitor app. Body: {"label": str, "label_time": int_ms}.
-    Firebase auth mirrors /api/v1/preferences pattern."""
-    from firebase import get_firebase_app
-    from db import get_db
-    from psycopg2.extras import RealDictCursor
-    from utils import verify_and_get_user_id
-    import logging
-    from datetime import datetime, timezone
-
-    get_firebase_app()
-
-    try:
-        uid = verify_and_get_user_id(request)
-    except Exception as e:
-        logging.warning(f"[CONTEST/LABEL] auth failed: {e}")
-        return jsonify({"error": "unauthorized"}), 401
-
-    body = request.get_json(silent=True) or {}
-    label = body.get("label")
-    label_time_ms = body.get("label_time")
-
-    valid_labels = {"pickup", "dropoff", "traffic", "other"}
-    if label not in valid_labels:
-        return jsonify({"error": f"label must be one of {sorted(valid_labels)}"}), 400
-    if not isinstance(label_time_ms, (int, float)):
-        return jsonify({"error": "label_time must be epoch milliseconds"}), 400
-
-    try:
-        label_dt = datetime.fromtimestamp(label_time_ms / 1000.0, tz=timezone.utc)
-        conn = get_db()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                INSERT INTO app_private.contest_labels (driver_id, label, label_time)
-                VALUES (%s, %s, %s)
-                RETURNING label_id
-            """, (uid, label, label_dt))
-            row = cur.fetchone()
-            # 2026-08-20: the event-ledger dual-write is REMOVED with the PUDO
-            # stack. It emitted a ground_truth_tap event joining driver_trip_state
-            # and heartbeat_log -- both part of the detection apparatus 2.0 drops.
-            # The contest_labels INSERT above is retained; it stands alone.
-            conn.commit()
-            logging.info(f"[CONTEST/LABEL] {uid[:8]}... {label} @ {label_dt}")
-            return jsonify({"label_id": row["label_id"], "status": "ok"}), 200
-    except Exception as e:
-        logging.exception(f"[CONTEST/LABEL] insert failed: {e}")
-        return jsonify({"error": "internal"}), 500
-
+# The /contest/label endpoint and app_private.contest_labels were removed on
+# 2026-09-19: PUDO-era ground-truth labelling, last written 2026-06-18, and no
+# client ever called it (the Android side keeps only a stale "Nail It" comment).
 
 @app.route("/api/v1/freestyle-preview", methods=["GET"])
 def get_freestyle_preview_route():

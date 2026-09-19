@@ -56,7 +56,11 @@ def delete_account():
                 """, (driver_id,))
                 settings_deleted = cur.rowcount
                 logger.info(f"Deleted {settings_deleted} settings record(s)")
-                
+
+                # Step 2b: every other table that names this driver (2026-09-19).
+                purged = _purge_driver_rows(cur, driver_id)
+                logger.info(f"Purged driver rows: {purged or 'none'}")
+
                 conn.commit()
                 
         finally:
@@ -79,6 +83,7 @@ def delete_account():
             'details': {
                 'rides_anonymized': rides_anonymized,
                 'settings_deleted': settings_deleted,
+                'rows_purged': purged,
                 'auth_deleted': firebase_deleted
             }
         }), 200
@@ -86,6 +91,37 @@ def delete_account():
     except Exception as e:
         logger.error(f"Account deletion error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+
+# Every table that carries a driver's identifier, and what deletion does with it.
+#
+# Until 2026-09-19 deletion touched two of these: decision_log (de-identified) and
+# driver_settings_new (deleted). The driver's Firebase UID stayed behind in every other
+# table -- a survey that day found twelve, including 794k location-bearing heartbeat rows.
+# The dead ones were dropped; these are what remain, and the sweep below clears them all.
+#
+# decision_log is DE-IDENTIFIED, not deleted: the offer economics stay in the shared market
+# data with nothing tying them to a person, exactly as the privacy policy describes. Add any
+# new table with a driver column to this list, or deletion silently stops being complete.
+_PURGE_TABLES = (
+    ("app_private.crash_reports", "driver_id"),
+    ("app_private.driver_active_market", "driver_id"),
+    ("app_private.driver_trip_state", "driver_id"),
+    ("public.driver_markets", "driver_id"),
+    ("public.markets", "driver_id"),
+    ("public.referral_codes", "user_id"),
+)
+
+
+def _purge_driver_rows(cur, driver_id):
+    """Delete every row keyed to this driver. Returns {table: rows deleted}."""
+    deleted = {}
+    for table, column in _PURGE_TABLES:
+        cur.execute(f"DELETE FROM {table} WHERE {column} = %s", (driver_id,))
+        if cur.rowcount:
+            deleted[table] = cur.rowcount
+    return deleted
 
 
 @account_bp.route('/delete-account', methods=['GET'])
