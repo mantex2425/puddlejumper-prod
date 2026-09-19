@@ -22,8 +22,17 @@ from db import get_db
 
 smoke_bp = Blueprint("smoke", __name__)
 
-# Not a Firebase uid, so it can never collide with a real driver.
-SMOKE_UID = "pj-smoke-test-not-a-driver"
+# The engine scores against a driver's own settings, and driver_settings_new has a foreign
+# key to the auth users table, so an invented uid cannot have settings: it short-circuits
+# to a 0.00/hr DECLINE, which would still pass a shape-only check while real scoring was
+# broken. So borrow an existing account's settings for the dry run instead. Nothing is
+# written -- the transaction is rolled back -- and no row is read that the driver could
+# not read themselves.
+_SETTINGS_OWNER_SQL = """
+    SELECT driver_id FROM app_private.driver_settings_new
+    WHERE settings ? 'dsi_threshold' AND settings ? 'cost_per_mile'
+    ORDER BY driver_id LIMIT 1
+"""
 
 # A dull, unambiguous offer: $18.50, 6.2 miles, 21 minutes, 2 miles of pickup. Any engine
 # that works at all returns a verdict for it. We assert the SHAPE, not the verdict, so a
@@ -59,13 +68,21 @@ def smoke_decision():
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        params = parse_request(dict(CANNED_OFFER), SMOKE_UID)
-        result, _trace, _ep = run_decision_engine(cur, conn, SMOKE_UID, params)
+        cur.execute(_SETTINGS_OWNER_SQL)
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "no account with settings to score against"}), 500
+        uid = row["driver_id"]
+
+        params = parse_request(dict(CANNED_OFFER), uid)
+        result, _trace, _ep = run_decision_engine(cur, conn, uid, params)
         conn.rollback()  # nothing this endpoint touches is kept
 
         verdict = (result or {}).get("verdict")
         rate = (result or {}).get("hourlyRate")
-        ok = bool(verdict) and rate is not None
+        # A rate of exactly 0 means the engine short-circuited before doing arithmetic --
+        # the failure mode a shape-only assertion would wave through.
+        ok = bool(verdict) and isinstance(rate, (int, float)) and rate > 0
         payload = {
             "ok": ok,
             "verdict": verdict,
