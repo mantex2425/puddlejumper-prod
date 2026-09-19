@@ -44,8 +44,11 @@ CANNED_OFFER = {
 
 @smoke_bp.route("/internal/smoke/decision", methods=["GET"])
 def smoke_decision():
-    expected = os.environ.get("SMOKE_TOKEN")
-    if not expected or request.headers.get("X-Smoke-Token") != expected:
+    # .strip() both sides: a secret created from a file keeps its trailing newline, while
+    # $(gcloud secrets versions access) drops it, so the two never matched (2026-09-19).
+    expected = (os.environ.get("SMOKE_TOKEN") or "").strip()
+    supplied = (request.headers.get("X-Smoke-Token") or "").strip()
+    if not expected or supplied != expected:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
     # Imported here for the same reason the bug existed: this must exercise the real
