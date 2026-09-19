@@ -41,6 +41,7 @@ from account import account_bp
 from referrals import referrals_bp
 from crash_reports import crash_reports_bp
 from timelapse import timelapse_bp
+from smoke import smoke_bp
 from driver_debug import driver_debug_bp
 
 app.register_blueprint(markets_bp)
@@ -65,6 +66,7 @@ app.register_blueprint(account_bp, url_prefix='/api/v1/account')
 app.register_blueprint(referrals_bp, url_prefix='/api/v1/referrals')
 app.register_blueprint(crash_reports_bp)
 app.register_blueprint(timelapse_bp, url_prefix="/api/v1")
+app.register_blueprint(smoke_bp)
 
 
 # --------------------------------------------------------------
@@ -78,6 +80,9 @@ def require_auth_globally():
         "/api/v1/account/request-deletion",
         "/.well-known/apple-app-site-association",
         "/internal/monitor",
+        # Token-protected (X-Smoke-Token); deploy.sh calls it to prove the decision
+        # path actually runs after a deploy, not just that the process booted.
+        "/internal/smoke/decision",
     }
     
     if request.method == "OPTIONS" or request.path in public_paths or request.path.startswith("/h/"):
