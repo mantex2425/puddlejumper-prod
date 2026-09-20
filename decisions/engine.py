@@ -223,6 +223,15 @@ def run_decision_engine(cur, conn, uid, params):
             # 100 the accept line. Computed in the engine, never on the device, so the frog,
             # the voice, the Decisions Log and history can never disagree about the number.
             "dsiScore":             int(_v3_trace["dsiScore"]) if _v3_trace.get("dsiScore") is not None else None,
+            # THE RECIPE, for the trust drawer (2026-09-20). With the dollars off the glass,
+            # a driver who doubts a score needs somewhere to check it -- every figure the
+            # engine used, in the order the arithmetic runs, so 107 is auditable rather than
+            # a game mechanic. Display only; nothing here decides anything.
+            "recipeFare":           float(_v3_trace["fare"]) if _v3_trace.get("fare") is not None else None,
+            "recipeCommittedMiles": float(_v3_trace["committedMiles"]) if _v3_trace.get("committedMiles") is not None else None,
+            "recipeCommittedMins":  float(_v3_trace["committedMinutes"]) if _v3_trace.get("committedMinutes") is not None else None,
+            "recipeMph":            float(_v3_trace["committedMph"]) if _v3_trace.get("committedMph") is not None else None,
+            "recipeCostPerMile":    float(_v3_trace["costPerMileUsed"]) if _v3_trace.get("costPerMileUsed") is not None else None,
             "grossHourlyUsd":       float(_v3_trace["grossHourlyShown"]) if _v3_trace.get("grossHourlyShown") is not None else None,
             "neededGrossHourlyUsd": float(_v3_trace["neededGrossHourly"]) if _v3_trace.get("neededGrossHourly") is not None else None,
             "needsShown":           bool(_v3_trace.get("needsShown") or False),
@@ -282,6 +291,11 @@ def engine_error_result(fare):
         "dsiThreshold":         None,
         "dsiFormula":           None,
         "dsiScore":             None,
+        "recipeFare":           None,
+        "recipeCommittedMiles": None,
+        "recipeCommittedMins":  None,
+        "recipeMph":            None,
+        "recipeCostPerMile":    None,
         "grossHourlyUsd":       None,
         "neededGrossHourlyUsd": None,
         "needsShown":           False,
