@@ -41,7 +41,21 @@ def get_decision_history():
                 pickup_lat as "pickupLat", pickup_lng as "pickupLng", 
                 dropoff_lat as "dropoffLat", dropoff_lng as "dropoffLng", 
                 ping_h3_index as "pingH3Index", market_id as "marketId",
-                decision_result as "decisionResult"
+                decision_result as "decisionResult",
+                -- The recipe behind each score, for the trust drawer (2026-09-20). The frog
+                -- overlay is FLAG_NOT_TOUCHABLE on purpose -- it must not intercept a tap
+                -- meant for Uber's own accept button -- so the place a driver can open the
+                -- arithmetic is here, parked, for any past offer rather than only the last.
+                trip_miles as "tripMiles", pickup_miles as "pickupMiles",
+                (trace_data->>'dsiScore')::int          as "dsiScore",
+                (trace_data->>'committedMiles')::float  as "committedMiles",
+                (trace_data->>'committedMinutes')::float as "committedMinutes",
+                (trace_data->>'committedMph')::float    as "committedMph",
+                (trace_data->>'costPerMileUsed')::float as "costPerMile",
+                (trace_data->>'neededGrossHourly')::float as "neededGrossHourly",
+                (trace_data->>'grossHourlyShown')::float  as "grossHourlyShown",
+                trace_data->'raw_ocr'->>'pickup_loc'   as "pickupLabel",
+                trace_data->'raw_ocr'->>'dropoff_loc'  as "dropoffLabel"
             FROM app_private.decision_log
             WHERE driver_id = %s
             ORDER BY created_at DESC
