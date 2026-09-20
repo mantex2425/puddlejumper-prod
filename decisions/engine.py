@@ -219,6 +219,10 @@ def run_decision_engine(cur, conn, uid, params):
             # "needs" line is worth showing (gap >= 50c), and whether a threshold
             # decline was a rate miss or the modeled return leg. Display only; the
             # verdict above is DSI.
+            # The DSI the driver sees: shown gross over what THIS trip needed, x100, with
+            # 100 the accept line. Computed in the engine, never on the device, so the frog,
+            # the voice, the Decisions Log and history can never disagree about the number.
+            "dsiScore":             int(_v3_trace["dsiScore"]) if _v3_trace.get("dsiScore") is not None else None,
             "grossHourlyUsd":       float(_v3_trace["grossHourlyShown"]) if _v3_trace.get("grossHourlyShown") is not None else None,
             "neededGrossHourlyUsd": float(_v3_trace["neededGrossHourly"]) if _v3_trace.get("neededGrossHourly") is not None else None,
             "needsShown":           bool(_v3_trace.get("needsShown") or False),
@@ -277,6 +281,7 @@ def engine_error_result(fare):
         "thresholdSource":      "engine_error",
         "dsiThreshold":         None,
         "dsiFormula":           None,
+        "dsiScore":             None,
         "grossHourlyUsd":       None,
         "neededGrossHourlyUsd": None,
         "needsShown":           False,
